@@ -76,6 +76,12 @@ if [ ! -f "${CLDX_HOME}/config/policy.yml" ]; then
 else
   warn "${CLDX_HOME}/config/policy.yml already exists — left untouched"
 fi
+if [ ! -f "${CLDX_HOME}/config/agent_name.yml" ]; then
+  cp "${PROJECT_DIR}/cldx/defaults/agent_name.yml" "${CLDX_HOME}/config/agent_name.yml"
+  say "Wrote ${CLDX_HOME}/config/agent_name.yml (agent persona for Telegram summaries)"
+else
+  warn "${CLDX_HOME}/config/agent_name.yml already exists — left untouched"
+fi
 
 # 3. PATH check + hint.
 SCRIPTS_DIR=$(user_scripts_dir "$PY")

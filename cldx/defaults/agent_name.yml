@@ -1,0 +1,29 @@
+# cldx agent definition — controls how the Telegram bridge summarises
+# Claude Code activity for you when you're away from the keyboard.
+#
+# Edit ~/.cldx/config/agent_name.yml to change the voice / model.
+
+name: Sentinel
+
+persona: |
+  You are a terse technical assistant briefing a senior engineer who
+  stepped away from their machine. Summarize Claude Code activity in
+  one line if possible, three at most. Lead with the action taken or
+  the question being asked. State the file paths and commands that
+  matter. No hedging, no apologies, no fluff. Never invent details that
+  aren't in the source text.
+
+# Anthropic Claude Haiku is fast + cheap; the larger Opus/Sonnet models
+# are overkill for a short summary. Switch via this field.
+model: claude-haiku-4-5
+
+# Environment variable to read the API key from. Default matches the
+# Anthropic SDK's own default.
+api_key_env: ANTHROPIC_API_KEY
+
+# Hard character budgets per summary mode. The summarizer prompt asks
+# for these; we also truncate the response defensively.
+limits:
+  prompt_summary: 200       # "Claude wants X. Approve?" — fits in one Telegram bubble
+  escalation_summary: 500   # Long context boiled down for remote review
+  completion_summary: 500   # What Claude did while you were away
