@@ -41,6 +41,7 @@ from cldx.policy_engine import (
 from cldx.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
 from cldx.session_picker import SessionPickerError, list_panes, pick_session
 from cldx.session_store import SessionStore
+from cldx.memory import Memory, normalize_pattern
 from cldx.tmux_controller import TmuxController
 from cldx.tmux_monitor import TmuxMonitor
 from cldx.wait_bar import countdown_wait
@@ -153,6 +154,11 @@ class BridgeUI:
         # Phase 3: signal that's set whenever the user types something while
         # a wait-bar is counting down. `None` outside of a wait epoch.
         self._wait_event: asyncio.Event | None = None
+
+        # Phase 5: persistent memory of yolo-learned patterns. Attached to
+        # the policy engine so its decide() can short-circuit on hits.
+        self.memory = Memory(destructive_patterns=policy.destructive_patterns)
+        policy.memory = self.memory
 
     # --- printing (safe under patch_stdout) ---
 
@@ -296,6 +302,19 @@ class BridgeUI:
             return
         await self._fire_auto(prompt, action)
 
+    def _learn_from_user(self, prompt: ClassifiedPrompt, approve: bool) -> None:
+        """Phase 5: in yolo profile, remember the user's decision."""
+        if self.policy.active_profile_name != "yolo":
+            return
+        pattern = normalize_pattern(prompt.extracted_command)
+        if pattern is None:
+            return
+        stored = self.memory.learn(approve, pattern, "yolo")
+        if stored:
+            verb = "approved" if approve else "denied"
+            self.log(f"[dim]yolo learned: {verb} {pattern!r} → future matches auto-fire[/dim]")
+            self.store.log_event("yolo_learn", pattern=pattern, approved=approve)
+
     async def _fire_auto(self, prompt: ClassifiedPrompt, action: str) -> None:
         if action == "yes":
             outcome = await _act_yes(self.controller, prompt)
@@ -371,6 +390,7 @@ class BridgeUI:
                     outcome = await _act_yes(self.controller, pending)
                 self.log(f"[green]→ {outcome}[/green]  (you said yes)")
                 self.store.log_action(keys=outcome, source="user_terminal")
+                self._learn_from_user(pending, approve=True)
                 self.pending = None
                 self._update_prompt_label()
                 return
@@ -379,6 +399,7 @@ class BridgeUI:
                     outcome = await _act_no(self.controller, pending)
                 self.log(f"[red]→ {outcome}[/red]  (you said no)")
                 self.store.log_action(keys=outcome, source="user_terminal")
+                self._learn_from_user(pending, approve=False)
                 self.pending = None
                 self._update_prompt_label()
                 return

@@ -54,12 +54,17 @@ class PolicyEngine:
         4. profile's `default_action`
     """
 
-    def __init__(self, policy_path: str | Path, profile_override: str | None = None):
+    def __init__(self, policy_path: str | Path, profile_override: str | None = None,
+                 memory=None):
         self.policy_path = Path(policy_path)
         if not self.policy_path.exists():
             raise PolicyEngineError(f"policy file not found: {self.policy_path}")
         with self.policy_path.open() as f:
             self.config: dict = yaml.safe_load(f) or {}
+
+        # Optional Memory instance (Phase 5). Used by the yolo profile to
+        # short-circuit decisions on learned patterns.
+        self.memory = memory
 
         profile_name = profile_override or self.config.get("active_profile", "default")
         profiles = self.config.get("profiles", {})
@@ -107,6 +112,34 @@ class PolicyEngine:
         haystack = self._haystack(prompt)
         destructive_match = self._first_match(self._destructive, haystack)
         is_destructive = destructive_match is not None
+
+        # Phase 5: yolo profile short-circuits on learned patterns.
+        if (
+            self.active_profile_name == "yolo"
+            and self.memory is not None
+            and not is_destructive
+        ):
+            from cldx.memory import normalize_pattern  # local import to avoid cycle
+            normalized = normalize_pattern(prompt.extracted_command)
+            if normalized:
+                if self.memory.is_denied(normalized, "yolo"):
+                    return DecisionResult(
+                        decision=PolicyDecision.AUTO_NO,
+                        profile=self.active_profile_name,
+                        matched_pattern=normalized,
+                        reason="yolo memory: denied",
+                        wait_interval_seconds=0.0,
+                        is_destructive=False,
+                    )
+                if self.memory.is_approved(normalized, "yolo"):
+                    return DecisionResult(
+                        decision=PolicyDecision.AUTO_YES,
+                        profile=self.active_profile_name,
+                        matched_pattern=normalized,
+                        reason="yolo memory: approved",
+                        wait_interval_seconds=self.wait_interval_seconds,
+                        is_destructive=False,
+                    )
 
         match = self._first_match(self._auto_deny, haystack)
         if match:
