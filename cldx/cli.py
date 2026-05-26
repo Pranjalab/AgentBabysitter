@@ -42,9 +42,10 @@ from cldx.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptTyp
 from cldx.session_picker import SessionPickerError, list_panes, pick_session
 from cldx.session_store import SessionStore
 from cldx.memory import Memory, normalize_pattern
+from cldx.secrets import load_into_environ
 from cldx.tmux_controller import TmuxController
 from cldx.tmux_monitor import TmuxMonitor
-from cldx.wait_bar import countdown_wait
+from cldx.wait_bar import animated_countdown_wait, countdown_wait
 
 # force_terminal so colors survive prompt_toolkit's stdout wrapper.
 console = Console(force_terminal=True, color_system="truecolor", soft_wrap=True)
@@ -63,11 +64,14 @@ def parse_cli_args() -> argparse.Namespace:
         description="Second-layer terminal for a tmux pane running Claude Code.",
     )
     p.add_argument("--version", action="version", version=f"cldx {__version__}")
+
+    # All flags below are for the default (bridge) command. Subcommands
+    # below are parsed by their own subparsers.
     p.add_argument("--session", help="Target pane, e.g. '0:0.0'.")
     p.add_argument("--auto-detect", action="store_true",
                    help="Find the first pane running Claude Code.")
     p.add_argument("--profile",
-                   help="Override active profile (default/yolo/restricted/paranoid).")
+                   help="Override active profile (auto-approve/yolo/restricted/default/paranoid).")
     p.add_argument("--policy", default=None,
                    help="Path to policy.yml. Default: ~/.cldx/config/policy.yml "
                         "if it exists, else the bundled default.")
@@ -79,6 +83,30 @@ def parse_cli_args() -> argparse.Namespace:
                    help="Classify and decide, but don't send keys to tmux.")
     p.add_argument("--list-panes", action="store_true",
                    help="List all tmux panes (with command + title) and exit.")
+    p.add_argument("--no-telegram", action="store_true",
+                   help="Don't start the Telegram bridge even if configured.")
+
+    # Subcommands
+    sub = p.add_subparsers(dest="cmd", required=False)
+
+    setup_p = sub.add_parser(
+        "setup",
+        help="Interactive wizard for Telegram bot + Anthropic API key.",
+    )
+    setup_p.add_argument(
+        "target", nargs="?", default="all",
+        choices=("all", "telegram", "anthropic"),
+        help="Which integration to configure (default: all).",
+    )
+
+    config_p = sub.add_parser(
+        "config", help="Inspect cldx config (secrets are masked).",
+    )
+    config_p.add_argument(
+        "action", nargs="?", default="show", choices=("show",),
+        help="config show — print masked summary of all secrets.",
+    )
+
     return p.parse_args()
 
 
@@ -164,6 +192,10 @@ class BridgeUI:
         # as a transcript before going live. Set by the startup picker.
         self.resume_from: Path | None = None
 
+        # Phase 7 wiring: telegram bridge is set up in `run()` if configured.
+        self.telegram = None
+        self._telegram_reply_event: asyncio.Event | None = None
+
     # --- printing (safe under patch_stdout) ---
 
     def log(self, msg: str) -> None:
@@ -198,6 +230,11 @@ class BridgeUI:
             if prompt.type == PromptType.COMPLETE:
                 self.log("[green]✓ task complete[/green]")
                 self.store.log_event("complete")
+                if self.telegram is not None:
+                    try:
+                        await self.telegram.notify_completion(snapshot)
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"[red]Telegram completion notify failed: {e}[/red]")
                 self.pending = None
                 self.pending_signature = None
                 return
@@ -241,6 +278,12 @@ class BridgeUI:
                 f"{decision.decision.value})"
             )
             self.store.log_note("destructive op pending — bypassed auto")
+            if self.telegram is not None:
+                try:
+                    await self.telegram.notify_approval_needed(prompt, decision)
+                    self.log("[cyan]→ destructive op alert sent to Telegram[/cyan]")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"[red]Telegram send failed: {e}[/red]")
             self._update_prompt_label()
             return
 
@@ -251,6 +294,12 @@ class BridgeUI:
         elif decision.decision == PolicyDecision.ESCALATE_TELEGRAM:
             self.pending = prompt
             self.log(f"[yellow]→ waiting for your reply (reason: {decision.reason})[/yellow]")
+            if self.telegram is not None:
+                try:
+                    await self.telegram.notify_approval_needed(prompt, decision)
+                    self.log("[cyan]→ sent to Telegram[/cyan]")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"[red]Telegram send failed: {e}[/red]")
         else:
             self.pending = prompt
             self.log(f"[dim]→ waiting (reason: {decision.reason})[/dim]")
@@ -287,8 +336,31 @@ class BridgeUI:
             f"[dim](type to override)[/dim]"
         )
 
+        # For longer waits, emit a midpoint heartbeat so the user knows
+        # we're still alive. Animation isn't safe under patch_stdout, so
+        # we just log discrete checkpoints rather than redrawing.
+        midpoint_logged = {"done": False}
+
+        def heartbeat(remaining: float, total: float) -> None:
+            if midpoint_logged["done"]:
+                return
+            if remaining <= total / 2:
+                midpoint_logged["done"] = True
+                self.log(
+                    f"[dim]  …{remaining:.1f}s remaining (still time to override)[/dim]"
+                )
+
         try:
-            result = await countdown_wait(interval, self._wait_event)
+            # Use the animated variant only for waits long enough to
+            # benefit from a heartbeat; otherwise plain countdown_wait
+            # keeps the noise down.
+            if interval >= 1.5:
+                result = await animated_countdown_wait(
+                    interval, self._wait_event, on_tick=heartbeat,
+                    tick_interval=0.5,
+                )
+            else:
+                result = await countdown_wait(interval, self._wait_event)
         finally:
             self._wait_event = None
 
@@ -331,6 +403,86 @@ class BridgeUI:
             # snapshot / session_end / note: skip for brevity
         console.print(Panel("[dim]end of replay — live monitor starting[/dim]",
                             border_style="dim"))
+
+    # --- Telegram wiring (Phase 7 runtime) -------------------------------
+
+    async def _maybe_start_telegram(self) -> None:
+        """Boot a TelegramBridge if creds are present in env / config files."""
+        if getattr(self.args, "no_telegram", False):
+            return
+        try:
+            from cldx.agent import Agent
+            from cldx.telegram_bridge import TelegramBridge, TelegramConfig
+        except ImportError as e:
+            self.log(f"[yellow]Telegram deps not installed: {e}[/yellow]")
+            return
+
+        cfg = TelegramConfig.from_environ()
+        if cfg is None:
+            self.log("[dim]Telegram not configured (run `cldx setup telegram` to enable)[/dim]")
+            return
+
+        agent = Agent.load()
+        self.telegram = TelegramBridge(
+            cfg, agent,
+            reply_handler=self._telegram_reply_handler,
+        )
+        try:
+            await self.telegram.start()
+            self.log(f"[green]✓ Telegram bridge connected (chat {cfg.chat_id})[/green]")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[red]Failed to start Telegram bridge: {e}[/red]")
+            self.telegram = None
+
+    async def _telegram_reply_handler(self, reply, _pending) -> None:
+        """Route inbound Telegram replies through the same paths terminal input uses.
+
+        `_pending` is the ClassifiedPrompt the bridge thinks is pending; we
+        ignore it and use `self.pending` directly so the source of truth is
+        always the live state.
+        """
+        async with self._action_lock:
+            current = self.pending
+            kind = reply.kind
+            value = reply.value
+
+            if current is None and kind in ("yes", "no", "digit"):
+                self.log(
+                    f"[dim]Telegram reply {kind!r} arrived but nothing's pending — "
+                    f"ignored.[/dim]"
+                )
+                return
+
+            if kind == "yes" and current is not None:
+                outcome = await _act_yes(self.controller, current)
+                self.log(f"[green]→ {outcome}[/green] [dim](via Telegram)[/dim]")
+                self.store.log_action(keys=outcome, source="user_telegram")
+                self._learn_from_user(current, approve=True)
+                self.pending = None
+
+            elif kind == "no" and current is not None:
+                outcome = await _act_no(self.controller, current)
+                self.log(f"[red]→ {outcome}[/red] [dim](via Telegram)[/dim]")
+                self.store.log_action(keys=outcome, source="user_telegram")
+                self._learn_from_user(current, approve=False)
+                self.pending = None
+
+            elif kind == "digit" and current is not None:
+                await self.controller.send_digit(int(value))
+                self.log(f"[cyan]→ sent option {value}[/cyan] [dim](via Telegram)[/dim]")
+                self.store.log_action(keys=f"digit:{value}", source="user_telegram")
+                self.pending = None
+
+            elif kind == "text":
+                await self.controller.send_text(value)
+                self.log(f"[cyan]→ injected:[/cyan] {value} [dim](via Telegram)[/dim]")
+                self.store.log_action(keys=f"text:{value}", source="user_telegram")
+                self.pending = None
+
+            self._update_prompt_label()
+            # Also cancel any in-flight wait bar.
+            if self._wait_event is not None:
+                self._wait_event.set()
 
     def _learn_from_user(self, prompt: ClassifiedPrompt, approve: bool) -> None:
         """Phase 5: in yolo profile, remember the user's decision."""
@@ -583,6 +735,9 @@ class BridgeUI:
             Panel(header, title="[bold]claude-tmux-bridge[/]", border_style="cyan")
         )
 
+        # Phase 7 wiring: if telegram credentials are loaded, start the bridge.
+        await self._maybe_start_telegram()
+
         # Optional: replay prior session's events before going live.
         if self.resume_from is not None:
             self._replay_transcript(self.resume_from)
@@ -634,6 +789,11 @@ class BridgeUI:
                     if exc:
                         self.log(f"[red]task error:[/red] {exc}")
             finally:
+                if self.telegram is not None:
+                    try:
+                        await self.telegram.stop()
+                    except Exception as e:  # noqa: BLE001
+                        self.log(f"[dim]Telegram shutdown: {e}[/dim]")
                 self.store.log_event("session_end", events=self.store.event_count)
                 self.store.close()
 
@@ -699,8 +859,48 @@ async def run(args: argparse.Namespace) -> int:
     return await ui.run()
 
 
+def _run_setup_subcommand(args: argparse.Namespace) -> int:
+    """Dispatch `cldx setup [target]`. All wizards return cleanly on Ctrl-C."""
+    from cldx.setup_wizard import (
+        run_anthropic_setup,
+        run_full_setup,
+        run_telegram_setup,
+    )
+    try:
+        if args.target == "anthropic":
+            run_anthropic_setup(console=console)
+        elif args.target == "telegram":
+            run_telegram_setup(console=console)
+        else:  # "all"
+            run_full_setup(console=console)
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[bold]bye.[/]")
+        return 130
+    return 0
+
+
+def _run_config_subcommand(args: argparse.Namespace) -> int:
+    """Dispatch `cldx config show` (only action so far)."""
+    from cldx.setup_wizard import show_config
+    if args.action == "show":
+        show_config(console=console)
+    return 0
+
+
 def main() -> None:
+    # Load any saved secrets into the process environment before parsing
+    # subcommands, so wizards / bridge / summarizer all see them.
+    load_into_environ()
+
     args = parse_cli_args()
+
+    # Subcommand dispatch
+    if args.cmd == "setup":
+        sys.exit(_run_setup_subcommand(args))
+    if args.cmd == "config":
+        sys.exit(_run_config_subcommand(args))
+
+    # Default: run the bridge.
     try:
         sys.exit(asyncio.run(run(args)))
     except KeyboardInterrupt:

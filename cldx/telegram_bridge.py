@@ -41,6 +41,26 @@ class TelegramConfig:
     timeout_action: str = "auto_no"
 
     @classmethod
+    def from_environ(cls) -> "TelegramConfig | None":
+        """Read from ``os.environ``. Returns None if either var is unset.
+
+        Pair with ``cldx.secrets.load_into_environ()`` at startup so the
+        ``~/.cldx/config/telegram.env`` file is automatically reachable.
+        """
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        chat = os.environ.get("TELEGRAM_CHAT_ID")
+        if not token or not chat:
+            return None
+        return cls(
+            bot_token=token,
+            chat_id=chat,
+            approval_timeout_seconds=int(
+                os.environ.get("TELEGRAM_APPROVAL_TIMEOUT_SECONDS", "600")
+            ),
+            timeout_action=os.environ.get("TELEGRAM_TIMEOUT_ACTION", "auto_no"),
+        )
+
+    @classmethod
     def from_env_file(cls, path: Path | None = None) -> "TelegramConfig | None":
         """Read ``~/.cldx/config/telegram.env``. Returns None if unconfigured.
 
