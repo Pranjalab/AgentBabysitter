@@ -22,9 +22,12 @@ persona: |
 #     model: claude-sonnet-4-6
 #
 #   AWS Bedrock (needs AWS_BEARER_TOKEN_BEDROCK + AWS_REGION):
-#     model: bedrock:us.anthropic.claude-haiku-4-5-20251001-v1:0
-#     model: bedrock:apac.anthropic.claude-haiku-4-5-20251001-v1:0
-#     model: bedrock:anthropic.claude-3-5-haiku-20241022-v1:0
+#     model: bedrock:us.anthropic.claude-haiku-4-5-20251001-v1:0     # from us-* regions
+#     model: bedrock:eu.anthropic.claude-haiku-4-5-20251001-v1:0     # from eu-* regions
+#     model: bedrock:apac.anthropic.claude-haiku-4-5-20251001-v1:0   # from ap-* regions
+#     model: bedrock:anthropic.claude-3-5-haiku-20241022-v1:0        # direct (older models)
+#   Picking the wrong region/profile prefix yields:
+#     "ValidationException: The provided model identifier is invalid."
 #
 #   Google Gemini (needs GEMINI_API_KEY):
 #     model: gemini:gemini-2.0-flash

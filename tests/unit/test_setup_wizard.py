@@ -492,6 +492,99 @@ def test_bedrock_wizard_accepts_multi_kilobyte_token(isolated_home, cap_console)
     assert saved["AWS_BEARER_TOKEN_BEDROCK"] == long_token
 
 
+def test_bedrock_default_model_is_region_aware():
+    """Cross-region inference profile prefix must match the AWS region."""
+    from cldx.setup_wizard import _bedrock_default_model_for_region
+
+    assert _bedrock_default_model_for_region("us-east-1").startswith("us.")
+    assert _bedrock_default_model_for_region("us-west-2").startswith("us.")
+    assert _bedrock_default_model_for_region("eu-west-1").startswith("eu.")
+    assert _bedrock_default_model_for_region("eu-central-1").startswith("eu.")
+    assert _bedrock_default_model_for_region("ap-south-1").startswith("apac.")
+    assert _bedrock_default_model_for_region("ap-northeast-1").startswith("apac.")
+    # Unknown region falls back to US.
+    assert _bedrock_default_model_for_region("antarctica-1").startswith("us.")
+
+
+def test_bedrock_wizard_uses_apac_prefix_in_ap_south_1(isolated_home, cap_console):
+    """Pasting ap-south-1 as the region must surface an apac.* default."""
+    console, _ = cap_console
+    seen_default: list[str] = []
+
+    def script(prompt):
+        if "model" in prompt.lower():
+            # The default appears in the bracketed default in the prompt text.
+            seen_default.append(prompt)
+        return {
+            0: "bedrock-api-key-" + "x" * 64,
+            1: "ap-south-1",
+            2: "",         # accept default model
+            3: "n",        # skip test
+            4: "n",        # don't update agent
+        }.get(script.idx, "")
+
+    script.idx = -1
+
+    def wrap(prompt):
+        script.idx += 1
+        return script(prompt)
+
+    run_bedrock_setup(console=console, input_fn=wrap)
+    assert seen_default, "model-id prompt should have been shown"
+    assert "apac." in seen_default[0]
+
+
+def test_bedrock_test_failure_lists_available_when_validation_error(
+    isolated_home, cap_console, monkeypatch
+):
+    """On a ValidationException, the wizard should query Bedrock for
+    available models and offer the user a numbered pick list."""
+    console, buf = cap_console
+
+    available = [
+        "apac.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "apac.anthropic.claude-sonnet-4-6-20251001-v1:0",
+    ]
+    monkeypatch.setattr(
+        "cldx.setup_wizard._bedrock_list_available_models",
+        lambda region, max_results=8: available,
+    )
+
+    # First test call fails with a validation error, second succeeds.
+    calls: list[tuple[str, str, str]] = []
+
+    def fake_test(token, region, model_id):
+        calls.append((token, region, model_id))
+        if len(calls) == 1:
+            return False, (
+                "An error occurred (ValidationException) when calling "
+                "the InvokeModel operation: The provided model identifier "
+                "is invalid."
+            )
+        return True, f"got {model_id}"
+
+    ok = run_bedrock_setup(
+        console=console,
+        input_fn=_scripted([
+            "bedrock-api-key-" + "y" * 64,    # token
+            "ap-south-1",                      # region
+            "us.anthropic.bad-id-v1:0",        # wrong model id (user typed)
+            "y",                                # run test
+            "1",                                # pick alternative #1 from list
+            "n",                                # don't update agent yml
+        ]),
+        test_fn=fake_test,
+    )
+    assert ok is True
+    # Two test attempts: first the bad ID, then the picked alternative.
+    assert len(calls) == 2
+    assert calls[1][2] == available[0]
+    # The pick list must have been printed.
+    out = buf.getvalue()
+    assert "Models available in ap-south-1" in out
+    assert available[0] in out
+
+
 def test_paste_friendly_input_falls_back_when_stdin_not_a_tty(monkeypatch, isolated_home):
     """Pipe-mode (no TTY) must fall through to plain input()."""
     from io import StringIO

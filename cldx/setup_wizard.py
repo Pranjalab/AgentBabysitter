@@ -169,8 +169,78 @@ def _default_anthropic_test(api_key: str) -> tuple[bool, str]:
 
 # --- Bedrock --------------------------------------------------------------
 
-DEFAULT_BEDROCK_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_BEDROCK_REGION = "us-east-1"
+
+
+# AWS Bedrock cross-region inference profile prefixes. Cross-region
+# profiles route requests across a fixed regional pool — picking the
+# wrong prefix yields ValidationException("model identifier is invalid").
+_BEDROCK_REGION_PREFIXES = {
+    "us-": "us",
+    "eu-": "eu",
+    "ap-": "apac",
+    "ca-": "us",     # Canada falls back to US pool today
+    "sa-": "us",     # São Paulo falls back to US pool today
+}
+
+
+def _bedrock_default_model_for_region(region: str) -> str:
+    """Pick the right cross-region inference profile ID for the given region.
+
+    Falls back to the US profile when we don't recognise the region.
+    """
+    region = (region or "").lower()
+    for region_prefix, profile_prefix in _BEDROCK_REGION_PREFIXES.items():
+        if region.startswith(region_prefix):
+            return f"{profile_prefix}.anthropic.claude-haiku-4-5-20251001-v1:0"
+    return "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def _bedrock_list_available_models(region: str, max_results: int = 8) -> list[str]:
+    """Best-effort enumeration of Anthropic models reachable in ``region``.
+
+    Returns inference-profile IDs first (preferred), then direct foundation
+    model IDs. Empty list on any failure (missing perms, no network, no
+    boto3 installed, etc.) — never raises.
+    """
+    try:
+        import boto3  # type: ignore[import-not-found]
+    except ImportError:
+        return []
+    found: list[str] = []
+    try:
+        client = boto3.client("bedrock", region_name=region)
+    except Exception:  # noqa: BLE001
+        return []
+
+    # 1. Cross-region inference profiles (preferred for Claude 4.x models).
+    try:
+        resp = client.list_inference_profiles()
+        for p in resp.get("inferenceProfileSummaries", []):
+            pid = p.get("inferenceProfileId")
+            if pid and "anthropic" in pid.lower():
+                found.append(pid)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. Direct foundation models (older Claude 3.x mostly).
+    try:
+        resp = client.list_foundation_models(byProvider="anthropic")
+        for m in resp.get("modelSummaries", []):
+            mid = m.get("modelId")
+            if mid:
+                found.append(mid)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Dedup but keep order.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for x in found:
+        if x not in seen:
+            seen.add(x)
+            deduped.append(x)
+    return deduped[:max_results]
 
 
 def run_bedrock_setup(
@@ -231,10 +301,11 @@ def run_bedrock_setup(
     region_raw = input_fn(f"AWS region [{default_region}]: ").strip()
     region = region_raw or default_region
 
+    default_model = _bedrock_default_model_for_region(region)
     model_raw = input_fn(
-        f"Bedrock model ID [{DEFAULT_BEDROCK_MODEL}]: "
+        f"Bedrock model ID [{default_model}]: "
     ).strip()
-    model_id = model_raw or DEFAULT_BEDROCK_MODEL
+    model_id = model_raw or default_model
 
     save_secret("bedrock", "AWS_BEARER_TOKEN_BEDROCK", token)
     save_secret("bedrock", "AWS_REGION", region)
@@ -248,9 +319,38 @@ def run_bedrock_setup(
             console.print(f"[green]✓ {msg}[/green]")
         else:
             console.print(f"[red]Test failed: {msg}[/red]")
-            console.print(
-                "[yellow]Saved anyway — re-run `cldx setup bedrock` to fix.[/yellow]"
-            )
+            # If it looks like a model-id problem, query Bedrock for what's
+            # actually available in this region and offer to pick one.
+            if "ValidationException" in msg or "model identifier" in msg.lower():
+                available = _bedrock_list_available_models(region)
+                if available:
+                    console.print(
+                        f"[yellow]Models available in {region}:[/yellow]"
+                    )
+                    for i, m in enumerate(available, 1):
+                        console.print(f"  [cyan]{i}.[/cyan] {m}")
+                    pick = input_fn(
+                        "Pick a number to retry (empty to skip): "
+                    ).strip()
+                    if pick.isdigit() and 1 <= int(pick) <= len(available):
+                        model_id = available[int(pick) - 1]
+                        ok2, msg2 = (test_fn or _default_bedrock_test)(
+                            token, region, model_id
+                        )
+                        if ok2:
+                            console.print(f"[green]✓ {msg2}[/green]")
+                            console.print(
+                                f"[green]✓ Switched to {model_id}[/green]"
+                            )
+                        else:
+                            console.print(f"[red]Still failing: {msg2}[/red]")
+                else:
+                    console.print(
+                        "[yellow](Could not enumerate available models — your "
+                        "bearer token may lack bedrock:ListInferenceProfiles "
+                        "/ bedrock:ListFoundationModels permissions. Try "
+                        "another region or model ID by re-running.)[/yellow]"
+                    )
 
     if _confirm("Make Bedrock the active LLM backend in agent_name.yml?",
                 input_fn, default=True):
