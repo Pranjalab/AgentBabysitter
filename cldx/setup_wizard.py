@@ -11,6 +11,10 @@ Design notes:
   the user sends any message to the new bot. No copy-pasting numbers.
 - All file writes go through ``cldx.secrets.save_secret``, which is
   atomic and chmods the file to ``0600``.
+- The default ``input_fn`` is paste-tolerant: on a real terminal we use
+  prompt_toolkit (bracketed-paste mode, no 1KB limit), only falling back
+  to plain ``input()`` when prompt_toolkit isn't usable (non-TTY, piped
+  stdin, missing dependency).
 """
 
 from __future__ import annotations
@@ -40,6 +44,33 @@ from cldx.secrets import (
 HttpFn = Callable[[str, bytes | None, float], dict[str, Any]]
 
 
+# --- paste-tolerant input -------------------------------------------------
+
+def paste_friendly_input(prompt: str) -> str:
+    """Read one line, handling pastes longer than 1KB on macOS terminals.
+
+    Plain ``input()`` invokes the terminal driver in canonical mode, which
+    truncates pasted lines at ``MAX_CANON`` (1024 bytes on macOS). Long
+    Bedrock bearer tokens get cut off mid-paste.
+
+    prompt_toolkit's ``prompt()`` switches the terminal to a mode that
+    honors bracketed paste, so multi-kilobyte pastes arrive intact. We
+    fall back to ``input()`` when prompt_toolkit isn't usable (no TTY,
+    redirected stdin, missing dep) so this still works in pipes and tests.
+    """
+    try:
+        import sys
+        from prompt_toolkit import prompt as ptk_prompt  # type: ignore[import-not-found]
+
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return input(prompt)
+        return ptk_prompt(prompt)
+    except (ImportError, EOFError, KeyboardInterrupt):
+        raise
+    except Exception:  # noqa: BLE001 — any prompt_toolkit failure → fallback
+        return input(prompt)
+
+
 # --- helpers --------------------------------------------------------------
 
 
@@ -67,7 +98,7 @@ def _http_get(url: str, _data: bytes | None = None, timeout: float = 10.0) -> di
 
 def run_anthropic_setup(
     console: Console | None = None,
-    input_fn: Callable[[str], str] = input,
+    input_fn: Callable[[str], str] = paste_friendly_input,
     test_key_fn: Callable[[str], tuple[bool, str]] | None = None,
 ) -> bool:
     """Walk the user through saving an ``ANTHROPIC_API_KEY``.
@@ -144,7 +175,7 @@ DEFAULT_BEDROCK_REGION = "us-east-1"
 
 def run_bedrock_setup(
     console: Console | None = None,
-    input_fn: Callable[[str], str] = input,
+    input_fn: Callable[[str], str] = paste_friendly_input,
     test_fn: Callable[[str, str, str], tuple[bool, str]] | None = None,
 ) -> bool:
     """Walk the user through saving an AWS Bedrock bearer token.
@@ -264,7 +295,7 @@ DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
 def run_gemini_setup(
     console: Console | None = None,
-    input_fn: Callable[[str], str] = input,
+    input_fn: Callable[[str], str] = paste_friendly_input,
     test_fn: Callable[[str, str], tuple[bool, str]] | None = None,
 ) -> bool:
     """Walk the user through saving a Google Gemini API key."""
@@ -347,7 +378,7 @@ def _default_gemini_test(api_key: str, model_id: str) -> tuple[bool, str]:
 
 def run_llm_setup(
     console: Console | None = None,
-    input_fn: Callable[[str], str] = input,
+    input_fn: Callable[[str], str] = paste_friendly_input,
 ) -> bool:
     """Interactive 'which LLM do you want?' picker."""
     console = console or Console()
@@ -418,7 +449,7 @@ def _set_agent_model(
 
 def run_telegram_setup(
     console: Console | None = None,
-    input_fn: Callable[[str], str] = input,
+    input_fn: Callable[[str], str] = paste_friendly_input,
     http_fn: HttpFn = _http_get,
 ) -> bool:
     """Walk the user through bot creation + chat ID auto-discovery."""
@@ -571,7 +602,7 @@ def _telegram_send_test(
 
 def run_full_setup(
     console: Console | None = None,
-    input_fn: Callable[[str], str] = input,
+    input_fn: Callable[[str], str] = paste_friendly_input,
 ) -> None:
     """Run LLM-picker + Telegram in sequence, then show the final config."""
     console = console or Console()

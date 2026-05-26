@@ -466,3 +466,40 @@ def test_llm_picker_rejects_invalid_choice(isolated_home, cap_console):
         input_fn=_scripted(["wat", "9", "4"]),  # garbage → 9 → finally skip
     )
     assert ok is False
+
+
+# --- Paste-tolerant input -------------------------------------------------
+
+def test_bedrock_wizard_accepts_multi_kilobyte_token(isolated_home, cap_console):
+    """The token field must accept ~3KB pastes without truncation.
+
+    macOS canonical mode caps `input()` at 1024 bytes; the wizard's default
+    input function uses prompt_toolkit to dodge that. Test code injects its
+    own input_fn so this test just verifies the value round-trips through
+    save_secret + load.
+    """
+    console, _ = cap_console
+    long_token = "bedrock-api-key-" + ("A" * 3072)  # well above the 1KB cap
+    ok = run_bedrock_setup(
+        console=console,
+        input_fn=_scripted([long_token, "us-east-1", "", "n", "n"]),
+    )
+    assert ok is True
+    assert os.environ["AWS_BEARER_TOKEN_BEDROCK"] == long_token
+    # Verify the file on disk also holds the full value.
+    from cldx.secrets import _parse_env_file, env_file_path
+    saved = _parse_env_file(env_file_path("bedrock"))
+    assert saved["AWS_BEARER_TOKEN_BEDROCK"] == long_token
+
+
+def test_paste_friendly_input_falls_back_when_stdin_not_a_tty(monkeypatch, isolated_home):
+    """Pipe-mode (no TTY) must fall through to plain input()."""
+    from io import StringIO
+    from cldx.setup_wizard import paste_friendly_input
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys, "stdin", StringIO("piped value\n"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: "piped value")
+
+    assert paste_friendly_input("? ") == "piped value"
