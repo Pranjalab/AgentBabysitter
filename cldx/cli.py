@@ -160,6 +160,10 @@ class BridgeUI:
         self.memory = Memory(destructive_patterns=policy.destructive_patterns)
         policy.memory = self.memory
 
+        # Phase 4: optional path to a previous session log we want to replay
+        # as a transcript before going live. Set by the startup picker.
+        self.resume_from: Path | None = None
+
     # --- printing (safe under patch_stdout) ---
 
     def log(self, msg: str) -> None:
@@ -301,6 +305,32 @@ class BridgeUI:
         if self.pending is not prompt:
             return
         await self._fire_auto(prompt, action)
+
+    def _replay_transcript(self, path: Path) -> None:
+        """Phase 4: print a condensed view of a prior session's events."""
+        from cldx.session_store import replay
+        console.print(Panel(
+            f"[dim]replaying {path.name}[/dim]",
+            title="[bold]previous session[/bold]",
+            border_style="dim",
+        ))
+        for event in replay(path):
+            kind = event.get("kind", "?")
+            t = event.get("t", "")
+            if kind == "prompt":
+                cmd = event.get("command") or event.get("type", "?")
+                console.print(f"[dim]{t}[/dim] [yellow]prompt[/yellow] {cmd}")
+            elif kind == "decision":
+                d = event.get("decision", "?")
+                reason = event.get("reason", "")
+                console.print(f"[dim]{t}[/dim] [magenta]→ {d}[/magenta] ({reason})")
+            elif kind == "action":
+                console.print(f"[dim]{t}[/dim] [cyan]action[/cyan] {event.get('keys','?')}")
+            elif kind == "complete":
+                console.print(f"[dim]{t}[/dim] [green]✓ task complete[/green]")
+            # snapshot / session_end / note: skip for brevity
+        console.print(Panel("[dim]end of replay — live monitor starting[/dim]",
+                            border_style="dim"))
 
     def _learn_from_user(self, prompt: ClassifiedPrompt, approve: bool) -> None:
         """Phase 5: in yolo profile, remember the user's decision."""
@@ -553,6 +583,10 @@ class BridgeUI:
             Panel(header, title="[bold]claude-tmux-bridge[/]", border_style="cyan")
         )
 
+        # Optional: replay prior session's events before going live.
+        if self.resume_from is not None:
+            self._replay_transcript(self.resume_from)
+
         # Initial mirror + classification.
         try:
             raw = await self.monitor.capture()
@@ -628,14 +662,6 @@ async def run(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        pane = pick_session(cli_arg=args.session, auto_detect=args.auto_detect)
-    except SessionPickerError as e:
-        console.print(f"[red]session error:[/] {e}")
-        return 2
-
-    pane_info = next((p for p in list_panes() if p.target == pane), None)
-
-    try:
         policy = PolicyEngine(
             resolve_policy_path(args.policy),
             profile_override=args.profile,
@@ -644,7 +670,32 @@ async def run(args: argparse.Namespace) -> int:
         console.print(f"[red]policy error:[/] {e}")
         return 2
 
+    # Phase 4: if the user gave us no session hint at all, run the
+    # startup picker (banner + numbered menu). They can still pass
+    # --session or --auto-detect to skip it.
+    resume_from = None
+    if args.session is None and not args.auto_detect:
+        from cldx.memory import Memory
+        from cldx.startup import run_startup
+        try:
+            choice = run_startup(policy, Memory(), console=console)
+            pane = choice.pane
+            resume_from = choice.resume_from
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[bold]bye.[/]")
+            return 0
+    else:
+        try:
+            pane = pick_session(cli_arg=args.session, auto_detect=args.auto_detect)
+        except SessionPickerError as e:
+            console.print(f"[red]session error:[/] {e}")
+            return 2
+
+    pane_info = next((p for p in list_panes() if p.target == pane), None)
+
     ui = BridgeUI(args, pane, pane_info, policy)
+    if resume_from is not None:
+        ui.resume_from = resume_from
     return await ui.run()
 
 
