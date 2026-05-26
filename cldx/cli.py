@@ -864,6 +864,16 @@ async def run(args: argparse.Namespace) -> int:
             return 2
 
     pane_info = next((p for p in list_panes() if p.target == pane), None)
+    if args.auto_detect:
+        # Print what we selected so the user can confirm it's the right pane
+        # (useful when --auto-detect found exactly one match and skipped the
+        # picker — they might still have meant a different session).
+        title = pane_info.title if pane_info else ""
+        console.print(
+            f"[dim]→ auto-detected pane [cyan]{pane}[/cyan]"
+            + (f"  ({title})" if title else "")
+            + "[/dim]"
+        )
 
     ui = BridgeUI(args, pane, pane_info, policy)
     if resume_from is not None:

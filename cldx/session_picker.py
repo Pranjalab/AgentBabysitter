@@ -92,26 +92,49 @@ def _looks_like_claude(p: Pane) -> bool:
     return "claude" in title.lower()
 
 
-def _auto_detect(panes: list[Pane]) -> Pane | None:
-    """Return the most likely Claude Code pane, or None."""
+def find_claude_panes(panes: list[Pane] | None = None) -> list[Pane]:
+    """Return every tmux pane that looks like a Claude Code session.
+
+    Sorted so the most "literally claude" matches come first (a pane whose
+    command literally contains 'claude' beats one matched only by title).
+    """
+    panes = panes if panes is not None else list_panes()
     candidates = [p for p in panes if _looks_like_claude(p)]
-    if not candidates:
-        return None
-    # Prefer a pane whose command literally contains "claude" over a generic node.
-    candidates.sort(key=lambda p: ("claude" not in p.current_command.lower(), p.target))
-    return candidates[0]
+    candidates.sort(
+        key=lambda p: ("claude" not in p.current_command.lower(), p.target)
+    )
+    return candidates
 
 
-def _interactive(panes: list[Pane]) -> Pane:
+def _auto_detect(panes: list[Pane]) -> Pane | None:
+    """Return the single most-likely Claude pane, or None when ambiguous.
+
+    Returns:
+        - The single matching pane when exactly one looks like Claude.
+        - ``None`` when there are no candidates OR multiple candidates —
+          callers should fall through to the interactive picker.
+    """
+    candidates = find_claude_panes(panes)
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _interactive(panes: list[Pane], header: str | None = None,
+                  input_fn=None) -> Pane:
+    """Numbered picker over `panes`. `header` overrides the default heading."""
     if not panes:
         raise SessionPickerError("no tmux panes available — start tmux first")
+    # Resolve `input` dynamically so monkeypatches in tests apply.
+    if input_fn is None:
+        input_fn = input
 
-    print("\nAvailable tmux panes:")
+    print(header or "\nAvailable tmux panes:")
     for i, pane in enumerate(panes, start=1):
         print(f"  [{i}] {pane}")
 
     while True:
-        raw = input("\nSelect pane number: ").strip()
+        raw = input_fn("\nSelect pane number: ").strip()
         if not raw:
             continue
         try:
@@ -128,9 +151,13 @@ def pick_session(cli_arg: str | None = None, auto_detect: bool = False) -> str:
     """Resolve a tmux pane target string.
 
     Precedence:
-        1. `cli_arg` if provided.
-        2. `auto_detect=True` scans panes for the Claude Code process.
-        3. Otherwise, prompt the user interactively.
+        1. ``cli_arg`` if provided.
+        2. ``auto_detect=True``:
+           - 0 candidates → raise SessionPickerError with available panes
+           - 1 candidate  → use it
+           - 2+ candidates → narrow the interactive picker to the
+             Claude-looking ones and ask the user to pick.
+        3. Otherwise, full interactive picker over every tmux pane.
     """
     if cli_arg:
         return cli_arg
@@ -138,8 +165,8 @@ def pick_session(cli_arg: str | None = None, auto_detect: bool = False) -> str:
     panes = list_panes()
 
     if auto_detect:
-        found = _auto_detect(panes)
-        if found is None:
+        candidates = find_claude_panes(panes)
+        if not candidates:
             available = ", ".join(
                 f"{p.target} (cmd={p.current_command}, title={p.title or '-'})"
                 for p in panes
@@ -150,6 +177,15 @@ def pick_session(cli_arg: str | None = None, auto_detect: bool = False) -> str:
                 "  Hint: start `claude` inside a tmux pane, then retry — "
                 "or run `--list-panes` and pass `--session <target>` directly."
             )
-        return found.target
+        if len(candidates) == 1:
+            return candidates[0].target
+        # Ambiguous — fall through to the picker scoped to Claude panes.
+        return _interactive(
+            candidates,
+            header=(
+                f"\nFound {len(candidates)} Claude panes — pick one "
+                f"(or pass `--session <target>` to skip this next time):"
+            ),
+        ).target
 
     return _interactive(panes).target
