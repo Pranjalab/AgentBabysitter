@@ -30,20 +30,19 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from src.policy_engine import (
+from cldx import __version__
+from cldx._paths import resolve_policy_path
+from cldx.policy_engine import (
     DecisionResult,
     PolicyDecision,
     PolicyEngine,
     PolicyEngineError,
 )
-from src.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
-from src.session_picker import SessionPickerError, list_panes, pick_session
-from src.tmux_controller import TmuxController
-from src.tmux_monitor import TmuxMonitor
-
-
-REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_POLICY_PATH = REPO_ROOT / "config" / "policy.yml"
+from cldx.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
+from cldx.session_picker import SessionPickerError, list_panes, pick_session
+from cldx.session_store import SessionStore
+from cldx.tmux_controller import TmuxController
+from cldx.tmux_monitor import TmuxMonitor
 
 # force_terminal so colors survive prompt_toolkit's stdout wrapper.
 console = Console(force_terminal=True, color_system="truecolor", soft_wrap=True)
@@ -58,16 +57,18 @@ DECISION_STYLE = {
 
 def parse_cli_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="claude-tmux-bridge",
+        prog="cldx",
         description="Second-layer terminal for a tmux pane running Claude Code.",
     )
+    p.add_argument("--version", action="version", version=f"cldx {__version__}")
     p.add_argument("--session", help="Target pane, e.g. '0:0.0'.")
     p.add_argument("--auto-detect", action="store_true",
                    help="Find the first pane running Claude Code.")
     p.add_argument("--profile",
                    help="Override active profile (default/yolo/restricted/paranoid).")
-    p.add_argument("--policy", default=str(DEFAULT_POLICY_PATH),
-                   help=f"Path to policy.yml (default: {DEFAULT_POLICY_PATH}).")
+    p.add_argument("--policy", default=None,
+                   help="Path to policy.yml. Default: ~/.cldx/config/policy.yml "
+                        "if it exists, else the bundled default.")
     p.add_argument("--poll-interval", type=float, default=1.0,
                    help="Seconds between pane snapshots (default 1.0).")
     p.add_argument("--mirror-lines", type=int, default=25,
@@ -145,6 +146,9 @@ class BridgeUI:
         self.session: PromptSession[str] = PromptSession()
         self._action_lock = asyncio.Lock()
 
+        # Phase 2: jsonl event log for this run.
+        self.store = SessionStore(profile=policy.active_profile_name, pane=pane)
+
     # --- printing (safe under patch_stdout) ---
 
     def log(self, msg: str) -> None:
@@ -178,6 +182,7 @@ class BridgeUI:
 
             if prompt.type == PromptType.COMPLETE:
                 self.log("[green]✓ task complete[/green]")
+                self.store.log_event("complete")
                 self.pending = None
                 self.pending_signature = None
                 return
@@ -187,6 +192,10 @@ class BridgeUI:
             if sig == self.pending_signature:
                 return  # same prompt as last fire — already handled / awaiting
             self.pending_signature = sig
+
+            # Phase 2: persist every actionable prompt + its decision.
+            self.store.log_prompt(prompt)
+            self.store.log_decision(decision)
 
             await self._handle_decision(prompt, decision)
 
@@ -209,10 +218,12 @@ class BridgeUI:
         if decision.decision == PolicyDecision.AUTO_YES:
             outcome = await _act_yes(self.controller, prompt)
             self.log(f"[green]→ {outcome}[/green]")
+            self.store.log_action(keys=outcome, source="policy")
             self.pending = None
         elif decision.decision == PolicyDecision.AUTO_NO:
             outcome = await _act_no(self.controller, prompt)
             self.log(f"[red]→ {outcome}[/red]")
+            self.store.log_action(keys=outcome, source="policy")
             self.pending = None
         elif decision.decision == PolicyDecision.ESCALATE_TELEGRAM:
             self.pending = prompt
@@ -281,6 +292,7 @@ class BridgeUI:
                 async with self._action_lock:
                     outcome = await _act_yes(self.controller, pending)
                 self.log(f"[green]→ {outcome}[/green]  (you said yes)")
+                self.store.log_action(keys=outcome, source="user_terminal")
                 self.pending = None
                 self._update_prompt_label()
                 return
@@ -288,6 +300,7 @@ class BridgeUI:
                 async with self._action_lock:
                     outcome = await _act_no(self.controller, pending)
                 self.log(f"[red]→ {outcome}[/red]  (you said no)")
+                self.store.log_action(keys=outcome, source="user_terminal")
                 self.pending = None
                 self._update_prompt_label()
                 return
@@ -295,6 +308,7 @@ class BridgeUI:
                 async with self._action_lock:
                     await self.controller.send_digit(int(low))
                 self.log(f"[cyan]→ sent option {low}[/cyan]")
+                self.store.log_action(keys=f"digit:{low}", source="user_terminal")
                 self.pending = None
                 self._update_prompt_label()
                 return
@@ -303,6 +317,7 @@ class BridgeUI:
         async with self._action_lock:
             await self.controller.send_text(text)
         self.log(f"[cyan]→ injected:[/cyan] {text}")
+        self.store.log_action(keys=f"text:{text}", source="user_terminal")
         # Sending text usually clears any pending menu, so reset.
         self.pending = None
         self._update_prompt_label()
@@ -363,7 +378,10 @@ class BridgeUI:
                 self.log(f"current profile: {self.policy.active_profile_name}")
                 return
             try:
-                self.policy = PolicyEngine(self.args.policy, profile_override=rest)
+                self.policy = PolicyEngine(
+                    resolve_policy_path(self.args.policy),
+                    profile_override=rest,
+                )
                 self.classifier = PromptClassifier(
                     detection_cfg=self.policy.detection_config
                 )
@@ -471,16 +489,20 @@ class BridgeUI:
         # appear above the input bar instead of clobbering it.
         with patch_stdout(raw=True):
             input_task = asyncio.create_task(self._input_loop())
-            done, pending = await asyncio.wait(
-                {monitor_task, input_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-            for t in done:
-                exc = t.exception()
-                if exc:
-                    self.log(f"[red]task error:[/red] {exc}")
+            try:
+                done, pending = await asyncio.wait(
+                    {monitor_task, input_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                for t in done:
+                    exc = t.exception()
+                    if exc:
+                        self.log(f"[red]task error:[/red] {exc}")
+            finally:
+                self.store.log_event("session_end", events=self.store.event_count)
+                self.store.close()
 
         return 0
 
@@ -515,7 +537,10 @@ async def run(args: argparse.Namespace) -> int:
     pane_info = next((p for p in list_panes() if p.target == pane), None)
 
     try:
-        policy = PolicyEngine(args.policy, profile_override=args.profile)
+        policy = PolicyEngine(
+            resolve_policy_path(args.policy),
+            profile_override=args.profile,
+        )
     except PolicyEngineError as e:
         console.print(f"[red]policy error:[/] {e}")
         return 2
