@@ -25,6 +25,9 @@ class DecisionResult:
     profile: str
     matched_pattern: str | None = None
     reason: str = ""
+    # Phase 3:
+    wait_interval_seconds: float = 0.0   # how long to wait before auto-firing
+    is_destructive: bool = False         # destructive ops always pend, no wait
 
 
 class PolicyEngineError(RuntimeError):
@@ -75,6 +78,12 @@ class PolicyEngine:
             self.profile.get("default_action", "escalate_telegram")
         )
 
+        # Phase 3: global destructive list + per-profile wait interval.
+        self._destructive = _compile(self.config.get("destructive_patterns", []))
+        self.wait_interval_seconds = float(
+            self.profile.get("wait_interval_seconds", 0.0)
+        )
+
     # --- Telegram config passthrough ---------------------------------------
 
     @property
@@ -96,6 +105,8 @@ class PolicyEngine:
             )
 
         haystack = self._haystack(prompt)
+        destructive_match = self._first_match(self._destructive, haystack)
+        is_destructive = destructive_match is not None
 
         match = self._first_match(self._auto_deny, haystack)
         if match:
@@ -104,6 +115,8 @@ class PolicyEngine:
                 profile=self.active_profile_name,
                 matched_pattern=match.re.pattern,
                 reason="matched auto_deny",
+                wait_interval_seconds=0.0,           # deny is always instant
+                is_destructive=is_destructive,
             )
 
         match = self._first_match(self._auto_approve, haystack)
@@ -113,6 +126,8 @@ class PolicyEngine:
                 profile=self.active_profile_name,
                 matched_pattern=match.re.pattern,
                 reason="matched auto_approve",
+                wait_interval_seconds=self.wait_interval_seconds,
+                is_destructive=is_destructive,
             )
 
         match = self._first_match(self._escalate, haystack)
@@ -122,13 +137,31 @@ class PolicyEngine:
                 profile=self.active_profile_name,
                 matched_pattern=match.re.pattern,
                 reason="matched escalate_to_telegram",
+                wait_interval_seconds=0.0,
+                is_destructive=is_destructive,
             )
 
         return DecisionResult(
             decision=self.default_action,
             profile=self.active_profile_name,
             reason="fell through to default_action",
+            wait_interval_seconds=(
+                self.wait_interval_seconds
+                if self.default_action == PolicyDecision.AUTO_YES
+                else 0.0
+            ),
+            is_destructive=is_destructive,
         )
+
+    # --- Destructive-op detection (always wait for user, no countdown) ----
+
+    def is_destructive(self, prompt: ClassifiedPrompt) -> bool:
+        return self._first_match(self._destructive, self._haystack(prompt)) is not None
+
+    @property
+    def destructive_patterns(self) -> list[str]:
+        """The raw destructive-pattern strings, for display / introspection."""
+        return list(self.config.get("destructive_patterns", []) or [])
 
     # --- Helpers -----------------------------------------------------------
 

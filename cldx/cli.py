@@ -43,6 +43,7 @@ from cldx.session_picker import SessionPickerError, list_panes, pick_session
 from cldx.session_store import SessionStore
 from cldx.tmux_controller import TmuxController
 from cldx.tmux_monitor import TmuxMonitor
+from cldx.wait_bar import countdown_wait
 
 # force_terminal so colors survive prompt_toolkit's stdout wrapper.
 console = Console(force_terminal=True, color_system="truecolor", soft_wrap=True)
@@ -149,6 +150,10 @@ class BridgeUI:
         # Phase 2: jsonl event log for this run.
         self.store = SessionStore(profile=policy.active_profile_name, pane=pane)
 
+        # Phase 3: signal that's set whenever the user types something while
+        # a wait-bar is counting down. `None` outside of a wait epoch.
+        self._wait_event: asyncio.Event | None = None
+
     # --- printing (safe under patch_stdout) ---
 
     def log(self, msg: str) -> None:
@@ -215,16 +220,24 @@ class BridgeUI:
             self._update_prompt_label()
             return
 
+        # Phase 3: destructive ops bypass the wait bar entirely.
+        if decision.is_destructive and decision.decision in (
+            PolicyDecision.AUTO_YES, PolicyDecision.AUTO_NO
+        ):
+            self.pending = prompt
+            self.log(
+                f"[red bold]⚠ destructive op detected[/red bold] — "
+                f"waiting indefinitely for your reply (policy would have "
+                f"{decision.decision.value})"
+            )
+            self.store.log_note("destructive op pending — bypassed auto")
+            self._update_prompt_label()
+            return
+
         if decision.decision == PolicyDecision.AUTO_YES:
-            outcome = await _act_yes(self.controller, prompt)
-            self.log(f"[green]→ {outcome}[/green]")
-            self.store.log_action(keys=outcome, source="policy")
-            self.pending = None
+            await self._auto_with_wait(prompt, decision, action="yes")
         elif decision.decision == PolicyDecision.AUTO_NO:
-            outcome = await _act_no(self.controller, prompt)
-            self.log(f"[red]→ {outcome}[/red]")
-            self.store.log_action(keys=outcome, source="policy")
-            self.pending = None
+            await self._auto_with_wait(prompt, decision, action="no")
         elif decision.decision == PolicyDecision.ESCALATE_TELEGRAM:
             self.pending = prompt
             self.log(f"[yellow]→ waiting for your reply (reason: {decision.reason})[/yellow]")
@@ -232,6 +245,66 @@ class BridgeUI:
             self.pending = prompt
             self.log(f"[dim]→ waiting (reason: {decision.reason})[/dim]")
 
+        self._update_prompt_label()
+
+    # --- wait-bar coordination ----------------------------------------------
+
+    async def _auto_with_wait(
+        self,
+        prompt: ClassifiedPrompt,
+        decision: DecisionResult,
+        action: str,
+    ) -> None:
+        """Run the per-profile countdown, then fire the auto action.
+
+        While the wait is active, `self.pending` points at this prompt so
+        the input loop's y/n/digit/text shortcuts target the right thing,
+        and any input the user supplies sets `self._wait_event`, which
+        cancels the wait early.
+        """
+        interval = decision.wait_interval_seconds
+        if interval <= 0:
+            await self._fire_auto(prompt, action)
+            return
+
+        self._wait_event = asyncio.Event()
+        self.pending = prompt
+        self._update_prompt_label()
+
+        color = "green" if action == "yes" else "red"
+        self.log(
+            f"[{color}]⏳ auto-{action} in {interval:.1f}s[/{color}] "
+            f"[dim](type to override)[/dim]"
+        )
+
+        try:
+            result = await countdown_wait(interval, self._wait_event)
+        finally:
+            self._wait_event = None
+
+        if result.overridden:
+            # User typed something — input loop is handling it.
+            self.log("[cyan]wait cancelled by your input[/cyan]")
+            self.store.log_note(
+                f"wait cancelled by user after {result.elapsed:.2f}s"
+            )
+            return
+
+        # Timer won; the prompt may still be pending if the user typed nothing
+        # but the input loop also cleared it (race). Re-check.
+        if self.pending is not prompt:
+            return
+        await self._fire_auto(prompt, action)
+
+    async def _fire_auto(self, prompt: ClassifiedPrompt, action: str) -> None:
+        if action == "yes":
+            outcome = await _act_yes(self.controller, prompt)
+            self.log(f"[green]→ {outcome}[/green]")
+        else:
+            outcome = await _act_no(self.controller, prompt)
+            self.log(f"[red]→ {outcome}[/red]")
+        self.store.log_action(keys=outcome, source="policy")
+        self.pending = None
         self._update_prompt_label()
 
     # --- input ---
@@ -279,6 +352,11 @@ class BridgeUI:
                 self.log(f"[red]input error:[/red] {e}")
 
     async def _handle_input(self, text: str) -> None:
+        # Phase 3: any input cancels a running wait bar so the auto-fire
+        # doesn't race the user's reply.
+        if self._wait_event is not None:
+            self._wait_event.set()
+
         if text.startswith("/"):
             await self._handle_slash(text[1:].strip())
             return
