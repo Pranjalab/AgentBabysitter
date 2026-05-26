@@ -230,8 +230,27 @@ class BridgeUI:
 
     # --- event handlers ---
 
+    # Prompt types we'll act on the moment we see them in a change event
+    # (not waiting for the pane to fully stabilise). Idle/Running/Complete
+    # are noisy mid-stream signals — we only handle those in on_stable.
+    _EAGER_TYPES = frozenset({
+        PromptType.APPROVAL_YN,
+        PromptType.APPROVAL_MENU,
+        PromptType.TEXT_INPUT,
+    })
+
+    async def on_change(self, _new_content: str, snapshot: str) -> None:
+        """Fired on every pane diff. Catches approval prompts the moment they
+        render, so we don't have to wait for the pane to go fully quiet."""
+        async with self._action_lock:
+            prompt = self.classifier.classify(snapshot)
+            if prompt.type not in self._EAGER_TYPES:
+                return
+            await self._dispatch_classified(prompt, snapshot, source="change")
+
     async def on_stable(self, snapshot: str) -> None:
-        """Pane settled. Mirror it, classify it, then act per policy."""
+        """Pane settled. Mirror it; also act as a safety net if an approval
+        prompt arrived without ever triggering an on_change diff (rare)."""
         async with self._action_lock:
             self._print_mirror(snapshot)
             prompt = self.classifier.classify(snapshot)
@@ -251,17 +270,26 @@ class BridgeUI:
                 self.pending_signature = None
                 return
 
-            decision = self.policy.decide(prompt)
-            sig = prompt.signature()
-            if sig == self.pending_signature:
-                return  # same prompt as last fire — already handled / awaiting
-            self.pending_signature = sig
+            await self._dispatch_classified(prompt, snapshot, source="stable")
 
-            # Phase 2: persist every actionable prompt + its decision.
-            self.store.log_prompt(prompt)
-            self.store.log_decision(decision)
+    async def _dispatch_classified(
+        self, prompt: ClassifiedPrompt, snapshot: str, source: str,
+    ) -> None:
+        """Common path: dedup by signature, persist, hand off to policy."""
+        decision = self.policy.decide(prompt)
+        sig = prompt.signature()
+        if sig == self.pending_signature:
+            return  # same prompt as last fire — already handled / awaiting
+        self.pending_signature = sig
 
-            await self._handle_decision(prompt, decision)
+        if self.args.verbose if hasattr(self.args, "verbose") else False:
+            self.log(f"[dim]· detected {prompt.type.value} via {source}[/dim]")
+
+        # Phase 2: persist every actionable prompt + its decision.
+        self.store.log_prompt(prompt)
+        self.store.log_decision(decision)
+
+        await self._handle_decision(prompt, decision)
 
     async def _handle_decision(
         self, prompt: ClassifiedPrompt, decision: DecisionResult
@@ -632,10 +660,37 @@ class BridgeUI:
             self.log(
                 "commands: /y /n /<digit>  approve/deny pending prompt; "
                 "/skip clear pending; /refresh reprint mirror; "
+                "/snapshot show what cldx currently thinks the pane contains; "
                 "/profile <name> switch policy profile; /panes list tmux panes; "
                 "/raw <keys> send named tmux keys (e.g. 'C-c'); "
                 "/quit exit. Anything else types into Claude."
             )
+            return
+
+        if head == "snapshot":
+            try:
+                raw = await self.monitor.capture()
+                snap = self.monitor.strip_ansi(raw)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[red]capture failed:[/red] {e}")
+                return
+            prompt = self.classifier.classify(snap)
+            self.print_rich(Panel(
+                snap.strip() or "(empty)",
+                title=f"[bold]pane snapshot ({len(snap.splitlines())} lines)[/bold]",
+                border_style="cyan",
+            ))
+            self.log(f"[bold]classified as:[/bold] {prompt.type.value}")
+            if prompt.extracted_command:
+                self.log(f"  extracted_command: {prompt.extracted_command}")
+            if prompt.menu_options:
+                self.log("  menu_options:")
+                for opt in prompt.menu_options:
+                    self.log(f"    {opt}")
+            if prompt.matched_pattern:
+                self.log(f"  matched detection pattern: {prompt.matched_pattern}")
+            self.log(f"  signature: {prompt.signature()}")
+            self.log(f"  pending_signature: {self.pending_signature}")
             return
 
         if head == "skip":
@@ -780,9 +835,14 @@ class BridgeUI:
             except NotImplementedError:
                 pass
 
-        # Background: monitor pane.
+        # Background: monitor pane. We hook BOTH callbacks so approval
+        # prompts get caught the moment they appear (on_change) even when
+        # Claude's UI keeps the pane animating and on_stable never fires.
         monitor_task = asyncio.create_task(
-            self.monitor.watch(on_stable=self.on_stable)
+            self.monitor.watch(
+                on_change=self.on_change,
+                on_stable=self.on_stable,
+            )
         )
 
         # Foreground: input loop, with patch_stdout so log() / Rich prints
