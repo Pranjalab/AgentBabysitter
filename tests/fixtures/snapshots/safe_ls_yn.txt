@@ -1,0 +1,5 @@
+⏺ Bash(ls -la)
+  ⎿  total 24
+     drwxr-xr-x  4 user  staff   128 Mar  1 10:00 .
+
+Do you want to proceed? (y/n)
