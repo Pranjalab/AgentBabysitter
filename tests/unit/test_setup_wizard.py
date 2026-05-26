@@ -11,7 +11,10 @@ from rich.console import Console
 from cldx.secrets import env_file_path
 from cldx.setup_wizard import (
     run_anthropic_setup,
+    run_bedrock_setup,
     run_full_setup,
+    run_gemini_setup,
+    run_llm_setup,
     run_telegram_setup,
     show_config,
 )
@@ -20,7 +23,18 @@ from cldx.setup_wizard import (
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLDX_HOME", str(tmp_path))
-    for k in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+    for k in (
+        "ANTHROPIC_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+    ):
         monkeypatch.delenv(k, raising=False)
     return tmp_path
 
@@ -240,5 +254,215 @@ def test_show_config_indicates_unset_secrets(isolated_home, cap_console):
     console, buf = cap_console
     show_config(console=console)
     out = buf.getvalue()
-    # Three "not set" markers, one per secret
+    # At least three "not set" markers — Anthropic / Telegram bot / chat
     assert out.count("not set") >= 3
+
+
+# --- Bedrock wizard -------------------------------------------------------
+
+def test_bedrock_wizard_happy_path(isolated_home, cap_console):
+    console, _ = cap_console
+    saved_token = "bedrock-api-key-" + "x" * 64
+    ok = run_bedrock_setup(
+        console=console,
+        input_fn=_scripted([
+            saved_token,           # bearer token
+            "ap-south-1",          # region
+            "",                    # use default model id
+            "n",                   # skip test call
+            "n",                   # don't update agent_name.yml
+        ]),
+    )
+    assert ok is True
+    assert os.environ["AWS_BEARER_TOKEN_BEDROCK"] == saved_token
+    assert os.environ["AWS_REGION"] == "ap-south-1"
+    # File should be on disk too.
+    from cldx.secrets import env_file_path
+    assert env_file_path("bedrock").exists()
+
+
+def test_bedrock_wizard_rewrites_agent_yml_on_confirm(isolated_home, cap_console):
+    console, _ = cap_console
+    custom_model = "apac.anthropic.claude-haiku-4-5-20251001-v1:0"
+    ok = run_bedrock_setup(
+        console=console,
+        input_fn=_scripted([
+            "bedrock-api-key-" + "y" * 50,
+            "ap-south-1",
+            custom_model,
+            "n",                  # skip test
+            "y",                  # YES update agent_name.yml
+        ]),
+    )
+    assert ok is True
+    # agent_name.yml should now reflect the new model.
+    import yaml
+    agent_path = isolated_home / "config" / "agent_name.yml"
+    data = yaml.safe_load(agent_path.read_text())
+    assert data["model"] == f"bedrock:{custom_model}"
+    assert data["aws_region"] == "ap-south-1"
+
+
+def test_bedrock_wizard_skipped_with_empty_token(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_bedrock_setup(
+        console=console,
+        input_fn=_scripted([""]),
+    )
+    assert ok is False
+    assert "AWS_BEARER_TOKEN_BEDROCK" not in os.environ
+
+
+def test_bedrock_wizard_rejects_obviously_short_token(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_bedrock_setup(
+        console=console,
+        input_fn=_scripted([
+            "short",                                       # too short, retry
+            "bedrock-api-key-" + "z" * 64,                 # accept
+            "us-east-1",
+            "",
+            "n",
+            "n",
+        ]),
+    )
+    assert ok is True
+
+
+def test_bedrock_wizard_runs_test_call_when_user_accepts(isolated_home, cap_console):
+    console, _ = cap_console
+    calls = []
+    fake_test = lambda token, region, model_id: (
+        calls.append((token, region, model_id)) or (True, f"got {model_id}")
+    )[1:] and (True, f"got {model_id}")
+    ok = run_bedrock_setup(
+        console=console,
+        input_fn=_scripted([
+            "bedrock-api-key-" + "k" * 50,
+            "us-east-1",
+            "",                  # default model
+            "y",                 # YES run test
+            "n",                 # don't update agent yml
+        ]),
+        test_fn=fake_test,
+    )
+    assert ok is True
+    assert calls and "claude-haiku" in calls[0][2]
+
+
+# --- Gemini wizard --------------------------------------------------------
+
+def test_gemini_wizard_happy_path(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_gemini_setup(
+        console=console,
+        input_fn=_scripted([
+            "AIzaSyDummyTestKey1234567890",     # API key
+            "",                                  # use default model
+            "n",                                 # skip test
+            "n",                                 # don't update agent_name.yml
+        ]),
+    )
+    assert ok is True
+    assert os.environ["GEMINI_API_KEY"] == "AIzaSyDummyTestKey1234567890"
+
+
+def test_gemini_wizard_rewrites_agent_yml_on_confirm(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_gemini_setup(
+        console=console,
+        input_fn=_scripted([
+            "AIzaSyDummyTestKey1234567890",
+            "gemini-1.5-flash",
+            "n",
+            "y",                                # update agent_name.yml
+        ]),
+    )
+    assert ok is True
+    import yaml
+    data = yaml.safe_load((isolated_home / "config" / "agent_name.yml").read_text())
+    assert data["model"] == "gemini:gemini-1.5-flash"
+
+
+def test_gemini_wizard_rejects_short_key(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_gemini_setup(
+        console=console,
+        input_fn=_scripted([
+            "short",                            # retry
+            "AIzaSyDummyTestKey1234567890",
+            "",
+            "n",
+            "n",
+        ]),
+    )
+    assert ok is True
+
+
+def test_gemini_wizard_skipped_with_empty_key(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_gemini_setup(console=console, input_fn=_scripted([""]))
+    assert ok is False
+
+
+# --- LLM picker ----------------------------------------------------------
+
+def test_llm_picker_routes_to_anthropic(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_llm_setup(
+        console=console,
+        input_fn=_scripted([
+            "1",                                # pick anthropic
+            "sk-ant-validkey1234567890",
+            "n",                                # skip API test
+        ]),
+    )
+    assert ok is True
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-validkey1234567890"
+
+
+def test_llm_picker_routes_to_bedrock(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_llm_setup(
+        console=console,
+        input_fn=_scripted([
+            "2",                                # pick bedrock
+            "bedrock-api-key-" + "a" * 50,
+            "ap-south-1",
+            "",                                 # default model
+            "n",                                # skip test
+            "n",                                # don't update agent yml
+        ]),
+    )
+    assert ok is True
+    assert os.environ["AWS_BEARER_TOKEN_BEDROCK"].startswith("bedrock-api-key-")
+
+
+def test_llm_picker_routes_to_gemini(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_llm_setup(
+        console=console,
+        input_fn=_scripted([
+            "3",                                # pick gemini
+            "AIzaSyDummyTestKey1234567890",
+            "",                                 # default model
+            "n",                                # skip test
+            "n",                                # don't update agent yml
+        ]),
+    )
+    assert ok is True
+
+
+def test_llm_picker_skip(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_llm_setup(console=console, input_fn=_scripted(["4"]))
+    assert ok is False
+
+
+def test_llm_picker_rejects_invalid_choice(isolated_home, cap_console):
+    console, _ = cap_console
+    ok = run_llm_setup(
+        console=console,
+        input_fn=_scripted(["wat", "9", "4"]),  # garbage → 9 → finally skip
+    )
+    assert ok is False

@@ -27,8 +27,14 @@ KNOWN_MODELS = {
     "claude-haiku-4-5",
     "claude-sonnet-4-6",
     "claude-opus-4-7",
-    # Future Ollama models will be prefixed with "ollama:"
+    # Other backends use prefixes:
+    #   bedrock:<modelId>     e.g. bedrock:us.anthropic.claude-haiku-4-5-20251001-v1:0
+    #   gemini:<modelId>      e.g. gemini:gemini-2.0-flash
+    #   ollama:<model:tag>    e.g. ollama:llama3.1:8b
 }
+
+# A backend is the upstream service that actually runs the LLM call.
+KNOWN_BACKENDS = ("anthropic", "bedrock", "gemini", "ollama")
 
 
 class AgentError(RuntimeError):
@@ -42,6 +48,29 @@ class Agent:
     model: str = "claude-haiku-4-5"
     api_key_env: str = "ANTHROPIC_API_KEY"
     limits: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_LIMITS))
+    # Backend-specific extras (only some are read by some backends)
+    aws_region: str = "us-east-1"          # Bedrock
+
+    # --- Backend dispatch -----------------------------------------------
+
+    @property
+    def backend(self) -> str:
+        """Which upstream provider this agent's model runs on."""
+        if self.model.startswith("bedrock:"):
+            return "bedrock"
+        if self.model.startswith("gemini:"):
+            return "gemini"
+        if self.model.startswith("ollama:"):
+            return "ollama"
+        return "anthropic"
+
+    @property
+    def bare_model_id(self) -> str:
+        """Strip the backend prefix from `model` (e.g. `gemini:foo` → `foo`)."""
+        for prefix in ("bedrock:", "gemini:", "ollama:"):
+            if self.model.startswith(prefix):
+                return self.model[len(prefix):]
+        return self.model
 
     # --- factories ---
 
@@ -90,18 +119,25 @@ class Agent:
             model=model,
             api_key_env=data.get("api_key_env", "ANTHROPIC_API_KEY"),
             limits=limits,
+            aws_region=data.get("aws_region", "us-east-1"),
         )
 
     # --- validation ---
 
     @staticmethod
     def _validate_model(model: str) -> None:
-        if model.startswith("ollama:"):
-            return  # future: defer validation to the Ollama adapter
+        # Prefixed models are validated by their respective backend adapters;
+        # we only enforce that the prefix is one we know how to dispatch.
+        if model.startswith(("bedrock:", "gemini:", "ollama:")):
+            # The part after the prefix must not be empty.
+            _, _, rest = model.partition(":")
+            if not rest.strip():
+                raise AgentError(f"backend model id is empty: {model!r}")
+            return
         if model not in KNOWN_MODELS:
             raise AgentError(
                 f"unknown model {model!r}. Known: {sorted(KNOWN_MODELS)} "
-                "or 'ollama:<model>'"
+                "or use a backend prefix: bedrock:<id> / gemini:<id> / ollama:<id>"
             )
 
     # --- introspection ---

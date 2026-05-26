@@ -13,13 +13,38 @@ persona: |
   matter. No hedging, no apologies, no fluff. Never invent details that
   aren't in the source text.
 
-# Anthropic Claude Haiku is fast + cheap; the larger Opus/Sonnet models
-# are overkill for a short summary. Switch via this field.
+# --- LLM backend ------------------------------------------------------------
+#
+# Pick ONE of the following styles. The prefix selects the backend.
+#
+#   Anthropic API direct (default — needs ANTHROPIC_API_KEY):
+#     model: claude-haiku-4-5
+#     model: claude-sonnet-4-6
+#
+#   AWS Bedrock (needs AWS_BEARER_TOKEN_BEDROCK + AWS_REGION):
+#     model: bedrock:us.anthropic.claude-haiku-4-5-20251001-v1:0
+#     model: bedrock:apac.anthropic.claude-haiku-4-5-20251001-v1:0
+#     model: bedrock:anthropic.claude-3-5-haiku-20241022-v1:0
+#
+#   Google Gemini (needs GEMINI_API_KEY):
+#     model: gemini:gemini-2.0-flash
+#     model: gemini:gemini-1.5-flash
+#
+#   Local Ollama (stub — falls back to truncation for now):
+#     model: ollama:llama3.1:8b
+#
+# Run `cldx setup llm` to pick interactively; that flow will rewrite
+# this file with your selection.
+
 model: claude-haiku-4-5
 
-# Environment variable to read the API key from. Default matches the
-# Anthropic SDK's own default.
+# Environment variable to read the Anthropic API key from. Only used by
+# the Anthropic-direct backend; Bedrock / Gemini read their own vars.
 api_key_env: ANTHROPIC_API_KEY
+
+# AWS region for the Bedrock backend (ignored by other backends). Override
+# at runtime with AWS_REGION or by editing this file directly.
+aws_region: us-east-1
 
 # Hard character budgets per summary mode. The summarizer prompt asks
 # for these; we also truncate the response defensively.

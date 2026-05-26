@@ -95,8 +95,8 @@ def parse_cli_args() -> argparse.Namespace:
     )
     setup_p.add_argument(
         "target", nargs="?", default="all",
-        choices=("all", "telegram", "anthropic"),
-        help="Which integration to configure (default: all).",
+        choices=("all", "telegram", "llm", "anthropic", "bedrock", "gemini"),
+        help="Which integration to configure (default: all = pick LLM + Telegram).",
     )
 
     config_p = sub.add_parser(
@@ -863,12 +863,21 @@ def _run_setup_subcommand(args: argparse.Namespace) -> int:
     """Dispatch `cldx setup [target]`. All wizards return cleanly on Ctrl-C."""
     from cldx.setup_wizard import (
         run_anthropic_setup,
+        run_bedrock_setup,
         run_full_setup,
+        run_gemini_setup,
+        run_llm_setup,
         run_telegram_setup,
     )
     try:
         if args.target == "anthropic":
             run_anthropic_setup(console=console)
+        elif args.target == "bedrock":
+            run_bedrock_setup(console=console)
+        elif args.target == "gemini":
+            run_gemini_setup(console=console)
+        elif args.target == "llm":
+            run_llm_setup(console=console)
         elif args.target == "telegram":
             run_telegram_setup(console=console)
         else:  # "all"

@@ -61,23 +61,48 @@ You can also run the module form: `python -m cldx --auto-detect`.
 ## Setup
 
 ```bash
-cldx setup              # interactive wizard for both Anthropic + Telegram
-cldx setup anthropic    # just the Claude API key (used by the summarizer)
+cldx setup              # picks an LLM backend, then walks through Telegram
+cldx setup llm          # just the LLM picker (anthropic / bedrock / gemini)
+cldx setup anthropic    # direct Anthropic key
+cldx setup bedrock      # AWS Bedrock (bearer token + region)
+cldx setup gemini       # Google Gemini API key
 cldx setup telegram     # bot token + auto-discovers your chat ID
-cldx config show        # masked summary of what's configured + where it lives
+cldx config show        # masked view of what's configured + active backend
 ```
 
-The Anthropic wizard validates the key against the real API with a 10-token
-call (~$0.0000001). The Telegram wizard creates the bot via your message
-to `@BotFather`, then auto-discovers your chat ID by polling
-`getUpdates` after you message your new bot once.
+### LLM backends
 
-All secrets land in `~/.cldx/config/{anthropic,telegram}.env` with mode
-`0600`. They're loaded into the process environment on every `cldx` run,
-so `ANTHROPIC_API_KEY` and `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`
-become available to the summarizer and Telegram bridge without any
-shell-rc setup. (You can still override via `export VAR=...` if you
-prefer — file values don't clobber a parent-shell environment.)
+cldx can summarize Claude Code activity through any of three backends —
+pick whichever you have keys for. The agent's `model:` prefix selects:
+
+| Prefix      | Backend         | Auth needed                              | Install extra              |
+|-------------|-----------------|------------------------------------------|----------------------------|
+| (none)      | Anthropic direct | `ANTHROPIC_API_KEY`                      | (built-in)                 |
+| `bedrock:`  | AWS Bedrock     | `AWS_BEARER_TOKEN_BEDROCK` + region      | `pip install 'cldx[bedrock]'` |
+| `gemini:`   | Google Gemini   | `GEMINI_API_KEY`                         | `pip install 'cldx[gemini]'`  |
+| `ollama:`   | Local Ollama    | (none — stub)                            | (not yet implemented)      |
+
+Each wizard validates the credentials with a tiny upstream call before
+saving, then offers to flip your `agent_name.yml` over to that backend
+so `cldx` immediately uses it.
+
+The Telegram wizard creates the bot via `@BotFather`, then
+auto-discovers your chat ID by polling `getUpdates` after you message
+your new bot once.
+
+### Where secrets land
+
+All secrets go to `~/.cldx/config/*.env` files with mode `0600`:
+
+- `anthropic.env` — `ANTHROPIC_API_KEY`
+- `bedrock.env` — `AWS_BEARER_TOKEN_BEDROCK` + `AWS_REGION`
+- `gemini.env` — `GEMINI_API_KEY`
+- `telegram.env` — `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
+
+They're loaded into the process environment on every `cldx` run, so the
+summarizer and Telegram bridge find them automatically. (You can still
+override via `export VAR=...` if you prefer — file values don't clobber
+a parent-shell environment.)
 
 ### Useful flags
 

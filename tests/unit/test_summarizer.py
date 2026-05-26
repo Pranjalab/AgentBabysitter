@@ -1,10 +1,12 @@
-"""Phase 6 — summarizer: Claude API + fallbacks + char budgets.
+"""Phase 6 — summarizer: dispatch across Anthropic / Bedrock / Gemini.
 
-All tests mock the Anthropic SDK; no real API calls.
+All tests mock the upstream SDKs; no real API calls.
 """
 
 from __future__ import annotations
 
+import json
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -138,3 +140,184 @@ def test_mode_instructions_cover_all_modes():
     """Every defined SummaryMode must have a corresponding instruction."""
     expected = {"prompt_summary", "escalation_summary", "completion_summary"}
     assert set(MODE_INSTRUCTIONS.keys()) == expected
+
+
+# --- Bedrock backend -----------------------------------------------------
+
+
+def _bedrock_agent(tmp_path):
+    """Build an Agent pinned to a Bedrock model id."""
+    import yaml
+    cfg = tmp_path / "agent_name.yml"
+    cfg.write_text(yaml.safe_dump({
+        "name": "Aria",
+        "persona": "be brief",
+        "model": "bedrock:us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "aws_region": "ap-south-1",
+    }))
+    return Agent.load(cfg)
+
+
+async def test_summarize_dispatches_to_bedrock(monkeypatch, tmp_path):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-api-key-test")
+    monkeypatch.setenv("AWS_REGION", "ap-south-1")
+    agent = _bedrock_agent(tmp_path)
+
+    # Build a fake boto3 module the summarizer can import.
+    fake_body = MagicMock()
+    fake_body.read.return_value = json.dumps({
+        "content": [{"type": "text", "text": "ok via bedrock"}],
+    }).encode()
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = {"body": fake_body}
+    fake_boto3 = MagicMock()
+    fake_boto3.client.return_value = fake_client
+
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+
+    result = await summarize("prompt_summary", "claude wants to ls", agent)
+    assert "ok via bedrock" in result
+    fake_boto3.client.assert_called_with("bedrock-runtime", region_name="ap-south-1")
+    # Verify the body had the right shape.
+    kw = fake_client.invoke_model.call_args.kwargs
+    assert kw["modelId"] == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    body = json.loads(kw["body"])
+    assert body["anthropic_version"] == "bedrock-2023-05-31"
+    assert body["messages"][0]["content"] == "claude wants to ls"
+    assert "Mode: prompt_summary" in body["system"]
+
+
+async def test_summarize_bedrock_falls_back_when_no_creds(monkeypatch, tmp_path):
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    agent = _bedrock_agent(tmp_path)
+
+    result = await summarize("prompt_summary", "ctx", agent)
+    assert "[unsummarized" in result
+    assert "AWS" in result or "credentials" in result.lower()
+
+
+async def test_summarize_bedrock_falls_back_when_boto3_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-api-key-test")
+    # Force the boto3 import to fail by stubbing it as None.
+    monkeypatch.setitem(sys.modules, "boto3", None)
+    agent = _bedrock_agent(tmp_path)
+
+    result = await summarize("prompt_summary", "ctx", agent)
+    assert "[unsummarized" in result
+
+
+# --- Gemini backend ------------------------------------------------------
+
+
+def _gemini_agent(tmp_path):
+    import yaml
+    cfg = tmp_path / "agent_name.yml"
+    cfg.write_text(yaml.safe_dump({
+        "name": "Aria",
+        "persona": "be brief",
+        "model": "gemini:gemini-2.0-flash",
+    }))
+    return Agent.load(cfg)
+
+
+async def test_summarize_dispatches_to_gemini(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key")
+    agent = _gemini_agent(tmp_path)
+
+    fake_response = MagicMock()
+    fake_response.text = "ok via gemini"
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(return_value=fake_response)
+
+    fake_genai = MagicMock()
+    fake_genai.Client.return_value = fake_client
+    fake_types = MagicMock()
+    fake_types.GenerateContentConfig = MagicMock()
+
+    # Build a fake google module tree so `from google import genai` works.
+    fake_google_pkg = MagicMock()
+    fake_google_pkg.genai = fake_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google_pkg)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+
+    result = await summarize("prompt_summary", "claude wants to ls", agent)
+    assert "ok via gemini" in result
+    fake_genai.Client.assert_called_with(api_key="fake-gemini-key")
+    fake_client.aio.models.generate_content.assert_awaited_once()
+    kw = fake_client.aio.models.generate_content.await_args.kwargs
+    assert kw["model"] == "gemini-2.0-flash"
+    assert kw["contents"] == "claude wants to ls"
+
+
+async def test_summarize_gemini_falls_back_when_no_key(monkeypatch, tmp_path):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    agent = _gemini_agent(tmp_path)
+
+    result = await summarize("prompt_summary", "ctx", agent)
+    assert "[unsummarized" in result
+    assert "gemini" in result.lower()
+
+
+async def test_summarize_gemini_accepts_google_api_key_var(monkeypatch, tmp_path):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "from-google-var")
+    agent = _gemini_agent(tmp_path)
+
+    fake_response = MagicMock()
+    fake_response.text = "ok"
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(return_value=fake_response)
+    fake_genai = MagicMock()
+    fake_genai.Client.return_value = fake_client
+    fake_google_pkg = MagicMock()
+    fake_google_pkg.genai = fake_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google_pkg)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", MagicMock())
+
+    result = await summarize("prompt_summary", "ctx", agent)
+    assert "ok" in result
+    fake_genai.Client.assert_called_with(api_key="from-google-var")
+
+
+# --- Agent.backend property ----------------------------------------------
+
+
+def test_agent_backend_for_anthropic_default():
+    assert Agent().backend == "anthropic"
+
+
+def test_agent_backend_for_bedrock_prefix(tmp_path):
+    agent = _bedrock_agent(tmp_path)
+    assert agent.backend == "bedrock"
+    assert agent.bare_model_id == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def test_agent_backend_for_gemini_prefix(tmp_path):
+    agent = _gemini_agent(tmp_path)
+    assert agent.backend == "gemini"
+    assert agent.bare_model_id == "gemini-2.0-flash"
+
+
+def test_agent_backend_for_ollama_prefix(tmp_path):
+    import yaml
+    cfg = tmp_path / "a.yml"
+    cfg.write_text(yaml.safe_dump({"name": "x", "model": "ollama:llama3.1:8b"}))
+    agent = Agent.load(cfg)
+    assert agent.backend == "ollama"
+
+
+def test_agent_validates_prefixed_model_must_have_id():
+    """A prefix with empty body must raise."""
+    from cldx.agent import AgentError
+    import yaml
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".yml", mode="w", delete=False) as f:
+        yaml.safe_dump({"name": "x", "model": "bedrock:"}, f)
+        path = f.name
+    with pytest.raises(AgentError):
+        Agent.load(path)
