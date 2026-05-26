@@ -19,7 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from cldx.agent import Agent
-from cldx.summarizer import summarize
+from cldx.summarizer import summarize_with_status
 
 
 # Realistic Claude Code snapshots — what a real pane looks like in each mode.
@@ -108,7 +108,7 @@ async def run_llm_test(console: Console | None = None,
 
         start = time.perf_counter()
         try:
-            summary = await summarize(mode, context, agent)
+            result = await summarize_with_status(mode, context, agent)
         except Exception as e:  # noqa: BLE001 — show errors, don't crash
             elapsed = time.perf_counter() - start
             console.print(f"[red]✗ exception after {elapsed:.2f}s: {e}[/red]")
@@ -116,16 +116,22 @@ async def run_llm_test(console: Console | None = None,
             continue
         elapsed = time.perf_counter() - start
 
-        if summary.startswith("[unsummarized"):
-            console.print(f"[yellow]⚠ fallback after {elapsed:.2f}s[/yellow]")
-            console.print(Panel(summary, border_style="yellow", expand=False))
+        if not result.summarized:
+            console.print(
+                f"[yellow]⚠ fallback after {elapsed:.2f}s "
+                f"({result.fallback_reason})[/yellow]"
+            )
+            console.print(
+                "[dim]Telegram would receive the raw context (shown below).[/dim]"
+            )
+            console.print(Panel(result.text, border_style="yellow", expand=False))
             failures += 1
         else:
             console.print(
                 f"[green]✓ summary in {elapsed:.2f}s "
-                f"({len(summary)} chars):[/green]"
+                f"({len(result.text)} chars):[/green]"
             )
-            console.print(Panel(summary, border_style="green", expand=False))
+            console.print(Panel(result.text, border_style="green", expand=False))
 
     console.print()
     if failures:

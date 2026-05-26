@@ -27,7 +27,7 @@ from cldx._paths import cldx_home
 from cldx.agent import Agent
 from cldx.policy_engine import DecisionResult
 from cldx.prompt_classifier import ClassifiedPrompt
-from cldx.summarizer import summarize
+from cldx.summarizer import summarize_with_status
 
 
 # --- Config loader --------------------------------------------------------
@@ -196,11 +196,21 @@ class TelegramBridge:
     async def notify_approval_needed(
         self, prompt: ClassifiedPrompt, decision: DecisionResult
     ) -> None:
-        """Summarise the prompt and ask the user via Telegram."""
+        """Summarise the prompt and ask the user via Telegram.
+
+        If the LLM call fails for any reason, the raw (truncated) pane
+        context is sent instead — no ``[unsummarized: …]`` marker leaks
+        into the chat; the fallback reason is logged locally only.
+        """
         self._pending_prompt = prompt
         ctx = prompt.context or prompt.extracted_command or prompt.raw_text or ""
-        summary = await summarize("prompt_summary", ctx, self.agent)
-        text = f"🤖 {summary}\n\nReply: y / n"
+        result = await summarize_with_status("prompt_summary", ctx, self.agent)
+        if not result.summarized:
+            self._log_local(
+                f"LLM summary unavailable ({result.fallback_reason}); "
+                f"sending raw context to Telegram."
+            )
+        text = f"🤖 {result.text}\n\nReply: y / n"
         if prompt.menu_options:
             digits = "/".join(str(i + 1) for i in range(len(prompt.menu_options)))
             text += f" / {digits}"
@@ -208,12 +218,27 @@ class TelegramBridge:
         await self._send(text)
 
     async def notify_completion(self, context: str) -> None:
-        summary = await summarize("completion_summary", context, self.agent)
-        await self._send(f"✓ Claude finished:\n\n{summary}")
+        result = await summarize_with_status("completion_summary", context, self.agent)
+        if not result.summarized:
+            self._log_local(
+                f"LLM summary unavailable ({result.fallback_reason}); "
+                f"sending raw context."
+            )
+        await self._send(f"✓ Claude finished:\n\n{result.text}")
 
     async def notify_escalation(self, context: str) -> None:
-        summary = await summarize("escalation_summary", context, self.agent)
-        await self._send(f"⚠ Claude needs a decision:\n\n{summary}")
+        result = await summarize_with_status("escalation_summary", context, self.agent)
+        if not result.summarized:
+            self._log_local(
+                f"LLM summary unavailable ({result.fallback_reason}); "
+                f"sending raw context."
+            )
+        await self._send(f"⚠ Claude needs a decision:\n\n{result.text}")
+
+    def _log_local(self, msg: str) -> None:
+        """Local-only diagnostic line. Currently prints; BridgeUI may swap
+        this for its rich-aware logger by monkey-patching."""
+        print(f"[telegram_bridge] {msg}", flush=True)
 
     async def _send(self, text: str) -> None:
         if self._app is None:

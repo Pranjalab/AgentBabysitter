@@ -24,12 +24,30 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from cldx.agent import Agent
 
 
 SummaryMode = Literal["prompt_summary", "escalation_summary", "completion_summary"]
+
+
+@dataclass(frozen=True)
+class SummaryResult:
+    """Structured result so callers can distinguish real summaries from fallback.
+
+    ``text`` is what should be displayed / sent to Telegram. It NEVER carries
+    the ``[unsummarized: ...]`` marker — when the LLM call failed, ``text``
+    is the raw (truncated) context, ready to forward as-is.
+
+    ``summarized`` is True when an LLM actually produced ``text``. False
+    means we fell back to the raw context, and ``fallback_reason`` explains
+    why (for the local log only — never shown to remote viewers).
+    """
+    text: str
+    summarized: bool
+    fallback_reason: str = ""
 
 
 MODE_INSTRUCTIONS: dict[str, str] = {
@@ -60,7 +78,14 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _fallback(context: str, limit: int, reason: str) -> str:
-    return "[unsummarized: " + reason + "] " + _truncate(context, max(0, limit - 30))
+    """Backward-compat string version of the fallback (no marker, just text).
+
+    Older code paths called ``_fallback()`` expecting a ``str``. We now drop
+    the ``[unsummarized: ...]`` prefix entirely — the raw truncated context
+    is what gets sent to Telegram. ``reason`` is preserved for callers via
+    ``SummaryResult.fallback_reason`` (use ``summarize_with_status``).
+    """
+    return _truncate(context, limit)
 
 
 def _system_prompt_for(mode: SummaryMode, agent: Agent, limit: int) -> str:
@@ -80,35 +105,79 @@ def _system_prompt_for(mode: SummaryMode, agent: Agent, limit: int) -> str:
 # --- Top-level dispatch ---------------------------------------------------
 
 
-async def summarize(
+async def summarize_with_status(
     mode: SummaryMode,
     context: str,
     agent: Agent | None = None,
-) -> str:
-    """Return a short human-readable summary of `context` per the `mode`.
+) -> SummaryResult:
+    """Like ``summarize`` but returns the full SummaryResult.
 
-    Always returns a string. If the configured backend isn't available
-    (missing key, missing SDK, or call fails), returns a fallback with
-    a truncated copy of the raw context.
+    Use this when the caller needs to distinguish real summaries from
+    fallback (e.g. Telegram bridge logs the reason locally) without
+    leaking that distinction into the user-facing text.
     """
     agent = agent or Agent.load()
     if mode not in MODE_INSTRUCTIONS:
         raise ValueError(f"unknown summary mode: {mode}")
     limit = agent.limit_for(mode)
-
     backend = agent.backend
+
     try:
         if backend == "anthropic":
-            return await _summarize_with_anthropic(mode, context, agent, limit)
-        if backend == "bedrock":
-            return await _summarize_with_bedrock(mode, context, agent, limit)
-        if backend == "gemini":
-            return await _summarize_with_gemini(mode, context, agent, limit)
-        if backend == "ollama":
-            return _fallback(context, limit, "ollama backend not yet implemented")
+            text = await _summarize_with_anthropic(mode, context, agent, limit)
+        elif backend == "bedrock":
+            text = await _summarize_with_bedrock(mode, context, agent, limit)
+        elif backend == "gemini":
+            text = await _summarize_with_gemini(mode, context, agent, limit)
+        elif backend == "ollama":
+            return SummaryResult(
+                text=_truncate(context, limit),
+                summarized=False,
+                fallback_reason="ollama backend not yet implemented",
+            )
+        else:
+            return SummaryResult(
+                text=_truncate(context, limit),
+                summarized=False,
+                fallback_reason=f"unknown backend: {backend}",
+            )
+    except _SummarizerFallback as f:
+        return SummaryResult(
+            text=_truncate(context, limit),
+            summarized=False,
+            fallback_reason=f.reason,
+        )
     except Exception as e:  # noqa: BLE001 — fail open, not closed
-        return _fallback(context, limit, f"summarizer error: {e}")
-    return _fallback(context, limit, f"unknown backend: {backend}")
+        return SummaryResult(
+            text=_truncate(context, limit),
+            summarized=False,
+            fallback_reason=f"summarizer error: {e}",
+        )
+
+    return SummaryResult(text=text, summarized=True)
+
+
+async def summarize(
+    mode: SummaryMode,
+    context: str,
+    agent: Agent | None = None,
+) -> str:
+    """Return just the text — what to display / send to Telegram.
+
+    On LLM failure, returns the raw truncated context (NO ``[unsummarized]``
+    marker). Callers that need to know whether the LLM actually summarized
+    should use ``summarize_with_status()`` and inspect ``.summarized`` /
+    ``.fallback_reason``.
+    """
+    result = await summarize_with_status(mode, context, agent)
+    return result.text
+
+
+class _SummarizerFallback(Exception):
+    """Internal sentinel raised by backend adapters to signal 'use raw context'."""
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 # --- Anthropic direct -----------------------------------------------------
@@ -119,12 +188,12 @@ async def _summarize_with_anthropic(
 ) -> str:
     api_key = os.environ.get(agent.api_key_env or "ANTHROPIC_API_KEY")
     if not api_key:
-        return _fallback(context, limit, "no Anthropic API key (run `cldx setup anthropic`)")
+        raise _SummarizerFallback("no Anthropic API key (run `cldx setup anthropic`)")
 
     try:
         from anthropic import AsyncAnthropic  # type: ignore[import-not-found]
     except ImportError:
-        return _fallback(context, limit, "anthropic SDK not installed (pip install anthropic)")
+        raise _SummarizerFallback("anthropic SDK not installed (pip install anthropic)")
 
     client = AsyncAnthropic(api_key=api_key)
     # Prompt cache the persona + instructions block (one-shot cache hit).
@@ -145,7 +214,9 @@ async def _summarize_with_anthropic(
     )
     parts = [getattr(b, "text", "") for b in response.content]
     summary = "".join(parts).strip()
-    return _truncate(summary or _fallback(context, limit, "empty response"), limit)
+    if not summary:
+        raise _SummarizerFallback("empty Anthropic response")
+    return _truncate(summary, limit)
 
 
 # --- AWS Bedrock ----------------------------------------------------------
@@ -169,17 +240,15 @@ async def _summarize_with_bedrock(
         os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_PROFILE")
     )
     if not (has_bearer or has_standard):
-        return _fallback(
-            context, limit,
-            "no AWS credentials (run `cldx setup bedrock` or `aws configure`)",
+        raise _SummarizerFallback(
+            "no AWS credentials (run `cldx setup bedrock` or `aws configure`)"
         )
 
     try:
         import boto3  # type: ignore[import-not-found]
     except ImportError:
-        return _fallback(
-            context, limit,
-            "boto3 not installed (pip install 'cldx[bedrock]' or pip install boto3)",
+        raise _SummarizerFallback(
+            "boto3 not installed (pip install 'cldx[bedrock]' or pip install boto3)"
         )
 
     import asyncio
@@ -210,7 +279,9 @@ async def _summarize_with_bedrock(
         if block.get("type") == "text":
             parts.append(block.get("text", ""))
     summary = "".join(parts).strip()
-    return _truncate(summary or _fallback(context, limit, "empty Bedrock response"), limit)
+    if not summary:
+        raise _SummarizerFallback("empty Bedrock response")
+    return _truncate(summary, limit)
 
 
 # --- Google Gemini --------------------------------------------------------
@@ -225,18 +296,16 @@ async def _summarize_with_gemini(
         or os.environ.get("GOOGLE_API_KEY")
     )
     if not api_key:
-        return _fallback(
-            context, limit,
-            "no Gemini API key (run `cldx setup gemini` or set GEMINI_API_KEY)",
+        raise _SummarizerFallback(
+            "no Gemini API key (run `cldx setup gemini` or set GEMINI_API_KEY)"
         )
 
     try:
         from google import genai  # type: ignore[import-not-found]
         from google.genai import types  # type: ignore[import-not-found]
     except ImportError:
-        return _fallback(
-            context, limit,
-            "google-genai not installed (pip install 'cldx[gemini]' or pip install google-genai)",
+        raise _SummarizerFallback(
+            "google-genai not installed (pip install 'cldx[gemini]' or pip install google-genai)"
         )
 
     client = genai.Client(api_key=api_key)
@@ -251,4 +320,6 @@ async def _summarize_with_gemini(
         config=config,
     )
     summary = (getattr(response, "text", "") or "").strip()
-    return _truncate(summary or _fallback(context, limit, "empty Gemini response"), limit)
+    if not summary:
+        raise _SummarizerFallback("empty Gemini response")
+    return _truncate(summary, limit)

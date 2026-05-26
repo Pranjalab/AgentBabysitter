@@ -12,7 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cldx.agent import Agent
-from cldx.summarizer import MODE_INSTRUCTIONS, _fallback, _truncate, summarize
+from cldx.summarizer import (
+    MODE_INSTRUCTIONS,
+    SummaryResult,
+    _fallback,
+    _truncate,
+    summarize,
+    summarize_with_status,
+)
 
 
 def _mock_anthropic_response(text: str):
@@ -39,11 +46,25 @@ def test_truncate_adds_ellipsis_when_over_limit():
 # --- summarize: fallback behaviors ---------------------------------------
 
 async def test_summarize_falls_back_when_no_api_key(monkeypatch):
+    """summarize() must return raw text (no marker) but flag fallback via status."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     agent = Agent.default()
-    result = await summarize("prompt_summary", "Claude wants to install axios", agent)
-    assert "[unsummarized" in result
-    assert "axios" in result
+    status = await summarize_with_status(
+        "prompt_summary", "Claude wants to install axios", agent,
+    )
+    assert status.summarized is False
+    assert "API key" in status.fallback_reason
+    assert "axios" in status.text
+    assert "[unsummarized" not in status.text   # marker no longer leaks
+
+
+async def test_summarize_returns_clean_text_on_failure(monkeypatch):
+    """Plain summarize() returns just the raw text — no marker prefix."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    agent = Agent.default()
+    text = await summarize("prompt_summary", "ctx for telegram", agent)
+    assert text == "ctx for telegram"
+    assert "[unsummarized" not in text
 
 
 async def test_summarize_falls_back_on_api_error(monkeypatch):
@@ -52,9 +73,11 @@ async def test_summarize_falls_back_on_api_error(monkeypatch):
 
     with patch("cldx.summarizer._summarize_with_anthropic",
                side_effect=RuntimeError("boom")):
-        result = await summarize("prompt_summary", "ctx", agent)
-    assert "[unsummarized" in result
-    assert "boom" in result
+        status = await summarize_with_status("prompt_summary", "ctx", agent)
+    assert status.summarized is False
+    assert "boom" in status.fallback_reason
+    assert status.text == "ctx"
+    assert "[unsummarized" not in status.text
 
 
 async def test_summarize_falls_back_for_ollama_until_implemented(monkeypatch, tmp_path):
@@ -64,9 +87,10 @@ async def test_summarize_falls_back_for_ollama_until_implemented(monkeypatch, tm
         "name: Aria\npersona: x\nmodel: ollama:llama3.1:8b\n"
     )
     agent = Agent.load(cfg)
-    result = await summarize("prompt_summary", "ctx", agent)
-    assert "[unsummarized" in result
-    assert "ollama" in result.lower()
+    status = await summarize_with_status("prompt_summary", "ctx", agent)
+    assert status.summarized is False
+    assert "ollama" in status.fallback_reason.lower()
+    assert status.text == "ctx"
 
 
 # --- summarize: real path (mocked SDK) ------------------------------------
@@ -193,9 +217,11 @@ async def test_summarize_bedrock_falls_back_when_no_creds(monkeypatch, tmp_path)
     monkeypatch.delenv("AWS_PROFILE", raising=False)
     agent = _bedrock_agent(tmp_path)
 
-    result = await summarize("prompt_summary", "ctx", agent)
-    assert "[unsummarized" in result
-    assert "AWS" in result or "credentials" in result.lower()
+    status = await summarize_with_status("prompt_summary", "ctx", agent)
+    assert status.summarized is False
+    assert "AWS" in status.fallback_reason or "credentials" in status.fallback_reason.lower()
+    assert status.text == "ctx"
+    assert "[unsummarized" not in status.text
 
 
 async def test_summarize_bedrock_falls_back_when_boto3_missing(monkeypatch, tmp_path):
@@ -204,8 +230,11 @@ async def test_summarize_bedrock_falls_back_when_boto3_missing(monkeypatch, tmp_
     monkeypatch.setitem(sys.modules, "boto3", None)
     agent = _bedrock_agent(tmp_path)
 
-    result = await summarize("prompt_summary", "ctx", agent)
-    assert "[unsummarized" in result
+    status = await summarize_with_status("prompt_summary", "ctx", agent)
+    assert status.summarized is False
+    assert "boto3" in status.fallback_reason
+    assert status.text == "ctx"
+    assert "[unsummarized" not in status.text
 
 
 # --- Gemini backend ------------------------------------------------------
@@ -257,9 +286,11 @@ async def test_summarize_gemini_falls_back_when_no_key(monkeypatch, tmp_path):
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     agent = _gemini_agent(tmp_path)
 
-    result = await summarize("prompt_summary", "ctx", agent)
-    assert "[unsummarized" in result
-    assert "gemini" in result.lower()
+    status = await summarize_with_status("prompt_summary", "ctx", agent)
+    assert status.summarized is False
+    assert "Gemini" in status.fallback_reason or "GEMINI" in status.fallback_reason
+    assert status.text == "ctx"
+    assert "[unsummarized" not in status.text
 
 
 async def test_summarize_gemini_accepts_google_api_key_var(monkeypatch, tmp_path):
