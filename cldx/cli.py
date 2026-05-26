@@ -107,6 +107,18 @@ def parse_cli_args() -> argparse.Namespace:
         help="config show — print masked summary of all secrets.",
     )
 
+    test_p = sub.add_parser(
+        "test",
+        help="End-to-end smoke tests against configured services.",
+    )
+    test_p.add_argument(
+        "target", nargs="?", default="llm", choices=("llm",),
+        help=(
+            "What to test. `llm` runs all three summary modes against the "
+            "configured backend and prints the output of each."
+        ),
+    )
+
     return p.parse_args()
 
 
@@ -896,6 +908,14 @@ def _run_config_subcommand(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_test_subcommand(args: argparse.Namespace) -> int:
+    """Dispatch `cldx test <target>`."""
+    if args.target == "llm":
+        from cldx.llm_test import run_llm_test
+        return asyncio.run(run_llm_test(console=console))
+    return 0
+
+
 def main() -> None:
     # Load any saved secrets into the process environment before parsing
     # subcommands, so wizards / bridge / summarizer all see them.
@@ -908,6 +928,8 @@ def main() -> None:
         sys.exit(_run_setup_subcommand(args))
     if args.cmd == "config":
         sys.exit(_run_config_subcommand(args))
+    if args.cmd == "test":
+        sys.exit(_run_test_subcommand(args))
 
     # Default: run the bridge.
     try:
