@@ -31,6 +31,7 @@ dependencies = [
     "rich>=13.0",
     "prompt-toolkit>=3.0",
     "anthropic>=0.40",
+    "python-telegram-bot>=21.0",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +39,6 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
-# Phase 7 will add: python-telegram-bot>=21.0
 
 [project.urls]
 Homepage = "https://github.com/Pranjalab/cldx"

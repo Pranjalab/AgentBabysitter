@@ -1,11 +1,11 @@
-# claudex — Project Plan
+# cldx — Project Plan
 
 > A second-layer terminal for Claude Code: monitors a tmux pane,
 > classifies prompts, auto-responds based on policy, and bridges to
 > Telegram for remote review.
 >
 > **License:** GNU General Public License v3.0 (see `LICENSE`).
-> **Repository:** https://github.com/Pranjalab/claudex (public).
+> **Repository:** https://github.com/Pranjalab/cldx (public).
 
 ---
 
@@ -16,7 +16,7 @@ flow (or step away entirely) while a configurable bridge handles routine
 approvals, summarizes long-running results, and pings them only when
 real judgment is needed.
 
-The user types `claudex` from anywhere in their shell; claudex picks up
+The user types `cldx` from anywhere in their shell; cldx picks up
 where it left off, lists running Claude sessions, lets them start a new
 one, and gives them a "remote control" view of whatever they connect to.
 
@@ -26,27 +26,27 @@ one, and gives them a "remote control" view of whatever they connect to.
 
 ### 2.1 First-run install
 ```bash
-$ git clone <repo> && cd claudex
+$ git clone <repo> && cd cldx
 $ ./install.sh
 ✓ Python 3.12 detected
-✓ Installing claudex (pip install --user .)
-✓ Wrote ~/.claudex/{memory.json,config/policy.yml,config/agent_name.yml}
+✓ Installing cldx (pip install --user .)
+✓ Wrote ~/.cldx/{memory.json,config/policy.yml,config/agent_name.yml}
 → Add this to ~/.zshrc:  export PATH="$HOME/.local/bin:$PATH"
-→ Restart your shell, then run `claudex`.
+→ Restart your shell, then run `cldx`.
 ```
 
 ### 2.2 Every-run launch
 ```
-$ claudex
-╭─ claudex ─────────────────────────────────────────────╮
+$ cldx
+╭─ cldx ─────────────────────────────────────────────╮
 │  agent     Aria                                       │
 │  profile   auto-approve  (3 patterns remembered)      │
-│  telegram  ✗ not configured  (run `claudex telegram`) │
+│  telegram  ✗ not configured  (run `cldx telegram`) │
 │  last run  2h ago — 14 prompts handled                │
 ╰───────────────────────────────────────────────────────╯
 
 Pick a session:
-  [1] resume  claudex-1  last active 2h ago  (14 events)
+  [1] resume  cldx-1  last active 2h ago  (14 events)
   [2] connect 0:0.0      ✳ Claude Code       (running)
   [3] start   new tmux + claude               (recommended)
   [4] manage  config, profiles, telegram, history
@@ -82,14 +82,14 @@ countdown bar first:
 
 | Decision                  | Choice                                                  |
 |---------------------------|---------------------------------------------------------|
-| State location            | `~/.claudex/` (override via `$CLAUDEX_HOME`)            |
+| State location            | `~/.cldx/` (override via `$CLDX_HOME`)            |
 | LLM backend               | Claude API, Haiku 4.5 (`ANTHROPIC_API_KEY` required)    |
 | Yolo learning granularity | `tool + first arg token` (e.g., `Bash(npm ...)`)        |
 | Yolo + destructive ops    | Never learnable — always asks                           |
 | Auto-approve + destructive| No wait bar — pends indefinitely until user replies     |
 | Wait interval             | Configurable per profile (`wait_interval_seconds`, default `2.0`); applies to `auto-approve` and to yolo's learned auto-approvals; `0` disables |
-| Install method            | `pip install --user .` via `install.sh`; `claudex` shim |
-| Distribution layout       | `claudex/` package, `pyproject.toml`, `install.sh`      |
+| Install method            | `pip install --user .` via `install.sh`; `cldx` shim |
+| Distribution layout       | `cldx/` package, `pyproject.toml`, `install.sh`      |
 
 ---
 
@@ -97,9 +97,9 @@ countdown bar first:
 
 ### Code (project tree)
 ```
-claudex/                              # Python package (was src/)
+cldx/                              # Python package (was src/)
 ├── __init__.py
-├── cli.py                            # `claudex` entrypoint + subcommands
+├── cli.py                            # `cldx` entrypoint + subcommands
 ├── ui.py                             # second-layer TUI (was main.py body)
 ├── startup.py                        # greeting + session picker
 ├── tmux_monitor.py                   # async pane watcher
@@ -108,20 +108,20 @@ claudex/                              # Python package (was src/)
 ├── prompt_classifier.py              # snapshot → PromptType
 ├── policy_engine.py                  # decision + wait-bar config
 ├── session_store.py                  # events.jsonl writer / replayer
-├── memory.py                         # ~/.claudex/memory.json read+write
+├── memory.py                         # ~/.cldx/memory.json read+write
 ├── agent.py                          # agent_name.yml loader
 ├── summarizer.py                     # Claude API summaries (with persona)
 ├── telegram_bridge.py                # send/receive (Phase 7)
-└── settings.py                       # ~/.claudex path helpers, XDG-ish
+└── settings.py                       # ~/.cldx path helpers, XDG-ish
 install.sh
 pyproject.toml
 PLAN.md          ← this file
 README.md
 ```
 
-### Runtime state (`~/.claudex/`)
+### Runtime state (`~/.cldx/`)
 ```
-~/.claudex/
+~/.cldx/
 ├── memory.json                       # learned patterns, telegram, last_session
 ├── config/
 │   ├── policy.yml                    # editable; profiles + detection
@@ -199,7 +199,7 @@ Three summary modes, each with a strict char budget:
 | `completion_summary`  | ≤ 500  | Claude finished a task while user was away       |
 
 Summarizer is `summarizer.summarize(mode, context, agent)`:
-1. Loads persona from `~/.claudex/config/agent_name.yml`.
+1. Loads persona from `~/.cldx/config/agent_name.yml`.
 2. Calls Claude Haiku 4.5 with the persona as system prompt, the raw
    context as user message, and an instruction tailored to the mode.
 3. Returns text capped at the mode's budget.
@@ -227,15 +227,15 @@ limits:
 
 Each phase is independently shippable and gets one commit.
 
-| # | Phase                          | Deliverable                                                       | Est.    |
-|---|--------------------------------|-------------------------------------------------------------------|---------|
-| 1 | Package + installer            | `pyproject.toml`, `install.sh`, `claudex` console_script, package rename, README update | 1h |
-| 2 | Runtime state + session store  | `~/.claudex/` bootstrap; `memory.py`, `session_store.py`, jsonl event format | 1h |
-| 3 | Three profiles + wait bar      | `auto-approve` profile, Rich countdown with key-override, `wait_interval_seconds` per profile, destructive-op detection | 2h |
-| 4 | Startup greeting + picker      | `claudex_init` flow, replay last transcript, spawn new tmux+claude option | 1.5h |
-| 5 | Yolo learning                  | pattern normalization, read/write `approved_patterns`, dedupe with destructive exclusion | 1h |
-| 6 | Agent + summarizer             | `agent_name.yml`, `summarizer.py` (Anthropic SDK), prompt cache for persona system msg | 2h |
-| 7 | Telegram bridge                | `telegram_bridge.py` (python-telegram-bot v21), `/start` + inbound handling, timeout + reconnect | 2.5h |
+| # | Phase                          | Status | Deliverable                                                       |
+|---|--------------------------------|--------|-------------------------------------------------------------------|
+| 1 | Package + installer            | ✅ done | `pyproject.toml`, `install.sh`, `cldx` console_script, package rename, README update |
+| 2 | Runtime state + session store  | ✅ done | `~/.cldx/` bootstrap; `session_store.py`, jsonl event format     |
+| 3 | Three profiles + wait bar      | ✅ done | `auto-approve` profile, async countdown with key-override, `wait_interval_seconds` per profile, destructive-op detection |
+| 4 | Startup greeting + picker      | ✅ done | banner + numbered picker, replay last transcript, spawn new tmux+claude option |
+| 5 | Yolo learning                  | ✅ done | pattern normalization, read/write `approved_patterns`, destructive exclusion |
+| 6 | Agent + summarizer             | ✅ done | `agent_name.yml`, `summarizer.py` (Anthropic SDK), prompt-cached persona system msg |
+| 7 | Telegram bridge                | ✅ done | `telegram_bridge.py` (python-telegram-bot v22), auth boundary, inbound parser, timeout helper |
 
 **Total ≈ 11 hours.** Phases 1–3 unblock a usable v1 (no Telegram, no
 LLM); phases 4–5 are UX polish; phases 6–7 add the remote capability.
@@ -251,9 +251,9 @@ These are intentionally deferred — flagged here so we don't lose them.
 - Voice notifications.
 - Cost dashboard for LLM spend.
 - Plugin system for custom classifiers / actions.
-- Auto-detect on `tmux new-window` so claudex picks up new sessions
+- Auto-detect on `tmux new-window` so cldx picks up new sessions
   without restart.
-- Cross-machine bridging (claudex on laptop, Claude Code on server).
+- Cross-machine bridging (cldx on laptop, Claude Code on server).
 
 ---
 
@@ -261,7 +261,7 @@ These are intentionally deferred — flagged here so we don't lose them.
 
 To revisit before / during phase 6–7:
 
-- Should `claudex telegram` walk the user through bot creation (link
+- Should `cldx telegram` walk the user through bot creation (link
   to BotFather, prompt for token, auto-discover chat_id from first
   message) or just print instructions?
 - For prompt caching with Anthropic SDK: cache the persona system
