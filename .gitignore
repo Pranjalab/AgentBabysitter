@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+
+# Secrets
+config/telegram.env
+
+# Generated session logs
+sessions/*.jsonl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store

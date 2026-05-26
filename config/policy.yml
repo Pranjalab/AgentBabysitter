@@ -1,0 +1,82 @@
+active_profile: default
+
+# Detection patterns (regex). Edit these if Claude Code's UI changes.
+detection:
+  approval_yn_patterns:
+    - "\\(y/n\\)"
+    - "\\? \\[Y/n\\]"
+    - "\\? \\[y/N\\]"
+    - "Do you want to proceed\\?"
+  approval_menu_patterns:
+    - "❯.*Yes"
+    - "1\\.\\s*Yes.*2\\.\\s*No"
+  text_input_patterns:
+    - "^>\\s*$"           # bare prompt waiting for input
+    - "Type your message"
+  completion_patterns:
+    - "✓ Done"
+    - "Task complete"
+    - "All tasks completed"
+  running_patterns:
+    - "esc to interrupt"
+    - "Thinking\\.\\.\\."
+    - "⏺.*Running"
+
+profiles:
+  default:
+    auto_approve:
+      - "^Read file"
+      - "^List directory"
+      - "Read\\("
+      - "Glob\\("
+      - "Grep\\("
+      - "LS\\("
+      - "Run: (ls|cat|pwd|echo|grep|find|head|tail|wc)\\b"
+      - "Bash\\((ls|cat|pwd|echo|grep|find|head|tail|wc|which|env|date|whoami)\\b"
+
+    auto_deny:
+      - "rm\\s+-rf"
+      - "\\bsudo\\b"
+      - "chmod\\s+777"
+      - "DROP\\s+TABLE"
+      - "git\\s+push\\s+--force"
+      - ":(){ :|:& };:"   # fork bomb
+
+    escalate_to_telegram:
+      - "^Run: npm install"
+      - "^Run: git push"
+      - "^Edit file"
+      - "^Create file"
+      - "Write\\("
+      - "Edit\\("
+      - "Bash\\("
+
+    default_action: escalate_telegram
+
+  yolo:
+    auto_deny:
+      - "rm\\s+-rf\\s+/"
+    default_action: auto_yes
+
+  restricted:
+    auto_deny:
+      - "rm\\s+-rf"
+      - "\\bsudo\\b"
+    default_action: escalate_telegram
+
+  paranoid:
+    auto_deny:
+      - "\\brm\\b"
+      - "\\bsudo\\b"
+      - "\\bchmod\\b"
+      - "\\bchown\\b"
+      - "\\bmv\\b"
+      - ">\\s"            # output redirection
+    default_action: escalate_telegram
+
+telegram:
+  enabled: false              # Phase 1: disabled
+  notify_on_completion: true
+  approval_timeout_seconds: 600
+  timeout_action: auto_no
+  allow_manual_injection: true
