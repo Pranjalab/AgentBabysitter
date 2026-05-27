@@ -36,8 +36,13 @@ persona: |
 #   Local Ollama (stub — falls back to truncation for now):
 #     model: ollama:llama3.1:8b
 #
-# Run `cldx setup llm` to pick interactively; that flow will rewrite
-# this file with your selection.
+#   No LLM at all — Telegram gets the raw pane context. Use this when
+#   you can't / don't want to pay for an upstream model:
+#     model: none:raw
+#
+# Run `cldx setup llm` to pick interactively (option 4 disables the LLM),
+# or `cldx setup none` to jump straight to the disabled mode. Either flow
+# rewrites this file with your selection.
 
 model: claude-haiku-4-5
 

@@ -84,8 +84,8 @@ def test_pick_rows_with_no_recent_no_panes_still_offers_start():
     assert rows[0].kind == "start"
 
 
-def test_run_startup_select_connect_returns_pane(policy_path, isolated_home,
-                                                   captured_console):
+async def test_run_startup_select_connect_returns_pane(policy_path, isolated_home,
+                                                         captured_console):
     console, _ = captured_console
     policy = PolicyEngine(policy_path)
     memory = Memory()
@@ -95,15 +95,15 @@ def test_run_startup_select_connect_returns_pane(policy_path, isolated_home,
         mock_list.return_value = [
             Pane(target="0:0.0", current_command="claude", title="✳ Claude Code"),
         ]
-        choice = run_startup(policy, memory, console=console,
-                              input_fn=lambda _prompt: "1")
+        choice = await run_startup(policy, memory, console=console,
+                                    input_fn=lambda _prompt: "1")
     assert isinstance(choice, StartupChoice)
     assert choice.pane == "0:0.0"
     assert choice.resume_from is None
 
 
-def test_run_startup_select_start_spawns_new(policy_path, isolated_home,
-                                              captured_console):
+async def test_run_startup_select_start_spawns_new(policy_path, isolated_home,
+                                                    captured_console):
     console, _ = captured_console
     policy = PolicyEngine(policy_path)
     memory = Memory()
@@ -117,8 +117,8 @@ def test_run_startup_select_start_spawns_new(policy_path, isolated_home,
     with patch("cldx.startup.list_panes", return_value=[]), \
          patch("cldx.startup.recent_sessions", return_value=[]), \
          patch("cldx.startup._default_runner", side_effect=fake_runner):
-        choice = run_startup(policy, memory, console=console,
-                              input_fn=lambda _prompt: "1")
+        choice = await run_startup(policy, memory, console=console,
+                                    input_fn=lambda _prompt: "1")
 
     cmds = [" ".join(c) for c in fake_runs]
     assert any("new-session" in c for c in cmds)
@@ -151,8 +151,8 @@ def test_format_ago_handles_iso_8601():
     assert _format_ago("not a date") == "not a date"
 
 
-def test_run_startup_rejects_invalid_input(policy_path, isolated_home,
-                                             captured_console):
+async def test_run_startup_rejects_invalid_input(policy_path, isolated_home,
+                                                   captured_console):
     console, _ = captured_console
     policy = PolicyEngine(policy_path)
     memory = Memory()
@@ -161,7 +161,7 @@ def test_run_startup_rejects_invalid_input(policy_path, isolated_home,
 
     with patch("cldx.startup.list_panes", return_value=[]), \
          patch("cldx.startup.recent_sessions", return_value=[]):
-        choice = run_startup(policy, memory, console=console,
-                              input_fn=lambda _prompt: next(inputs))
+        choice = await run_startup(policy, memory, console=console,
+                                    input_fn=lambda _prompt: next(inputs))
     # "1" picks the only row available (start new) — should succeed.
     assert isinstance(choice, StartupChoice)

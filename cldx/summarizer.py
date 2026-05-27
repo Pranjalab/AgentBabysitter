@@ -123,6 +123,16 @@ async def summarize_with_status(
     backend = agent.backend
 
     try:
+        if backend == "none":
+            # LLM intentionally disabled by config (`model: none:raw`) — skip
+            # the upstream call entirely and forward the raw pane. This is
+            # the right knob when the user can't / won't pay for an LLM but
+            # still wants Telegram notifications.
+            return SummaryResult(
+                text=_truncate(context, limit),
+                summarized=False,
+                fallback_reason="LLM disabled (model: none:*)",
+            )
         if backend == "anthropic":
             text = await _summarize_with_anthropic(mode, context, agent, limit)
         elif backend == "bedrock":

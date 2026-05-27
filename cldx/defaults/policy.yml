@@ -14,9 +14,15 @@ detection:
     - "^>\\s*$"
     - "Type your message"
   completion_patterns:
+    # Older / explicit signals (still match if present)
     - "✓ Done"
     - "Task complete"
     - "All tasks completed"
+    # Real Claude Code idle signals — these appear at the bottom of the
+    # pane once Claude finishes the current turn and is awaiting the
+    # next user input:
+    - "✻ Cogitated for"        # post-task self-report ("Cogitated for 4s")
+    - "\\? for shortcuts"      # bottom hint, only present when idle
   running_patterns:
     - "esc to interrupt"
     - "Thinking\\.\\.\\."

@@ -453,19 +453,58 @@ def test_llm_picker_routes_to_gemini(isolated_home, cap_console):
     assert ok is True
 
 
-def test_llm_picker_skip(isolated_home, cap_console):
+def test_llm_picker_skip_writes_none_backend(isolated_home, cap_console):
+    """Option 4 must persist `model: none:raw` so future runs skip the LLM."""
     console, _ = cap_console
-    ok = run_llm_setup(console=console, input_fn=_scripted(["4"]))
-    assert ok is False
+    ok = run_llm_setup(
+        console=console,
+        input_fn=_scripted(["4", "y"]),  # 4 = disable, y = confirm
+    )
+    assert ok is True
+    import yaml
+    data = yaml.safe_load(
+        (isolated_home / "config" / "agent_name.yml").read_text()
+    )
+    assert data["model"] == "none:raw"
 
 
 def test_llm_picker_rejects_invalid_choice(isolated_home, cap_console):
     console, _ = cap_console
     ok = run_llm_setup(
         console=console,
-        input_fn=_scripted(["wat", "9", "4"]),  # garbage → 9 → finally skip
+        input_fn=_scripted(["wat", "9", "4", "n"]),
+        # garbage → 9 → 4 (disable) → n (decline confirm) → False
     )
     assert ok is False
+
+
+def test_disable_llm_wizard_writes_none_raw(isolated_home, cap_console):
+    """`cldx setup none` rewrites agent_name.yml with model: none:raw."""
+    from cldx.setup_wizard import run_disable_llm
+    console, _ = cap_console
+    ok = run_disable_llm(
+        console=console,
+        input_fn=_scripted(["y"]),
+    )
+    assert ok is True
+    import yaml
+    data = yaml.safe_load(
+        (isolated_home / "config" / "agent_name.yml").read_text()
+    )
+    assert data["model"] == "none:raw"
+
+
+def test_disable_llm_wizard_aborts_on_no(isolated_home, cap_console):
+    """Saying 'no' must NOT touch agent_name.yml."""
+    from cldx.setup_wizard import run_disable_llm
+    console, _ = cap_console
+    ok = run_disable_llm(
+        console=console,
+        input_fn=_scripted(["n"]),
+    )
+    assert ok is False
+    # File should not exist (no other test created it in this isolated dir).
+    assert not (isolated_home / "config" / "agent_name.yml").exists()
 
 
 # --- Paste-tolerant input -------------------------------------------------

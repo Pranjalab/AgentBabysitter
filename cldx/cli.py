@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import signal
 import sys
 from datetime import datetime
@@ -29,6 +30,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from cldx import __version__
 from cldx._paths import resolve_policy_path
@@ -41,6 +43,7 @@ from cldx.policy_engine import (
 from cldx.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
 from cldx.session_picker import SessionPickerError, list_panes, pick_session
 from cldx.session_store import SessionStore
+from cldx.framed_input import FramedInputSession
 from cldx.memory import Memory, normalize_pattern
 from cldx.secrets import load_into_environ
 from cldx.tmux_controller import TmuxController
@@ -85,6 +88,9 @@ def parse_cli_args() -> argparse.Namespace:
                    help="List all tmux panes (with command + title) and exit.")
     p.add_argument("--no-telegram", action="store_true",
                    help="Don't start the Telegram bridge even if configured.")
+    p.add_argument("--no-llm", action="store_true",
+                   help="Skip the LLM summarizer for THIS run — Telegram gets "
+                        "the raw pane (overrides whatever agent_name.yml says).")
 
     # Subcommands
     sub = p.add_subparsers(dest="cmd", required=False)
@@ -95,8 +101,11 @@ def parse_cli_args() -> argparse.Namespace:
     )
     setup_p.add_argument(
         "target", nargs="?", default="all",
-        choices=("all", "telegram", "llm", "anthropic", "bedrock", "gemini"),
-        help="Which integration to configure (default: all = pick LLM + Telegram).",
+        choices=("all", "telegram", "llm", "anthropic", "bedrock", "gemini", "none"),
+        help=(
+            "Which integration to configure. `none` persistently disables "
+            "the LLM (Telegram gets raw pane)."
+        ),
     )
 
     config_p = sub.add_parser(
@@ -186,6 +195,15 @@ class BridgeUI:
         self.last_mirror_tail: str = ""
         self.stop_event = asyncio.Event()
         self.session: PromptSession[str] = PromptSession()
+        # Bordered input box (the visible one). The PromptSession above is
+        # kept around for any code that still needs a flat prompt, but the
+        # main input loop uses `framed`. The suggestion callable is read
+        # on every render so the placeholder always reflects Claude's
+        # current bottom-pane hint.
+        self.framed = FramedInputSession(
+            title_fn=self._prompt_title,
+            suggestion_fn=lambda: self._claude_suggestion,
+        )
         self._action_lock = asyncio.Lock()
 
         # Phase 2: jsonl event log for this run.
@@ -208,6 +226,24 @@ class BridgeUI:
         self.telegram = None
         self._telegram_reply_event: asyncio.Event | None = None
 
+        # State machine for the "task complete" panel:
+        #   - `_completion_locked = True` after we render a completion;
+        #     suppresses further completion panels until a NEW approval
+        #     prompt arrives OR the user injects text manually. This
+        #     replaces the earlier hash-based dedup which broke on
+        #     Claude's frame-to-frame jitter.
+        self._completion_locked: bool = False
+        # Marker the most recent tool-call signature inside the pane.
+        # We use this to tell "real task" (had tool calls) apart from
+        # "Claude just chatted" (no tool calls) — only real tasks get a
+        # full green completion panel; chat gets a single log line.
+        self._task_started: bool = False
+        # Claude's bottom-pane suggestion text (what Claude shows in its
+        # input box as a dim placeholder, e.g. "delete it"). Updated on
+        # every on_stable; read by the framed input so the user can press
+        # Tab to accept it.
+        self._claude_suggestion: str = ""
+
     # --- printing (safe under patch_stdout) ---
 
     def log(self, msg: str) -> None:
@@ -220,13 +256,53 @@ class BridgeUI:
 
     # --- mirror ---
 
-    def _print_mirror(self, snapshot: str) -> None:
-        tail = "\n".join(snapshot.splitlines()[-self.args.mirror_lines:]).rstrip()
-        if not tail or tail == self.last_mirror_tail:
+    def _normalize_tail(self, snapshot: str) -> str:
+        """Stable representation of the pane tail for dedup.
+
+        Strips trailing whitespace on every line and collapses runs of
+        blank lines into single blanks. This makes the mirror dedup
+        survive Claude's subtle frame-to-frame redraws (cursor position
+        shifts, "Cogitated for Ns" timer ticking, trailing spaces).
+        """
+        lines = snapshot.splitlines()[-self.args.mirror_lines:]
+        out: list[str] = []
+        prev_blank = False
+        for line in lines:
+            line = line.rstrip()
+            if not line:
+                if prev_blank:
+                    continue
+                prev_blank = True
+            else:
+                prev_blank = False
+            out.append(line)
+        return "\n".join(out).strip()
+
+    def _print_mirror(self, snapshot: str, force: bool = False) -> None:
+        """Render the mirror panel with Claude's own ANSI styling preserved.
+
+        Dedup is based on the ANSI-STRIPPED tail (stable across frame
+        jitter), but the DISPLAY uses the raw-with-ANSI version from
+        `self.monitor.last_raw_snapshot` so dim placeholder text and
+        coloured tool calls survive. Falls back to plain text only if
+        the raw isn't available yet.
+        """
+        tail = self._normalize_tail(snapshot)
+        if not tail:
+            return
+        if not force and tail == self.last_mirror_tail:
             return
         self.last_mirror_tail = tail
+
+        raw = getattr(self.monitor, "last_raw_snapshot", "") or ""
+        if raw:
+            raw_lines = raw.splitlines()[-self.args.mirror_lines:]
+            body: Text | str = Text.from_ansi("\n".join(raw_lines).rstrip())
+        else:
+            body = tail
+
         title = f"claude pane @ {_now()}"
-        self.print_rich(Panel(tail, title=title, border_style="blue", expand=False))
+        self.print_rich(Panel(body, title=title, border_style="blue", expand=False))
 
     # --- event handlers ---
 
@@ -250,27 +326,266 @@ class BridgeUI:
 
     async def on_stable(self, snapshot: str) -> None:
         """Pane settled. Mirror it; also act as a safety net if an approval
-        prompt arrived without ever triggering an on_change diff (rare)."""
+        prompt arrived without ever triggering an on_change diff (rare).
+
+        Order matters: we classify BEFORE printing the mirror. If we're
+        sitting in post-completion idle (already showed the green panel
+        for this task), we skip the mirror reprint — the user has
+        already seen the final state and doesn't need it again every
+        time Claude's UI redraws a "Cooked for Ns" counter.
+        """
         async with self._action_lock:
-            self._print_mirror(snapshot)
             prompt = self.classifier.classify(snapshot)
+
+            # Refresh Claude's bottom-pane suggestion so the framed input
+            # shows the right placeholder text (Tab to accept).
+            self._claude_suggestion = self._extract_suggestion(snapshot)
+
+            if prompt.type == PromptType.COMPLETE and self._completion_locked:
+                # Same task already finalised — stay quiet, no mirror reprint.
+                return
+
+            self._print_mirror(snapshot)
 
             if prompt.type in (PromptType.IDLE, PromptType.RUNNING):
                 return
 
             if prompt.type == PromptType.COMPLETE:
-                self.log("[green]✓ task complete[/green]")
-                self.store.log_event("complete")
-                if self.telegram is not None:
-                    try:
-                        await self.telegram.notify_completion(snapshot)
-                    except Exception as e:  # noqa: BLE001
-                        self.log(f"[red]Telegram completion notify failed: {e}[/red]")
-                self.pending = None
-                self.pending_signature = None
+                await self._handle_completion(snapshot)
                 return
 
             await self._dispatch_classified(prompt, snapshot, source="stable")
+
+    # Markers that indicate Claude actually USED a tool, not just chatted.
+    # When none of these appear in the recent snapshot, the "completion"
+    # is just a conversational reply and we render it as a one-liner
+    # rather than a full green panel.
+    _TOOL_CALL_PATTERN = re.compile(
+        r"⏺\s*(Bash|Read|Edit|Write|Glob|Grep|LS|WebFetch|Run|Task)\s*\("
+    )
+
+    # A line that looks like a SUBMITTED user message in Claude Code's pane:
+    # starts with `❯ `, has visible text, and is NOT a menu option ("❯ 1. Yes").
+    _USER_INPUT_PATTERN = re.compile(r"^\s*❯\s+(?!\d+\.\s)\S")
+
+    # Trailing UI chrome we strip when extracting just the latest task.
+    _UI_CHROME_PATTERNS = (
+        re.compile(r"\?\s*for\s*shortcuts"),
+        re.compile(r"^\s*[─━]+\s*$"),
+        re.compile(r"esc\s*to\s*(cancel|interrupt)"),
+        re.compile(r"^\s*$"),
+    )
+
+    @classmethod
+    def _pane_has_tool_calls(cls, snapshot: str) -> bool:
+        """Did Claude actually do work, or just reply with text?"""
+        tail = "\n".join(snapshot.splitlines()[-80:])
+        return cls._TOOL_CALL_PATTERN.search(tail) is not None
+
+    # Any ❯ line — input area, suggestion, OR submitted message.
+    _ANY_CARET_PATTERN = re.compile(r"^\s*❯\s")
+    # Menu options like "❯ 1. Yes" — NOT user input.
+    _MENU_CARET_PATTERN = re.compile(r"^\s*❯\s+\d+\.\s")
+    # Claude's response / tool marker.
+    _ASSISTANT_PATTERN = re.compile(r"^\s*⏺")
+
+    @classmethod
+    def _extract_suggestion(cls, snapshot: str) -> str:
+        """Find Claude's bottom-pane suggestion text, if any.
+
+        Claude Code shows a dim placeholder ('delete it', 'run the tests',
+        etc.) in its input box between two ``─`` separators. We look for
+        the bottom-most ``❯ <text>`` line that has NO ``⏺`` (tool call)
+        line after it — that's the live input/suggestion, not a previously
+        submitted user message.
+
+        Returns the suggestion text (without the ``❯ `` prefix), or empty
+        string if no suggestion is visible.
+        """
+        lines = snapshot.splitlines()
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
+            if cls._MENU_CARET_PATTERN.match(line):
+                continue
+            m = re.match(r"^\s*❯\s+(\S.*?)\s*$", line)
+            if not m:
+                continue
+            text = m.group(1)
+            # If there's a ⏺ line below this one, this is a submitted user
+            # message, not the live input area — keep scanning upward.
+            if any(
+                cls._ASSISTANT_PATTERN.match(lines[j])
+                for j in range(i + 1, len(lines))
+            ):
+                continue
+            return text
+        return ""
+
+    @classmethod
+    def _extract_current_task(cls, snapshot: str) -> str:
+        """Return only the latest task's content.
+
+        Algorithm:
+
+        1. Find every ``❯ ...`` line that isn't a menu option (``❯ 1. Yes``).
+        2. Walk backwards through those lines. The FIRST one we find that
+           has a ``⏺`` (Claude response/tool marker) somewhere after it is
+           the "submitted user message" for the latest task. Lines after
+           it without a corresponding ``⏺`` are the live input/suggestion
+           area at the bottom.
+        3. End the slice at the NEXT ``❯`` line after the submitted one
+           (that's where the input area starts) or at end-of-snapshot.
+        4. Strip trailing UI chrome (``? for shortcuts``, ``─`` separators,
+           ``esc to cancel`` hints, blank lines).
+
+        Falls back to the snapshot tail if no anchor is found — rare,
+        only happens during the initial banner.
+        """
+        lines = snapshot.splitlines()
+
+        user_indices = [
+            i for i, line in enumerate(lines)
+            if cls._ANY_CARET_PATTERN.match(line)
+            and not cls._MENU_CARET_PATTERN.match(line)
+        ]
+        if not user_indices:
+            return "\n".join(lines[-20:]).strip()
+
+        # Find the latest ❯ line that has a ⏺ AFTER it (a submitted task).
+        last_submitted = None
+        for ui in reversed(user_indices):
+            if any(
+                cls._ASSISTANT_PATTERN.match(lines[j])
+                for j in range(ui + 1, len(lines))
+            ):
+                last_submitted = ui
+                break
+        if last_submitted is None:
+            return "\n".join(lines[-20:]).strip()
+
+        # End at the NEXT ❯ line (the input/suggestion area).
+        end = len(lines)
+        for ui in user_indices:
+            if ui > last_submitted:
+                end = ui
+                break
+
+        slice_lines = lines[last_submitted:end]
+        while slice_lines and any(
+            p.search(slice_lines[-1]) for p in cls._UI_CHROME_PATTERNS
+        ):
+            slice_lines.pop()
+        return "\n".join(slice_lines).strip()
+
+    async def _handle_completion(self, snapshot: str) -> None:
+        """One-shot 'task complete' flow.
+
+        The completion panel is GREEN (regardless of whether the LLM
+        produced a real summary or fell back to raw context). A Telegram
+        status line appears under the panel so the user always knows
+        whether the result was forwarded.
+
+        We use ``_completion_locked`` as a state flag instead of a
+        content hash: Claude's UI has frame-to-frame jitter that defeats
+        hash-based dedup, but a flag-based lock works reliably because
+        we only clear it on actual NEW activity (new approval prompt OR
+        user text injection).
+
+        If the pane shows no tool-call markers (just a conversational
+        reply), we skip the panel entirely and log a single line — chat
+        is not a "task".
+        """
+        if self._completion_locked:
+            return
+        self._completion_locked = True
+        self.store.log_event("complete")
+
+        is_real_task = self._pane_has_tool_calls(snapshot)
+
+        # Conversational reply (no tool calls) → no green panel.
+        if not is_real_task:
+            self.log(
+                "[green]✓ Claude replied[/green] [dim](no tool calls — "
+                "skipping summary)[/dim]"
+            )
+            self.pending = None
+            self.pending_signature = None
+            self._update_prompt_label()
+            return
+
+        # Trim the snapshot down to just the current task — the LLM call
+        # and the fallback raw display both should only see this turn's
+        # work, not banners or previous tasks.
+        task_text = self._extract_current_task(snapshot)
+
+        # Real task: build the summary text we'll show + (maybe) send.
+        from cldx.agent import Agent
+        from cldx.summarizer import summarize_with_status
+        try:
+            agent = Agent.load()
+            if getattr(self.args, "no_llm", False):
+                agent.model = "none:raw"
+            result = await summarize_with_status(
+                "completion_summary", task_text, agent,
+            )
+        except Exception as e:  # noqa: BLE001
+            from cldx.summarizer import SummaryResult
+            result = SummaryResult(
+                text=task_text,
+                summarized=False,
+                fallback_reason=str(e),
+            )
+
+        # ALWAYS green panel — the result is the result, regardless of
+        # whether the LLM produced a real summary or we fell back. The
+        # subtitle reveals which.
+        if result.summarized:
+            subtitle = f"[dim]summarised via {Agent.load().backend}[/dim]"
+        else:
+            subtitle = (
+                f"[dim]raw pane (LLM unavailable: "
+                f"{result.fallback_reason})[/dim]"
+            )
+
+        # Telegram status, surfaced as the LAST line inside the green panel.
+        telegram_line = ""
+        telegram_send_succeeded = False
+        if getattr(self.args, "no_telegram", False):
+            telegram_line = (
+                "\n\n[dim]Telegram: disabled for this run (--no-telegram)[/dim]"
+            )
+        elif self.telegram is None:
+            telegram_line = (
+                "\n\n[yellow]Telegram: ✗ not configured "
+                "(run `cldx setup telegram`)[/yellow]"
+            )
+        else:
+            try:
+                await self.telegram._send(
+                    f"✓ Claude finished:\n\n{result.text}"
+                )
+                telegram_line = "\n\n[bold green]Telegram: ✓ sent[/bold green]"
+                telegram_send_succeeded = True
+            except Exception as e:  # noqa: BLE001
+                telegram_line = f"\n\n[red]Telegram: ✗ send failed ({e})[/red]"
+
+        body = f"{result.text}\n\n{subtitle}{telegram_line}"
+        self.print_rich(Panel(
+            body,
+            title="[bold green]✓ Task complete[/bold green]",
+            border_style="green",
+            expand=False,
+        ))
+
+        if telegram_send_succeeded:
+            self.store.log_event(
+                "telegram_out", summary=result.text, mode="completion_summary",
+            )
+
+        # Clear pending state — next prompt starts fresh.
+        self.pending = None
+        self.pending_signature = None
+        self._update_prompt_label()
 
     async def _dispatch_classified(
         self, prompt: ClassifiedPrompt, snapshot: str, source: str,
@@ -281,6 +596,10 @@ class BridgeUI:
         if sig == self.pending_signature:
             return  # same prompt as last fire — already handled / awaiting
         self.pending_signature = sig
+        # New actionable prompt = new task. Allow the next completion
+        # panel to fire, and remember we're inside a task now.
+        self._completion_locked = False
+        self._task_started = True
 
         if self.args.verbose if hasattr(self.args, "verbose") else False:
             self.log(f"[dim]· detected {prompt.type.value} via {source}[/dim]")
@@ -294,28 +613,33 @@ class BridgeUI:
     async def _handle_decision(
         self, prompt: ClassifiedPrompt, decision: DecisionResult
     ) -> None:
-        color, label = DECISION_STYLE[decision.decision]
-        cmd = prompt.extracted_command or prompt.raw_text or "(?)"
-        self.log(f"[{color}][{label}][/{color}] {prompt.type.value}: {cmd}")
-        if prompt.menu_options:
-            for opt in prompt.menu_options:
-                self.log(f"    {opt}")
-
         if self.args.dry_run:
             self.pending = prompt
-            self.log(f"[dim]dry-run: not acting (reason: {decision.reason})[/dim]")
+            self._render_decision_panel(
+                prompt, decision,
+                title="[bold]DRY-RUN — would act[/bold]",
+                border_style="dim",
+                footer=f"[dim]dry-run: not acting (reason: {decision.reason})[/dim]",
+            )
             self._update_prompt_label()
             return
 
-        # Phase 3: destructive ops bypass the wait bar entirely.
+        # Phase 3: destructive ops bypass the wait bar entirely. Render as
+        # RED panel (user MUST decide). Same treatment for escalate-to-user
+        # decisions in the restricted profile.
         if decision.is_destructive and decision.decision in (
             PolicyDecision.AUTO_YES, PolicyDecision.AUTO_NO
         ):
             self.pending = prompt
-            self.log(
-                f"[red bold]⚠ destructive op detected[/red bold] — "
-                f"waiting indefinitely for your reply (policy would have "
-                f"{decision.decision.value})"
+            self._render_decision_panel(
+                prompt, decision,
+                title="[bold red]⚠ NEEDS YOUR APPROVAL — destructive op[/bold red]",
+                border_style="red",
+                footer=(
+                    "[bold red]waiting indefinitely[/bold red] "
+                    "[dim](policy would have "
+                    f"{decision.decision.value}; type y/n/<digit> or `/skip`)[/dim]"
+                ),
             )
             self.store.log_note("destructive op pending — bypassed auto")
             if self.telegram is not None:
@@ -328,12 +652,38 @@ class BridgeUI:
             return
 
         if decision.decision == PolicyDecision.AUTO_YES:
+            # YELLOW panel — auto-decision pending, countdown starts.
+            self._render_decision_panel(
+                prompt, decision,
+                title="[bold yellow]⏳ AUTO-APPROVE — firing in {:.1f}s[/bold yellow]".format(
+                    decision.wait_interval_seconds
+                ),
+                border_style="yellow",
+                footer="[dim]type to override · /skip to leave to you[/dim]",
+            )
             await self._auto_with_wait(prompt, decision, action="yes")
         elif decision.decision == PolicyDecision.AUTO_NO:
+            self._render_decision_panel(
+                prompt, decision,
+                title="[bold yellow]⏳ AUTO-DENY — firing in {:.1f}s[/bold yellow]".format(
+                    decision.wait_interval_seconds
+                ),
+                border_style="yellow",
+                footer="[dim]type to override · /skip to leave to you[/dim]",
+            )
             await self._auto_with_wait(prompt, decision, action="no")
         elif decision.decision == PolicyDecision.ESCALATE_TELEGRAM:
+            # RED panel — user (or Telegram user) must respond.
             self.pending = prompt
-            self.log(f"[yellow]→ waiting for your reply (reason: {decision.reason})[/yellow]")
+            self._render_decision_panel(
+                prompt, decision,
+                title="[bold red]⚠ NEEDS YOUR APPROVAL[/bold red]",
+                border_style="red",
+                footer=(
+                    f"[bold red]waiting for your reply[/bold red] "
+                    f"[dim]({decision.reason}; type y/n/<digit> or `/skip`)[/dim]"
+                ),
+            )
             if self.telegram is not None:
                 try:
                     await self.telegram.notify_approval_needed(prompt, decision)
@@ -341,10 +691,44 @@ class BridgeUI:
                 except Exception as e:  # noqa: BLE001
                     self.log(f"[red]Telegram send failed: {e}[/red]")
         else:
+            # WAIT_LOCAL fall-through.
             self.pending = prompt
-            self.log(f"[dim]→ waiting (reason: {decision.reason})[/dim]")
+            self._render_decision_panel(
+                prompt, decision,
+                title="[bold]… waiting[/bold]",
+                border_style="dim",
+                footer=f"[dim]({decision.reason})[/dim]",
+            )
 
         self._update_prompt_label()
+
+    def _render_decision_panel(
+        self,
+        prompt: ClassifiedPrompt,
+        decision: DecisionResult,
+        title: str,
+        border_style: str,
+        footer: str,
+    ) -> None:
+        """Compact panel summarising an approval decision."""
+        body = Table.grid(padding=(0, 1))
+        body.add_column(style="bold", no_wrap=True)
+        body.add_column(overflow="fold")
+        body.add_row("type", prompt.type.value)
+        if prompt.extracted_command:
+            body.add_row("tool", prompt.extracted_command)
+        if prompt.menu_options:
+            body.add_row("options", "\n".join(prompt.menu_options))
+        body.add_row("profile", decision.profile)
+        if decision.matched_pattern:
+            body.add_row(
+                "matched", f"[dim]{decision.matched_pattern}[/dim]"
+            )
+        # Append the footer as the last row spanning both columns.
+        body.add_row("", footer)
+        self.print_rich(Panel(
+            body, title=title, border_style=border_style, expand=False,
+        ))
 
     # --- wait-bar coordination ----------------------------------------------
 
@@ -370,15 +754,10 @@ class BridgeUI:
         self.pending = prompt
         self._update_prompt_label()
 
-        color = "green" if action == "yes" else "red"
-        self.log(
-            f"[{color}]⏳ auto-{action} in {interval:.1f}s[/{color}] "
-            f"[dim](type to override)[/dim]"
-        )
-
-        # For longer waits, emit a midpoint heartbeat so the user knows
-        # we're still alive. Animation isn't safe under patch_stdout, so
-        # we just log discrete checkpoints rather than redrawing.
+        # The yellow decision panel (rendered by _handle_decision before
+        # we got called) already shows "firing in N.Ns". For long waits
+        # we still emit a one-line heartbeat so the user knows time is
+        # passing while still able to override.
         midpoint_logged = {"done": False}
 
         def heartbeat(remaining: float, total: float) -> None:
@@ -387,7 +766,8 @@ class BridgeUI:
             if remaining <= total / 2:
                 midpoint_logged["done"] = True
                 self.log(
-                    f"[dim]  …{remaining:.1f}s remaining (still time to override)[/dim]"
+                    f"[dim]  …{remaining:.1f}s remaining "
+                    f"(still time to override)[/dim]"
                 )
 
         try:
@@ -463,6 +843,12 @@ class BridgeUI:
             return
 
         agent = Agent.load()
+        # --no-llm flag overrides the configured backend so EVERY summary
+        # call routed through this bridge (approval / escalation /
+        # completion) skips the upstream LLM and sends the raw context.
+        if getattr(self.args, "no_llm", False):
+            agent.model = "none:raw"
+            self.log("[dim]--no-llm: Telegram messages will use raw pane context[/dim]")
         self.telegram = TelegramBridge(
             cfg, agent,
             reply_handler=self._telegram_reply_handler,
@@ -561,6 +947,8 @@ class BridgeUI:
             pass
 
     def _prompt_label(self) -> str:
+        """Kept for backwards compat / tests. The framed input now uses
+        :meth:`_prompt_title` for its border title instead."""
         if self.pending is None:
             return "claude> "
         if self.pending.type == PromptType.APPROVAL_MENU and self.pending.menu_options:
@@ -572,13 +960,25 @@ class BridgeUI:
             return "claude (y/n)> "
         return "claude (reply)> "
 
+    def _prompt_title(self) -> str:
+        """Title shown on the framed input box (no trailing '> ')."""
+        if self.pending is None:
+            return " claude "
+        if self.pending.type == PromptType.APPROVAL_MENU and self.pending.menu_options:
+            digits = "/".join(
+                str(i + 1) for i in range(len(self.pending.menu_options))
+            )
+            return f" claude ({digits} | y | n) "
+        if self.pending.type == PromptType.APPROVAL_YN:
+            return " claude (y / n) "
+        return " claude (reply) "
+
     async def _input_loop(self) -> None:
         self.log("[dim]ready. /help for commands. Ctrl-D to quit.[/dim]")
         while not self.stop_event.is_set():
             try:
-                text = await self.session.prompt_async(
-                    lambda: self._prompt_label()
-                )
+                # Framed input box (the Claude-Code-styled bordered prompt).
+                text = await self.framed.prompt_async()
             except (EOFError, KeyboardInterrupt):
                 self.stop_event.set()
                 self.monitor.stop()
@@ -641,6 +1041,10 @@ class BridgeUI:
         self.store.log_action(keys=f"text:{text}", source="user_terminal")
         # Sending text usually clears any pending menu, so reset.
         self.pending = None
+        # A new user message starts a new logical "task" — let the next
+        # completion render a fresh green panel (and decide whether it's
+        # a chat-only reply or a real tool-using task).
+        self._completion_locked = False
         self._update_prompt_label()
 
     async def _handle_slash(self, cmd: str) -> None:
@@ -903,14 +1307,14 @@ async def run(args: argparse.Namespace) -> int:
         return 2
 
     # Phase 4: if the user gave us no session hint at all, run the
-    # startup picker (banner + numbered menu). They can still pass
+    # startup picker (banner + arrow-key menu). They can still pass
     # --session or --auto-detect to skip it.
     resume_from = None
     if args.session is None and not args.auto_detect:
         from cldx.memory import Memory
         from cldx.startup import run_startup
         try:
-            choice = run_startup(policy, Memory(), console=console)
+            choice = await run_startup(policy, Memory(), console=console)
             pane = choice.pane
             resume_from = choice.resume_from
         except (KeyboardInterrupt, EOFError):
@@ -946,6 +1350,7 @@ def _run_setup_subcommand(args: argparse.Namespace) -> int:
     from cldx.setup_wizard import (
         run_anthropic_setup,
         run_bedrock_setup,
+        run_disable_llm,
         run_full_setup,
         run_gemini_setup,
         run_llm_setup,
@@ -960,6 +1365,8 @@ def _run_setup_subcommand(args: argparse.Namespace) -> int:
             run_gemini_setup(console=console)
         elif args.target == "llm":
             run_llm_setup(console=console)
+        elif args.target == "none":
+            run_disable_llm(console=console)
         elif args.target == "telegram":
             run_telegram_setup(console=console)
         else:  # "all"

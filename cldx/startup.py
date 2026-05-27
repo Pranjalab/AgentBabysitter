@@ -28,6 +28,7 @@ from rich.table import Table
 
 from cldx import __version__
 from cldx.memory import Memory
+from cldx.picker import PickerRow, pick_numeric, pick_with_arrows
 from cldx.policy_engine import PolicyEngine
 from cldx.session_picker import Pane, _looks_like_claude, list_panes
 from cldx.session_store import recent_sessions, session_summary
@@ -43,7 +44,7 @@ class StartupChoice:
     resume_from: Path | None = None # path to previous session log to replay
 
 
-def run_startup(
+async def run_startup(
     policy: PolicyEngine,
     memory: Memory,
     console: Console | None = None,
@@ -51,30 +52,97 @@ def run_startup(
 ) -> StartupChoice:
     """Show banner + picker, return the user's choice.
 
-    `input_fn` is injected so tests can drive the picker without real stdin.
+    On a real TTY: arrow-key picker with delete-via-`d` confirmation.
+    Otherwise (pipes / tests): numeric fallback driven by ``input_fn``.
+
+    This is async because ``pick_with_arrows`` returns a coroutine that
+    must run in the caller's event loop — we can't spawn a nested
+    ``asyncio.run`` here, that's an error inside ``asyncio.run(main())``.
     """
+    import sys
+
     console = console or Console()
     show_banner(policy, memory, console=console)
 
+    rows = _refresh_pick_rows()
+    if not rows:
+        return _execute_choice(
+            _PickRow(kind="start", label="start new",
+                     detail="no panes/sessions found"),
+            console,
+        )
+
+    # Map cldx-internal rows to picker rows. Resume + connect are deletable;
+    # "start new" is not.
+    picker_rows: list[PickerRow] = []
+    for row in rows:
+        if row.kind == "resume":
+            picker_rows.append(PickerRow(
+                text=f"{row.label.ljust(38)}  {row.detail}",
+                payload=row,
+                deletable=True,
+                delete_hint="delete event log",
+            ))
+        elif row.kind == "connect":
+            picker_rows.append(PickerRow(
+                text=f"{row.label.ljust(38)}  {row.detail}",
+                payload=row,
+                deletable=True,
+                delete_hint="kill tmux session",
+            ))
+        else:  # "start" / "manage"
+            picker_rows.append(PickerRow(
+                text=f"{row.label.ljust(38)}  {row.detail}",
+                payload=row,
+                deletable=False,
+            ))
+
+    def _on_delete(picker_row: PickerRow) -> None:
+        target: _PickRow = picker_row.payload
+        if target.kind == "resume" and target.resume_path:
+            try:
+                target.resume_path.unlink()
+                console.print(
+                    f"[dim]deleted event log: {target.resume_path.name}[/dim]"
+                )
+            except OSError as e:
+                console.print(f"[red]could not delete: {e}[/red]")
+        elif target.kind == "connect" and target.pane:
+            session_name = target.pane.split(":", 1)[0]
+            try:
+                subprocess.run(
+                    ["tmux", "kill-session", "-t", session_name],
+                    check=True, capture_output=True, text=True,
+                )
+                console.print(f"[dim]killed tmux session: {session_name}[/dim]")
+            except subprocess.CalledProcessError as e:
+                console.print(
+                    f"[red]could not kill {session_name}: {e.stderr.strip()}[/red]"
+                )
+
+    header = f"Pick a session — [dim]{len(picker_rows)} options[/dim]"
+
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if is_tty:
+        chosen_payload = await pick_with_arrows(
+            picker_rows, header=header, on_delete=_on_delete,
+        )
+    else:
+        chosen_payload = pick_numeric(
+            picker_rows, header=header, input_fn=input_fn, on_delete=_on_delete,
+        )
+
+    if chosen_payload is None:
+        raise KeyboardInterrupt("user cancelled session picker")
+    return _execute_choice(chosen_payload, console)
+
+
+def _refresh_pick_rows() -> list["_PickRow"]:
+    """Rebuild the list of available actions (panes + sessions + start new)."""
     panes = list_panes()
     claude_panes = [p for p in panes if _looks_like_claude(p)]
     sessions = recent_sessions(limit=5)
-
-    rows = _build_pick_rows(claude_panes, sessions)
-    _render_pick_table(rows, console)
-
-    while True:
-        raw = input_fn("\nPick [number]: ").strip()
-        if not raw:
-            continue
-        try:
-            idx = int(raw)
-        except ValueError:
-            console.print("[red]please type a number[/red]")
-            continue
-        if 1 <= idx <= len(rows):
-            return _execute_choice(rows[idx - 1], console)
-        console.print(f"[red]out of range (1..{len(rows)})[/red]")
+    return _build_pick_rows(claude_panes, sessions)
 
 
 # --- banner -------------------------------------------------------------

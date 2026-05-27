@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.prompt_classifier import PromptType
+from cldx.prompt_classifier import PromptType
 
 
 def test_idle_snapshot_classifies_as_idle(snapshot, classifier):
@@ -97,7 +97,7 @@ def test_classifier_handles_malformed_user_pattern(monkeypatch, policy):
     """A bad user-supplied regex should be skipped, not raise."""
     cfg = dict(policy.detection_config)
     cfg["approval_yn_patterns"] = list(cfg.get("approval_yn_patterns", [])) + ["[unterminated"]
-    from src.prompt_classifier import PromptClassifier
+    from cldx.prompt_classifier import PromptClassifier
     pc = PromptClassifier(detection_cfg=cfg)
     # Should not raise.
     p = pc.classify("Do you want to proceed? (y/n)")

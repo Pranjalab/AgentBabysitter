@@ -1,3 +1,6 @@
--r requirements.txt
+# Dev-time deps. Install the package itself in editable mode first:
+#   pip install --user -e .
+# Then:
+#   pip install -r requirements-dev.txt
 pytest>=8.0
 pytest-asyncio>=0.23

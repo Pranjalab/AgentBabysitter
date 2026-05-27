@@ -487,7 +487,7 @@ def run_llm_setup(
         "  [cyan]1.[/cyan] Anthropic (direct API key)         — easiest, best quality\n"
         "  [cyan]2.[/cyan] AWS Bedrock (bearer token + boto3) — use your AWS account\n"
         "  [cyan]3.[/cyan] Google Gemini (gemini-2.0-flash)   — free tier available\n"
-        "  [cyan]4.[/cyan] Skip — Telegram messages will use naive truncation",
+        "  [cyan]4.[/cyan] Disable LLM                        — Telegram gets the raw pane",
         title="[bold cyan]LLM backend[/bold cyan]",
         border_style="cyan",
     ))
@@ -500,9 +500,41 @@ def run_llm_setup(
         if choice == "3":
             return run_gemini_setup(console=console, input_fn=input_fn)
         if choice == "4" or choice == "":
-            console.print("[dim]No LLM backend configured. Telegram will use truncation.[/dim]")
-            return False
+            return run_disable_llm(console=console, input_fn=input_fn)
         console.print("[yellow]Pick 1, 2, 3, or 4.[/yellow]")
+
+
+def run_disable_llm(
+    console: Console | None = None,
+    input_fn: Callable[[str], str] = paste_friendly_input,
+) -> bool:
+    """Persistently disable the LLM step — Telegram gets the raw pane.
+
+    Writes ``model: none:raw`` to ``~/.cldx/config/agent_name.yml``. The
+    summarizer recognises that prefix and short-circuits — no upstream
+    API call is made, so there's nothing to fail or pay for.
+    """
+    console = console or Console()
+    console.print(Panel(
+        "[bold]Disable LLM summarization[/bold]\n\n"
+        "When the LLM is disabled, every Telegram notification carries\n"
+        "the raw pane context (truncated to the per-mode char budget).\n"
+        "No upstream API call is made. Use this if your Anthropic /\n"
+        "Bedrock / Gemini access isn't set up, has billing issues, or\n"
+        "you just don't want a third party in the loop.\n\n"
+        "You can re-enable any time with [cyan]cldx setup llm[/cyan].",
+        title="[bold cyan]LLM disabled mode[/bold cyan]",
+        border_style="cyan",
+    ))
+    if not _confirm("Disable the LLM now?", input_fn, default=True):
+        console.print("[dim]No change made.[/dim]")
+        return False
+    _set_agent_model("none:raw", console=console)
+    console.print(
+        "[green]✓ LLM disabled. Telegram messages will use the raw "
+        "pane context.[/green]"
+    )
+    return True
 
 
 # --- Agent model update ---------------------------------------------------

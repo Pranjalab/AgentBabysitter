@@ -47,7 +47,12 @@ class TmuxMonitor:
         self.poll_interval = poll_interval
         self.capture_lines = capture_lines
         self.stable_polls = stable_polls
+        # `last_snapshot` is ANSI-stripped (for classification + dedup).
+        # `last_raw_snapshot` keeps the escape sequences so the mirror
+        # can render Claude's own styling — dim placeholder text, the
+        # syntax-coloured tool calls, etc.
         self.last_snapshot: str = ""
+        self.last_raw_snapshot: str = ""
         self._stable_count: int = 0
         self._stopped = asyncio.Event()
 
@@ -112,6 +117,7 @@ class TmuxMonitor:
             if snapshot != self.last_snapshot:
                 new_content = self.diff_tail(self.last_snapshot, snapshot)
                 self.last_snapshot = snapshot
+                self.last_raw_snapshot = raw
                 self._stable_count = 0
                 stable_fired = False
                 if on_change is not None:

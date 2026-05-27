@@ -31,10 +31,11 @@ KNOWN_MODELS = {
     #   bedrock:<modelId>     e.g. bedrock:us.anthropic.claude-haiku-4-5-20251001-v1:0
     #   gemini:<modelId>      e.g. gemini:gemini-2.0-flash
     #   ollama:<model:tag>    e.g. ollama:llama3.1:8b
+    #   none:raw              skip LLM entirely; raw pane goes to Telegram
 }
 
 # A backend is the upstream service that actually runs the LLM call.
-KNOWN_BACKENDS = ("anthropic", "bedrock", "gemini", "ollama")
+KNOWN_BACKENDS = ("anthropic", "bedrock", "gemini", "ollama", "none")
 
 
 class AgentError(RuntimeError):
@@ -55,7 +56,14 @@ class Agent:
 
     @property
     def backend(self) -> str:
-        """Which upstream provider this agent's model runs on."""
+        """Which upstream provider this agent's model runs on.
+
+        ``none`` is a sentinel backend that skips the LLM step entirely —
+        used when the user wants raw pane content forwarded to Telegram
+        without an upstream summarisation call.
+        """
+        if self.model.startswith("none:") or self.model == "none":
+            return "none"
         if self.model.startswith("bedrock:"):
             return "bedrock"
         if self.model.startswith("gemini:"):
@@ -67,7 +75,7 @@ class Agent:
     @property
     def bare_model_id(self) -> str:
         """Strip the backend prefix from `model` (e.g. `gemini:foo` → `foo`)."""
-        for prefix in ("bedrock:", "gemini:", "ollama:"):
+        for prefix in ("none:", "bedrock:", "gemini:", "ollama:"):
             if self.model.startswith(prefix):
                 return self.model[len(prefix):]
         return self.model
@@ -126,6 +134,9 @@ class Agent:
 
     @staticmethod
     def _validate_model(model: str) -> None:
+        # `none:<anything>` and the bare `none` both disable the LLM.
+        if model == "none" or model.startswith("none:"):
+            return
         # Prefixed models are validated by their respective backend adapters;
         # we only enforce that the prefix is one we know how to dispatch.
         if model.startswith(("bedrock:", "gemini:", "ollama:")):
@@ -137,7 +148,8 @@ class Agent:
         if model not in KNOWN_MODELS:
             raise AgentError(
                 f"unknown model {model!r}. Known: {sorted(KNOWN_MODELS)} "
-                "or use a backend prefix: bedrock:<id> / gemini:<id> / ollama:<id>"
+                "or use a backend prefix: bedrock:<id> / gemini:<id> / "
+                "ollama:<id> / none:raw"
             )
 
     # --- introspection ---

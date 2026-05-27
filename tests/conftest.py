@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-# Make the project root importable as `src.*` during tests.
+# Make the project root importable so `import cldx.*` works without install.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.policy_engine import PolicyEngine  # noqa: E402
-from src.prompt_classifier import PromptClassifier  # noqa: E402
+from cldx.policy_engine import PolicyEngine  # noqa: E402
+from cldx.prompt_classifier import PromptClassifier  # noqa: E402
 
 
 FIXTURES = REPO_ROOT / "tests" / "fixtures"
@@ -39,7 +39,8 @@ def snapshot():
 
 @pytest.fixture
 def policy_path() -> Path:
-    return REPO_ROOT / "config" / "policy.yml"
+    """Path to the bundled default policy (shipped inside the package)."""
+    return REPO_ROOT / "cldx" / "defaults" / "policy.yml"
 
 
 @pytest.fixture

@@ -105,3 +105,183 @@ async def test_on_stable_still_prints_mirror_and_acts(tmp_path, monkeypatch):
     # Mirror was printed (last_mirror_tail set), and the prompt got pinned.
     assert ui.last_mirror_tail != ""
     assert ui.pending_signature is not None
+
+
+# --- Completion flow ----------------------------------------------------
+
+_COMPLETION_SNAPSHOT = (
+    "⏺ Bash(mkdir -p /tmp/cldx_check)\n"
+    "  ⎿  Done\n"
+    "\n"
+    "⏺ Write(/tmp/cldx_check.py)\n"
+    "  ⎿  Wrote 1 lines\n"
+    "       1 print('hello world')\n"
+    "\n"
+    "⏺ Created /tmp/cldx_check.py with 'hello world'.\n"
+    "\n"
+    "✻ Cogitated for 4s\n"
+    "\n"
+    "❯ cat /tmp/cldx_check.py\n"
+    "  ? for shortcuts · ← for agents\n"
+)
+
+_CHAT_ONLY_SNAPSHOT = (
+    "❯ hi\n"
+    "\n"
+    "⏺ Hi! What would you like to work on?\n"
+    "\n"
+    "✻ Crunched for 1s\n"
+    "\n"
+    "❯\n"
+    "  ? for shortcuts · ← for agents\n"
+)
+
+
+async def test_completion_flow_fires_once_then_dedups(tmp_path, monkeypatch):
+    """Two on_stable calls with the same completed pane → one panel only."""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+    from cldx.summarizer import SummaryResult
+
+    async def fake_status(mode, ctx, agent):
+        return SummaryResult(text="Created /tmp/cldx_check.py", summarized=True)
+
+    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_status)
+
+    await ui.on_stable(_COMPLETION_SNAPSHOT)
+    assert ui._completion_locked is True, (
+        "first completion should lock the panel"
+    )
+
+    # Second on_stable must short-circuit on the lock, not re-fire.
+    await ui.on_stable(_COMPLETION_SNAPSHOT)
+    assert ui._completion_locked is True
+
+
+async def test_completion_lock_resets_on_new_approval(tmp_path, monkeypatch):
+    """After a completion + a fresh approval prompt, the lock clears so the
+    next completion (a new task) can render again."""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+    from cldx.summarizer import SummaryResult
+
+    async def fake_status(mode, ctx, agent):
+        return SummaryResult(text="ok", summarized=True)
+
+    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_status)
+
+    await ui.on_stable(_COMPLETION_SNAPSHOT)
+    assert ui._completion_locked is True
+
+    await ui.on_change("", _APPROVAL_SNAPSHOT)
+    assert ui._completion_locked is False, (
+        "new approval prompt should clear the completion lock"
+    )
+
+
+async def test_completion_falls_back_to_raw_on_llm_failure(tmp_path, monkeypatch):
+    """If the LLM errors, we still set the lock + show the panel with raw context."""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+
+    async def boom(*_a, **_kw):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("cldx.summarizer.summarize_with_status", boom)
+
+    await ui.on_stable(_COMPLETION_SNAPSHOT)
+    assert ui._completion_locked is True
+
+
+async def test_chat_only_reply_skips_completion_panel(tmp_path, monkeypatch):
+    """A snapshot with no tool calls must NOT render the green completion panel."""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+
+    # If we'd entered the "real task" branch, the summarizer would have been
+    # called; make sure that doesn't happen.
+    calls: list[str] = []
+
+    async def trace_summarize(*_a, **_kw):
+        calls.append("called")
+        raise AssertionError("summarize should not run for chat-only completions")
+
+    monkeypatch.setattr("cldx.summarizer.summarize_with_status", trace_summarize)
+    await ui.on_stable(_CHAT_ONLY_SNAPSHOT)
+    assert calls == []
+    # The lock IS still set so we don't re-log "Claude replied" twice.
+    assert ui._completion_locked is True
+
+
+def test_pane_has_tool_calls_detects_each_tool(tmp_path, monkeypatch):
+    """Sanity check: each tool marker in the recent pane triggers the filter."""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+    for marker in (
+        "⏺ Bash(echo hi)", "⏺ Read(/x)", "⏺ Edit(/y)",
+        "⏺ Write(/z)", "⏺ Grep(foo)", "⏺ Glob(*.py)",
+    ):
+        assert ui._pane_has_tool_calls(marker)
+    assert not ui._pane_has_tool_calls("⏺ Hi! What's up?")
+    assert not ui._pane_has_tool_calls("just a plain message")
+
+
+async def test_mirror_suppressed_after_completion_locks(tmp_path, monkeypatch):
+    """Once we've shown a green completion panel for a task, further
+    on_stable events with the same COMPLETE classification must NOT
+    re-print the blue mirror panel."""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+
+    from cldx.summarizer import SummaryResult
+
+    async def fake_status(mode, ctx, agent):
+        return SummaryResult(text="ok", summarized=True)
+
+    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_status)
+
+    # First on_stable → completion fires, lock set, mirror printed once.
+    await ui.on_stable(_COMPLETION_SNAPSHOT)
+    assert ui._completion_locked is True
+    first_mirror = ui.last_mirror_tail
+
+    # Force an internal state change that would normally bust the mirror
+    # dedup (e.g. inject some whitespace in the snapshot). The mirror
+    # MUST still not reprint because the completion is locked.
+    jittered = _COMPLETION_SNAPSHOT + "\n    \n"   # different bytes, same logical state
+    await ui.on_stable(jittered)
+
+    # Mirror cache unchanged → no second mirror panel rendered.
+    assert ui.last_mirror_tail == first_mirror
+
+
+async def test_mirror_resumes_when_new_task_starts(tmp_path, monkeypatch):
+    """Lock clears on new approval prompt, so the next stable refreshes mirror."""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+
+    from cldx.summarizer import SummaryResult
+
+    async def fake_status(mode, ctx, agent):
+        return SummaryResult(text="ok", summarized=True)
+
+    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_status)
+
+    await ui.on_stable(_COMPLETION_SNAPSHOT)
+    assert ui._completion_locked is True
+
+    # A new approval prompt arrives → lock should clear.
+    await ui.on_change("", _APPROVAL_SNAPSHOT)
+    assert ui._completion_locked is False
+
+
+def test_mirror_dedup_survives_trailing_whitespace_jitter(tmp_path, monkeypatch):
+    """Two snapshots that differ only by trailing spaces / blank lines
+    must produce the same normalized tail (no duplicate panel)."""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+    a = "line1   \nline2\n\n\n"
+    b = "line1\nline2  \n\n"
+    assert ui._normalize_tail(a) == ui._normalize_tail(b)
+
+
+def test_mirror_dedup_collapses_blank_runs(tmp_path, monkeypatch):
+    """Runs of N blank lines collapse to one, so a frame that briefly
+    inserts a spare blank doesn't bust dedup. (We DO keep a single blank
+    because paragraph breaks are real structure.)"""
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+    a = "x\n\ny"          # one blank separator
+    b = "x\n\n\n\ny"      # four blank separators
+    assert ui._normalize_tail(a) == ui._normalize_tail(b)

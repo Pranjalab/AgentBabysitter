@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from src.tmux_monitor import TmuxMonitor
+from cldx.tmux_monitor import TmuxMonitor
 
 
 # --- ANSI stripping --------------------------------------------------------

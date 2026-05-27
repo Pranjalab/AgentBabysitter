@@ -352,3 +352,56 @@ def test_agent_validates_prefixed_model_must_have_id():
         path = f.name
     with pytest.raises(AgentError):
         Agent.load(path)
+
+
+# --- "none" backend (LLM disabled) -----------------------------------------
+
+
+def _none_agent(tmp_path, model: str = "none:raw"):
+    import yaml
+    cfg = tmp_path / "agent_name.yml"
+    cfg.write_text(yaml.safe_dump({
+        "name": "Sentinel",
+        "persona": "x",
+        "model": model,
+    }))
+    return Agent.load(cfg)
+
+
+def test_agent_backend_for_none_prefix(tmp_path):
+    agent = _none_agent(tmp_path)
+    assert agent.backend == "none"
+    assert agent.bare_model_id == "raw"
+
+
+def test_agent_backend_for_bare_none(tmp_path):
+    agent = _none_agent(tmp_path, model="none")
+    assert agent.backend == "none"
+
+
+def test_agent_accepts_bare_none_model(tmp_path):
+    """Bare 'none' must be a valid model (no prefix-id needed)."""
+    _none_agent(tmp_path, model="none")  # would raise on validation error
+
+
+async def test_summarize_none_backend_returns_raw_no_marker(tmp_path):
+    """With backend=none, no upstream call is made and text is the raw pane."""
+    agent = _none_agent(tmp_path)
+    status = await summarize_with_status(
+        "prompt_summary", "Claude wants to install axios", agent,
+    )
+    assert status.summarized is False
+    assert "LLM disabled" in status.fallback_reason
+    assert "axios" in status.text
+    assert "[unsummarized" not in status.text
+
+
+async def test_summarize_none_backend_no_api_key_needed(tmp_path, monkeypatch):
+    """The none backend never touches the network — no key required."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    agent = _none_agent(tmp_path)
+    status = await summarize_with_status("completion_summary", "ctx", agent)
+    assert status.summarized is False
+    assert status.text == "ctx"
