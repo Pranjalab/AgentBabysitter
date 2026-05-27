@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/opt/anaconda3/bin/python3.12 -m pytest -q)"
+    ]
+  }
+}

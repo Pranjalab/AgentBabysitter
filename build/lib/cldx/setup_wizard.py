@@ -713,51 +713,20 @@ def _telegram_send_test(
     bot_username: str,
     http_fn: HttpFn,
 ) -> bool:
-    """Sends two messages: a short connection ping followed by the warm
-    greeting that orients the user to all available commands."""
-    from cldx.telegram_templates import greeting_message
-
-    ping_body = urllib.parse.urlencode({
+    body = urllib.parse.urlencode({
         "chat_id": chat_id,
-        "text": "✓ cldx is connected.",
+        "text": "✓ cldx is connected. You'll get approval prompts here.",
     }).encode()
     try:
-        data = http_fn(f"https://api.telegram.org/bot{token}/sendMessage", ping_body, 10.0)
+        data = http_fn(f"https://api.telegram.org/bot{token}/sendMessage", body, 10.0)
     except (urllib.error.URLError, OSError) as e:
         console.print(f"[red]Network error: {e}[/red]")
         return False
-    if not data.get("ok"):
-        console.print(f"[red]Send failed: {data.get('description', 'unknown')}[/red]")
-        return False
-
-    # Greeting card. If it fails, the connection itself is still good —
-    # surface a warning but don't return False.
-    greeting_body = urllib.parse.urlencode({
-        "chat_id": chat_id,
-        "text": greeting_message(bot_username=bot_username),
-        "parse_mode": "Markdown",
-    }).encode()
-    try:
-        gdata = http_fn(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            greeting_body, 10.0,
-        )
-        if not gdata.get("ok"):
-            console.print(
-                f"[yellow]Greeting send returned: "
-                f"{gdata.get('description', 'unknown')} "
-                f"(connection still OK).[/yellow]"
-            )
-    except (urllib.error.URLError, OSError) as e:
-        console.print(f"[yellow]Greeting send failed: {e} (connection still OK).[/yellow]")
-
-    console.print(
-        f"[green]✓ Sent welcome message — check @{bot_username} on Telegram.[/green]"
-    )
-    console.print(
-        "[dim]Tip: send /help in Telegram to see what cldx can do from chat.[/dim]"
-    )
-    return True
+    if data.get("ok"):
+        console.print(f"[green]✓ Sent test message — check @{bot_username} on Telegram.[/green]")
+        return True
+    console.print(f"[red]Send failed: {data.get('description', 'unknown')}[/red]")
+    return False
 
 
 # --- combined + show ------------------------------------------------------

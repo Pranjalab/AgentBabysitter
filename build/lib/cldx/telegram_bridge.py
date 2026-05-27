@@ -28,16 +28,6 @@ from cldx.agent import Agent
 from cldx.policy_engine import DecisionResult
 from cldx.prompt_classifier import ClassifiedPrompt
 from cldx.summarizer import summarize_with_status
-from cldx.telegram_commands import dispatch as dispatch_command
-from cldx.telegram_templates import (
-    ApprovalCard,
-    CompletionCard,
-    EscalationCard,
-    approval_message,
-    completion_message,
-    escalation_message,
-    greeting_message,
-)
 
 
 # --- Config loader --------------------------------------------------------
@@ -160,7 +150,6 @@ class TelegramBridge:
         agent: Agent,
         reply_handler: ReplyHandler,
         bot_factory: Callable[[str], Any] | None = None,
-        bridge_ui: Any = None,
     ):
         self.config = config
         self.agent = agent
@@ -168,9 +157,6 @@ class TelegramBridge:
         self._bot_factory = bot_factory
         self._app: Any = None
         self._pending_prompt: ClassifiedPrompt | None = None
-        # Used by slash-command handlers to introspect/mutate BridgeUI
-        # state (pending, profile, pause, …). Optional — tests can omit.
-        self.bridge_ui = bridge_ui
 
     @property
     def pending_prompt(self) -> ClassifiedPrompt | None:
@@ -187,24 +173,10 @@ class TelegramBridge:
 
     async def start(self) -> None:
         self._app = self._make_app()
-        # Wire two handlers:
-        #   1. CommandHandler — every ``/command`` we recognise routes
-        #      to ``cldx.telegram_commands.dispatch``. Crucially these
-        #      do NOT get injected into Claude Code.
-        #   2. MessageHandler — plain text (no ``/`` prefix) is parsed
-        #      as a reply: y / n / digit / text → goes into the pane.
-        from telegram.ext import (  # type: ignore[import-not-found]
-            CommandHandler,
-            MessageHandler,
-            filters,
-        )
-        from cldx.telegram_commands import COMMANDS as _COMMANDS
-
-        for name in _COMMANDS:
-            self._app.add_handler(CommandHandler(name, self._on_telegram_command))
-        self._app.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_telegram_message)
-        )
+        # Wire the message handler.
+        from telegram.ext import MessageHandler, filters  # type: ignore[import-not-found]
+        handler = MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_telegram_message)
+        self._app.add_handler(handler)
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling()
@@ -238,51 +210,30 @@ class TelegramBridge:
                 f"LLM summary unavailable ({result.fallback_reason}); "
                 f"sending raw context to Telegram."
             )
-        risk = "destructive" if getattr(decision, "is_destructive", False) else "normal"
-        card = ApprovalCard(
-            command=prompt.extracted_command or "",
-            summary=result.text,
-            risk=risk,
-            menu_options=tuple(prompt.menu_options or ()),
-            profile=getattr(decision, "profile", "") or "",
-        )
-        await self._send(approval_message(card))
+        text = f"🤖 {result.text}\n\nReply: y / n"
+        if prompt.menu_options:
+            digits = "/".join(str(i + 1) for i in range(len(prompt.menu_options)))
+            text += f" / {digits}"
+        text += " / or send a free-form reply to inject text."
+        await self._send(text)
 
-    async def notify_completion(
-        self, context: str, task: str = "", duration_s: float = 0.0,
-        profile: str = "",
-    ) -> None:
+    async def notify_completion(self, context: str) -> None:
         result = await summarize_with_status("completion_summary", context, self.agent)
         if not result.summarized:
             self._log_local(
                 f"LLM summary unavailable ({result.fallback_reason}); "
                 f"sending raw context."
             )
-        card = CompletionCard(
-            task=task, summary=result.text,
-            duration_s=duration_s, profile=profile,
-        )
-        await self._send(completion_message(card))
+        await self._send(f"✓ Claude finished:\n\n{result.text}")
 
-    async def notify_escalation(
-        self, context: str, command: str = "", reason: str = "",
-        profile: str = "",
-    ) -> None:
+    async def notify_escalation(self, context: str) -> None:
         result = await summarize_with_status("escalation_summary", context, self.agent)
         if not result.summarized:
             self._log_local(
                 f"LLM summary unavailable ({result.fallback_reason}); "
                 f"sending raw context."
             )
-        card = EscalationCard(
-            command=command, summary=result.text,
-            reason=reason, profile=profile,
-        )
-        await self._send(escalation_message(card))
-
-    async def notify_greeting(self, bot_username: str = "", profile: str = "") -> None:
-        """Send the one-time welcome message after setup completes."""
-        await self._send(greeting_message(bot_username=bot_username, profile=profile))
+        await self._send(f"⚠ Claude needs a decision:\n\n{result.text}")
 
     def _log_local(self, msg: str) -> None:
         """Local-only diagnostic line. Currently prints; BridgeUI may swap
@@ -312,18 +263,6 @@ class TelegramBridge:
             # fresh notification.
             if reply.kind in ("yes", "no", "digit"):
                 self._pending_prompt = None
-
-    async def _on_telegram_command(self, update, context) -> None:  # noqa: ANN001
-        """Slash-command path — these are cldx-only and never get
-        injected into Claude Code."""
-        incoming_chat_id = str(update.effective_chat.id)
-        if incoming_chat_id != str(self.config.chat_id):
-            return
-        text = (update.message.text or "").strip()
-        reply = await dispatch_command(self.bridge_ui, text)
-        if reply is None:
-            return  # parse_command saw nothing we recognise — silent drop
-        await self._send(reply)
 
     # --- timeout ---
 

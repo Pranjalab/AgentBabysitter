@@ -42,7 +42,6 @@ from cldx.policy_engine import (
 )
 from cldx.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
 from cldx.session_picker import SessionPickerError, list_panes, pick_session
-from cldx.interaction_log import InteractionLog
 from cldx.session_store import SessionStore
 from cldx.framed_input import FramedInputSession
 from cldx.memory import Memory, normalize_pattern
@@ -138,21 +137,6 @@ def _now() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
-_RICH_TAG_RE = __import__("re").compile(r"\[/?[^\[\]]{0,40}?\]")
-
-
-def _strip_rich_markup(text: str) -> str:
-    """Remove ``[green]...[/green]``-style Rich tags from a log line.
-
-    Best-effort only — Rich's full grammar is richer than what this
-    matches, but for one-line console messages it cleans up reliably.
-    Used so the plain-text InteractionLog stays human-readable.
-    """
-    if not text:
-        return ""
-    return _RICH_TAG_RE.sub("", text)
-
-
 def _find_option_digit(options, keyword: str) -> int | None:
     import re
     pat = re.compile(r"^\s*(\d+)\.\s*(.+)$")
@@ -222,21 +206,8 @@ class BridgeUI:
         )
         self._action_lock = asyncio.Lock()
 
-        # Phase 2: jsonl event log for this run (machine-replayable).
+        # Phase 2: jsonl event log for this run.
         self.store = SessionStore(profile=policy.active_profile_name, pane=pane)
-        # Plain-text interaction log — everything the user typed, everything
-        # Telegram delivered, and every decision cldx made, written under
-        # ``~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log``.
-        self.interaction_log = InteractionLog(
-            profile=policy.active_profile_name, pane=pane,
-        )
-        # Track whether auto-approvals are temporarily paused (set via
-        # Telegram /pause). Approval prompts that arrive while paused
-        # remain "pending" instead of getting auto-fired.
-        self.paused: bool = False
-        # When the current task began — used to surface duration in the
-        # Telegram completion card.
-        self._task_started_at: float | None = None
 
         # Phase 3: signal that's set whenever the user types something while
         # a wait-bar is counting down. `None` outside of a wait epoch.
@@ -273,29 +244,12 @@ class BridgeUI:
         # Tab to accept it.
         self._claude_suggestion: str = ""
 
-    # --- accessors (used by telegram_commands) ---
-
-    @property
-    def pane_target(self) -> str:
-        return self.pane
-
-    def set_paused(self, value: bool) -> None:
-        self.paused = bool(value)
-        self.interaction_log.cldx_note(
-            f"paused={self.paused} (via Telegram)"
-        )
-
     # --- printing (safe under patch_stdout) ---
 
     def log(self, msg: str) -> None:
         # Use console.print so Rich markup ([green]...[/green]) renders.
         # patch_stdout(raw=True) lets ANSI codes pass through cleanly.
         console.print(f"[dim][{_now()}][/dim] {msg}")
-        # Strip Rich markup tags for the plain log — quick best-effort.
-        try:
-            self.interaction_log.terminal_out(_strip_rich_markup(msg))
-        except Exception:  # noqa: BLE001 — logging must never crash the UI
-            pass
 
     def print_rich(self, renderable) -> None:
         console.print(renderable)
@@ -898,17 +852,12 @@ class BridgeUI:
         self.telegram = TelegramBridge(
             cfg, agent,
             reply_handler=self._telegram_reply_handler,
-            bridge_ui=self,
         )
         try:
             await self.telegram.start()
             self.log(f"[green]✓ Telegram bridge connected (chat {cfg.chat_id})[/green]")
-            self.interaction_log.cldx_note(
-                f"telegram bridge connected (chat={cfg.chat_id})"
-            )
         except Exception as e:  # noqa: BLE001
             self.log(f"[red]Failed to start Telegram bridge: {e}[/red]")
-            self.interaction_log.cldx_note(f"telegram bridge failed: {e}")
             self.telegram = None
 
     async def _telegram_reply_handler(self, reply, _pending) -> None:
@@ -923,12 +872,6 @@ class BridgeUI:
             kind = reply.kind
             value = reply.value
 
-            # Log the raw inbound reply.
-            inbound_repr = value if kind == "text" else (
-                value if kind == "digit" else kind
-            )
-            self.interaction_log.telegram_in(f"{kind}: {inbound_repr}")
-
             if current is None and kind in ("yes", "no", "digit"):
                 self.log(
                     f"[dim]Telegram reply {kind!r} arrived but nothing's pending — "
@@ -940,7 +883,6 @@ class BridgeUI:
                 outcome = await _act_yes(self.controller, current)
                 self.log(f"[green]→ {outcome}[/green] [dim](via Telegram)[/dim]")
                 self.store.log_action(keys=outcome, source="user_telegram")
-                self.interaction_log.cldx_action(f"{outcome} (via Telegram yes)")
                 self._learn_from_user(current, approve=True)
                 self.pending = None
 
@@ -948,7 +890,6 @@ class BridgeUI:
                 outcome = await _act_no(self.controller, current)
                 self.log(f"[red]→ {outcome}[/red] [dim](via Telegram)[/dim]")
                 self.store.log_action(keys=outcome, source="user_telegram")
-                self.interaction_log.cldx_action(f"{outcome} (via Telegram no)")
                 self._learn_from_user(current, approve=False)
                 self.pending = None
 
@@ -956,14 +897,12 @@ class BridgeUI:
                 await self.controller.send_digit(int(value))
                 self.log(f"[cyan]→ sent option {value}[/cyan] [dim](via Telegram)[/dim]")
                 self.store.log_action(keys=f"digit:{value}", source="user_telegram")
-                self.interaction_log.cldx_action(f"sent digit {value} (via Telegram)")
                 self.pending = None
 
             elif kind == "text":
                 await self.controller.send_text(value)
                 self.log(f"[cyan]→ injected:[/cyan] {value} [dim](via Telegram)[/dim]")
                 self.store.log_action(keys=f"text:{value}", source="user_telegram")
-                self.interaction_log.cldx_action(f"sent text {value!r} (via Telegram)")
                 self.pending = None
 
             self._update_prompt_label()
@@ -985,8 +924,6 @@ class BridgeUI:
             self.store.log_event("yolo_learn", pattern=pattern, approved=approve)
 
     async def _fire_auto(self, prompt: ClassifiedPrompt, action: str) -> None:
-        cmd = prompt.extracted_command or prompt.type.value
-        self.interaction_log.cldx_decision(f"auto-{action} {cmd}")
         if action == "yes":
             outcome = await _act_yes(self.controller, prompt)
             self.log(f"[green]→ {outcome}[/green]")
@@ -994,7 +931,6 @@ class BridgeUI:
             outcome = await _act_no(self.controller, prompt)
             self.log(f"[red]→ {outcome}[/red]")
         self.store.log_action(keys=outcome, source="policy")
-        self.interaction_log.cldx_action(outcome)
         self.pending = None
         self._update_prompt_label()
 
@@ -1061,10 +997,6 @@ class BridgeUI:
         # doesn't race the user's reply.
         if self._wait_event is not None:
             self._wait_event.set()
-
-        # Plain-text interaction log — every keystroke the user submitted.
-        if text:
-            self.interaction_log.terminal_in(text)
 
         if text.startswith("/"):
             await self._handle_slash(text[1:].strip())
@@ -1340,7 +1272,6 @@ class BridgeUI:
                         self.log(f"[dim]Telegram shutdown: {e}[/dim]")
                 self.store.log_event("session_end", events=self.store.event_count)
                 self.store.close()
-                self.interaction_log.close()
 
         return 0
 
