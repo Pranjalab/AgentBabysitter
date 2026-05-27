@@ -246,6 +246,15 @@ The two design choices that define cldx:
 
 ---
 
+## Acknowledgments
+
+Special thanks to:
+- **Claude** (Anthropic) for the incredible agentic tool capabilities.
+- **tmux** for enabling reliable terminal multiplexing and session control.
+- **Telegram** for providing a fast, universal, and accessible messaging platform.
+
+---
+
 ## License
 
 [GPL-3.0-or-later](./LICENSE). If you use cldx commercially, the GPL terms apply — share modifications back, keep the source open. If GPL conflicts with your use case, [open an issue](https://github.com/Pranjalab/cldx/issues) and we'll talk.
