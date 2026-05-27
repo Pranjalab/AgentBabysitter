@@ -1,22 +1,79 @@
-# cldx
+# cldx — your remote control for Claude Code
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Version](https://img.shields.io/badge/version-1.0.4-brightgreen.svg)](#release-104)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-341%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-508%20passing-brightgreen.svg)]()
+[![Status](https://img.shields.io/badge/status-beta-yellow.svg)]()
 
-A second-layer terminal for **Claude Code**. cldx watches a `tmux` pane
-running Claude, classifies every approval prompt, auto-responds based on
-a policy *you* control, and (optionally) bridges to Telegram so you can
-review and reply when you're away from your laptop.
+> **cldx is a layer on top of [Claude Code](https://docs.claude.com/en/docs/claude-code) that auto-approves safe tool calls and lets you supervise Claude from your phone via Telegram. Step away from your laptop. Come back to a finished feature.**
 
-It works like a remote control: you see Claude's pane mirrored in
-cldx's terminal, decisions are made visible as **yellow / red / green
-panels**, and a Claude-Code-styled bordered input box lets you type
-directly into Claude or override pending decisions.
+---
 
-> **Status:** All 7 build phases shipped + extensive UX work.
-> See [`PLAN.md`](./PLAN.md) for the original roadmap, kept as
-> historical record.
+## Why this exists
+
+### 1. Auto-approval — stop babysitting your AI
+
+Claude Code is brilliant. It's also chatty: every `Bash`, every `Write`, every `Edit` pops a "Do you want to proceed?" menu. If you're a developer who writes a precise prompt and just wants the **tested, summarised result**, those approval clicks add up to dozens of context-switches per task.
+
+cldx classifies every approval by **tool category** and **risk level**, then auto-approves the safe ones based on a policy *you* control. `Read`, `Grep`, and `Glob` get a green pass. `Write` and `Edit` go through a configurable 2-second countdown (so you can still cancel). `rm -rf`, `dd`, `sudo`, and writes under `/etc` or `~/.ssh` always escalate to a human — no policy can override that.
+
+You stop clicking. Claude keeps moving. You see the final result.
+
+### 2. Telegram bridge — step away from the laptop
+
+Even with auto-approval, *some* things need a human call. The destructive ones. The genuinely ambiguous ones. That used to mean staying glued to your terminal.
+
+cldx forwards those approvals to **Telegram** — the cheapest, most universal messaging bridge that runs on every phone. Go to the gym. Take a walk. Get coffee. When Claude hits a real decision point, your phone buzzes with a formatted card showing the tool, the args, the risk level, and a `y / n / 1 / 2 / 3 / free-text` reply protocol. You answer; Claude continues.
+
+You get the agentic-coding life back. The model works while you live.
+
+---
+
+## What it does, in one screen
+
+```
+┌────────────────────|  Claude + TMUX + Telegram  |─────────────────────┐
+│ ❯ Add an OAuth flow to the user signup                                │
+└───────────────────────────────────────────────────────────────────────┘
+[14:32] → injected: Add an OAuth flow to the user signup
+
+╭──────── ⏳ AUTO-APPROVE — firing in 2.0s ────────╮
+│ type    approval_menu                            │
+│ tool    ✏️ Write · write · elevated              │
+│ args    src/auth/oauth.py                        │
+│ profile auto-approve                             │
+│         type to override · /skip to leave to you │
+╰──────────────────────────────────────────────────╯
+[14:32] → sent option 1 (Yes)
+
+(4 more auto-approvals happen silently...)
+
+╭──────────── ✓ Task complete ────────────╮
+│ ⏺ Write(src/auth/oauth.py)              │
+│   ⎿ Wrote 142 lines                     │
+│ ⏺ Edit(src/auth/__init__.py)            │
+│   ⎿ Updated 3 lines                     │
+│ ⏺ Bash(pytest tests/test_oauth.py)      │
+│   ⎿ 8 passed in 0.3s                    │
+│ ⏺ Added OAuth signup. All tests pass.   │
+│                                         │
+│ Telegram: ✓ sent                        │
+╰─────────────────────────────────────────╯
+```
+
+Meanwhile on your phone:
+
+```
+✅ cldx — task complete
+━━━━━━━━━━━━━━━━━━━━
+📌 Task: Add OAuth flow to user signup
+📝 Summary: Added OAuth signup + tests (8 passing).
+⏱️  Duration: 47s
+⚙️  Profile: auto-approve
+
+💬 Reply with your next task, or /help for options.
+```
 
 ---
 
@@ -30,357 +87,165 @@ cd cldx
 
 The installer:
 
-1. Finds a Python ≥ 3.11 (`python3.13` / `3.12` / `3.11`, in that order).
-2. Runs `pip install --user .` so the `cldx` command lands on your PATH.
-3. Bootstraps `~/.cldx/{config,sessions}/` with the bundled defaults.
-4. Tells you exactly what `export PATH=...` line to add to `~/.zshrc`
-   or `~/.bashrc` if `cldx` isn't immediately findable.
+1. Picks a compatible Python (≥ 3.11; tries 3.13 → 3.12 → 3.11 in that order).
+2. `pip install --user .` so the `cldx` command lands in your user-scripts dir.
+3. Creates `~/.cldx/{config,sessions,logs}/` with bundled defaults (existing files are left untouched).
+4. Tells you the exact `export PATH=...` line to add to `~/.zshrc` if `cldx` isn't on PATH yet.
+5. Detects stale binaries from a different Python version and offers the one-line `ln -sf` to fix it.
 
-Override the runtime state location with `export CLDX_HOME=/some/path`.
-Uninstall with `./install.sh --uninstall` (leaves `~/.cldx/` in place
-so your config + history survive).
+**Override the state location** with `export CLDX_HOME=/some/path`. **Uninstall** with `./install.sh --uninstall` (leaves `~/.cldx/` in place so a re-install keeps your configs).
 
-### Optional LLM extras
-
-cldx works fully without an LLM (Telegram messages just forward the raw
-Claude pane). To enable upstream summarisation:
+### Optional setup wizard
 
 ```bash
-pip install --user 'cldx[bedrock]'   # AWS Bedrock (boto3)
-pip install --user 'cldx[gemini]'    # Google Gemini (google-genai)
-pip install --user 'cldx[all-llm]'   # both
-# Anthropic direct uses the `anthropic` SDK (already a core dep)
+cldx setup          # interactive — picks LLM backend + Telegram in sequence
+cldx setup telegram # just the Telegram bridge
+cldx setup llm      # just the LLM picker
+cldx config         # show current secrets (masked)
 ```
+
+The Telegram wizard walks you through `@BotFather`, auto-discovers your `chat_id`, sends a greeting message, and prints the slash-commands list to your phone.
+
+### Pluggable LLM backends
+
+cldx uses an LLM to **summarise** Claude's output before sending to Telegram (so you get one paragraph instead of 200 lines of tool output). Backends ship pluggable:
+
+| Backend | Cost | Setup command |
+|---|---|---|
+| **Anthropic** (direct API key) | ~$0.0001 / summary (Haiku) | `cldx setup anthropic` |
+| **AWS Bedrock** (bearer token) | Your AWS rate | `cldx setup bedrock` |
+| **Google Gemini** (free tier OK) | Free up to a quota | `cldx setup gemini` |
+| **Disabled** (raw pane to Telegram) | $0 | `cldx setup` → option 4 |
+
+When disabled, the raw structural `⏺...✻` slice of Claude's pane goes to Telegram (sanitised: no box-drawing chars, no banner art, no UI chrome).
 
 ---
 
-## Quick start
-
-In one terminal:
+## Run
 
 ```bash
-tmux new -s work
-# inside tmux:
-claude
+cldx                  # interactive picker — pick a pane or start a new one
+cldx --auto-detect    # auto-attach to the only running Claude pane
+cldx --list-panes     # show all tmux panes and what's in them
 ```
 
-In another terminal:
+For a complete command reference (terminal slash commands, Telegram slash commands, policy profiles, troubleshooting) see **[GUIDELINE.md](./GUIDELINE.md)**.
+
+---
+
+## Features (v1.0.4)
+
+### Auto-approval
+- **Per-tool classification** — `Read`/`Grep`/`Glob` are `safe`; `Write`/`Edit` are `elevated`; `Bash` gets risk refined from the command (`rm -rf` → `destructive`, `pip install` → `elevated`); writes under `/etc` or `~/.ssh` always escalate.
+- **Per-profile defaults** — `auto-approve`, `yolo`, `restricted`, `default`, `paranoid`. Pick yours in `policy.yml` or switch live with `/profile <name>`.
+- **Configurable wait bar** — auto-fires after N seconds; type anything during the countdown to override.
+- **Yolo learning** — in `yolo` profile, your y/n choices get remembered per pattern (never for destructive ops).
+- **Built-in safety floor** — `rm -rf`, `dd`, `mkfs`, `chmod -R`, `sudo`, `git push --force` etc. bypass auto-approve regardless of profile.
+
+### Telegram bridge
+- **Structured cards** — separate templates for approval / completion / escalation / greeting / error, all phone-screen-friendly.
+- **Two-way control** — reply `y` / `n` / `1` / `2` / free-form text from anywhere in the world.
+- **Slash commands** on Telegram: `/help`, `/status`, `/panes`, `/snapshot`, `/stop`, `/pause`, `/resume`, `/profile`, `/yes`, `/no`, `/cancel`. These never leak into Claude.
+- **Runtime toggle** — `/telegram on` / `/telegram off` in the cldx terminal to silence forwarding without restarting.
+- **Session-limit detector** — when Claude's 5-hour rolling Pro window hits, cldx parses the reset time, updates the header, and pings you on Telegram when the window reopens.
+
+### UX
+- **Bordered input box** styled like Claude Code's own (Tab to accept Claude's suggestion).
+- **Dynamic header** shows what's connected: `Claude + TMUX`, `Claude + TMUX + Telegram`, `... (Resets at 7:50 pm)`.
+- **Three-tier decision panels** — yellow (auto-approve pending), red (needs your call), green (task complete).
+- **Mirror panel** preserves Claude's own ANSI styling, syntax colours, dim placeholders.
+- **Structural ⏺...✻ extraction** — completion panels show exactly Claude's response, dropping your echo'd question and the duration line.
+
+### Observability
+- **Per-session interaction log** at `~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log` — every terminal input, every Telegram in/out, every cldx decision, every Claude output. Plain text. `tail -f` friendly.
+- **JSONL event log** at `~/.cldx/sessions/<profile>/<timestamp>.jsonl` — machine-replayable.
+- **Multi-session picker** — arrow keys, `d` to delete, resume from any prior session by date.
+
+---
+
+## Release 1.0.4
+
+The first stable release. Everything since the original prototype has gone through real-world use:
+
+- ✅ All 7 build phases shipped (session storage, three-tier policy + wait bar, startup picker, yolo learning, agent persona + LLM, Telegram bridge).
+- ✅ Multi-backend LLM (Anthropic / Bedrock / Gemini / disabled).
+- ✅ Tool-call classification with risk refinement.
+- ✅ Structural `⏺...✻` result extractor.
+- ✅ Multi-word display-name parsing (`Web Search`, `Web Fetch`, `Multi Edit`…).
+- ✅ Auto-detect Claude's session limit + reset notifier.
+- ✅ 508 passing tests covering classifier, policy, Telegram, sanitiser, conversation extractor, tool registry.
+- ✅ Documented: install, GUIDELINE, FEATURES roadmap, code of conduct.
+
+See [`FEATURES.md`](./FEATURES.md) for what's next.
+
+---
+
+## How it works
+
+```
+┌────────────────┐                    ┌─────────────────┐
+│   Claude Code  │ ──── tmux pane ──→ │      cldx       │
+│   (in tmux)    │ ←──  send-keys  ── │  (this thing)   │
+└────────────────┘                    └────────┬────────┘
+                                               │
+                              ┌────────────────┼────────────────┐
+                              │                │                │
+                              ▼                ▼                ▼
+                       ┌────────────┐  ┌────────────┐  ┌─────────────┐
+                       │  Terminal  │  │  Telegram  │  │ ~/.cldx/    │
+                       │  (you)     │  │  (phone)   │  │ logs+state  │
+                       └────────────┘  └────────────┘  └─────────────┘
+```
+
+- **Monitor** — polls `tmux capture-pane` once a second, computes a stable hash of the pane tail, fires `on_change` / `on_stable` callbacks.
+- **Classify** — every snapshot runs through `PromptClassifier` which uses both pattern matching AND structural rules (a Claude turn = `⏺ ... ✻`).
+- **Decide** — `PolicyEngine` reads `policy.yml`, applies the active profile, runs destructive-pattern checks, returns `AUTO_YES / AUTO_NO / WAIT_LOCAL / ESCALATE_TELEGRAM`.
+- **Act** — for auto-decisions, `TmuxController.send_keys` types the response into the pane. For escalations, `TelegramBridge` sends a card and waits for your reply.
+
+No daemons. No background services. One process per Claude pane, cleanly killable with Ctrl-D.
+
+---
+
+## Documentation
+
+| File | What's in it |
+|---|---|
+| **[GUIDELINE.md](./GUIDELINE.md)** | Full command reference (terminal + Telegram), profile configuration, troubleshooting |
+| **[FEATURES.md](./FEATURES.md)** | Roadmap — done / near-term / mid-term / long-term, how to propose features |
+| **[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)** | How we work together — required reading before contributing |
+| **[LICENSE](./LICENSE)** | GPL-3.0-or-later |
+
+---
+
+## Contributing
+
+cldx is built in the open. Bug reports, feature ideas, and PRs welcome at <https://github.com/Pranjalab/cldx>.
+
+Quick start for contributors:
 
 ```bash
-cldx                          # default — banner + arrow-key picker
-cldx --auto-detect            # skip picker, pick the live Claude pane
-cldx --session work:0.0       # skip picker, target a specific pane
-cldx --profile yolo           # override the active policy profile
-cldx --dry-run                # classify + decide, never send keys
-cldx --no-llm                 # skip LLM summarisation for this run
-cldx --no-telegram            # don't start the Telegram bridge
-cldx --list-panes             # show every tmux pane and exit
+git clone https://github.com/Pranjalab/cldx.git
+cd cldx
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,all-llm]"
+pytest -q                       # all 508 tests must stay green
 ```
 
-Module form also works: `python -m cldx`.
-
-### The connected view
-
-Once cldx is connected to a Claude session, you'll see:
-
-- **Blue mirror panel** — Claude's pane re-rendered with its own ANSI
-  styling preserved (dim placeholders, coloured tool calls, etc.).
-- **Yellow approval panel** — when policy says "auto-approve in 2s",
-  showing the tool + menu options + countdown.
-- **Red approval panel** — when a destructive op (`rm`, `sudo`, etc.)
-  needs *your* go-ahead; pends indefinitely.
-- **Green completion panel** — final summary of the task, plus a
-  Telegram status line ("✓ sent" / "✗ not configured" / "✗ send
-  failed").
-- **Bordered input box** — Claude-Code styled, with the current
-  suggestion shown dim italic; press **Tab** to accept it.
-
-Approvals fire on the FIRST poll that sees the prompt (no waiting for
-Claude's UI to fully stabilise), and the completion panel only renders
-for tasks that actually used tools — chat replies get a one-liner.
+Before opening a PR, read [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) and check [`FEATURES.md`](./FEATURES.md) to see where your idea fits.
 
 ---
 
-## Setup wizards
+## Inspiration
 
-```bash
-cldx setup              # picks an LLM backend, then walks through Telegram
-cldx setup llm          # just the LLM picker
-cldx setup anthropic    # direct Anthropic API key
-cldx setup bedrock      # AWS Bedrock (bearer token + region)
-cldx setup gemini       # Google Gemini API key
-cldx setup none         # persistently DISABLE the LLM (raw pane → Telegram)
-cldx setup telegram     # bot token + auto-discovers your chat ID
-cldx config show        # masked view of every configured secret + active backend
-cldx test llm           # end-to-end smoke test of the configured LLM
-```
+cldx is inspired by the pattern of **remote-controlling a long-running agent**. If you've used OpenInterpreter or thought "I wish I could just text my Claude session from the bus", that's the same itch.
 
-Every wizard:
-- Uses **paste-tolerant input** (no truncation of 2-3KB Bedrock tokens
-  on macOS).
-- Validates credentials with a tiny upstream call before saving.
-- Stores to `~/.cldx/config/*.env` with mode `0600`.
-- Offers to flip your `agent_name.yml` over to that backend so the
-  very next `cldx` run uses it.
+The two design choices that define cldx:
 
-The Telegram wizard creates the bot via `@BotFather`, then
-**auto-discovers your chat ID** by polling `getUpdates` after you
-message your new bot once — no manual copy-paste of numbers.
-
-The Bedrock wizard is region-aware: it picks the right cross-region
-inference profile prefix (`us.*` / `eu.*` / `apac.*`) for your region,
-and on a `ValidationException` queries Bedrock for the models you
-actually have access to and lets you pick from the live list.
-
-### LLM backends
-
-| Prefix      | Backend           | Auth needed                        | Install extra                |
-|-------------|-------------------|------------------------------------|------------------------------|
-| `claude-*`  | Anthropic direct  | `ANTHROPIC_API_KEY`                | (built-in)                   |
-| `bedrock:`  | AWS Bedrock       | `AWS_BEARER_TOKEN_BEDROCK`         | `pip install 'cldx[bedrock]'`|
-| `gemini:`   | Google Gemini     | `GEMINI_API_KEY`                   | `pip install 'cldx[gemini]'` |
-| `ollama:`   | Local Ollama      | (none — stub, falls back to raw)   | (not yet implemented)        |
-| `none:raw`  | Disabled          | (none)                             | (built-in)                   |
-
-The agent's `model:` field in `~/.cldx/config/agent_name.yml` selects
-the backend. When the LLM call fails for any reason, cldx falls back
-to forwarding the **raw pane context** to Telegram (no
-`[unsummarized: …]` marker leaks into the chat — that reason is
-logged locally only).
-
-### Where secrets land
-
-All secrets go to `~/.cldx/config/*.env` files with mode `0600`:
-
-| File              | Variables                                          |
-|-------------------|----------------------------------------------------|
-| `anthropic.env`   | `ANTHROPIC_API_KEY`                                |
-| `bedrock.env`     | `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION`           |
-| `gemini.env`      | `GEMINI_API_KEY`                                   |
-| `telegram.env`    | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`           |
-
-These are loaded into the process environment on every `cldx` run, so
-the summarizer and Telegram bridge find them automatically. (You can
-still override via `export VAR=...` — file values don't clobber a
-parent-shell environment.)
-
----
-
-## Useful flags
-
-| Flag                  | Purpose                                                                |
-|-----------------------|------------------------------------------------------------------------|
-| `--session S:W.P`     | Skip discovery and watch this pane.                                    |
-| `--auto-detect`       | Watch the first pane that looks like Claude Code; picker on ambiguity. |
-| `--profile NAME`      | Override `active_profile` from `policy.yml`.                           |
-| `--policy PATH`       | Use a custom policy file (overrides `~/.cldx/config/...`).             |
-| `--poll-interval N`   | Seconds between snapshots (default `1.0`).                             |
-| `--mirror-lines N`    | Tail lines of the Claude pane to mirror (default `25`).                |
-| `--list-panes`        | Print all tmux panes (with command + title) and exit.                  |
-| `--dry-run`           | Classify and decide, but never send keys to tmux.                      |
-| `--no-llm`            | Skip the LLM summarizer for this run (raw pane → Telegram).            |
-| `--no-telegram`       | Don't start the Telegram bridge even if configured.                    |
-| `--version`           | Print the installed version.                                           |
-
----
-
-## Policy
-
-`~/.cldx/config/policy.yml` (falls back to the bundled default) ships
-with five profiles. The active one is set by the `active_profile:`
-field — default is `auto-approve`.
-
-| Profile        | Behaviour                                                                                                 |
-|----------------|-----------------------------------------------------------------------------------------------------------|
-| `auto-approve` | Default. Auto-approves routine work after a configurable wait bar; destructive ops pend indefinitely.     |
-| `yolo`         | Learns from your decisions — first time approve, future identical patterns auto-fire (with wait bar).     |
-| `restricted`   | Every approval pends; nothing auto-fires.                                                                 |
-| `default`      | Legacy fine-grained allow/deny rule lists (kept for users who prefer explicit patterns).                  |
-| `paranoid`     | Denies most things destructive, escalates the rest.                                                       |
-
-### Wait bar
-
-The `auto-approve` and `yolo` profiles support a per-profile
-`wait_interval_seconds` (default `2.0`). Whenever the bridge is about
-to auto-fire, a yellow panel shows a countdown — any keystroke during
-the countdown cancels the auto-action and switches to manual approval.
-Destructive ops (`rm`, `sudo`, `DROP TABLE`, `git push --force`, etc.)
-**bypass the bar entirely** and pend indefinitely.
-
-### Adding a new profile
-
-```bash
-# Copy the bundled defaults so you can edit them:
-cp $(python -c 'from cldx._paths import bundled_default; print(bundled_default("policy.yml"))') \
-   ~/.cldx/config/policy.yml
-
-# Edit ~/.cldx/config/policy.yml and add under `profiles:`
-```
-
-```yaml
-profiles:
-  my-profile:
-    wait_interval_seconds: 5.0
-    auto_approve:
-      - "Bash\\((ls|cat|pwd|whoami)\\)"
-    auto_deny: []
-    escalate_to_telegram:
-      - "Bash\\(rm "
-    default_action: escalate_telegram
-```
-
-Then `cldx --profile my-profile` (or set `active_profile: my-profile`
-at the top of the file to make it default).
-
----
-
-## Session picker
-
-Running `cldx` (no `--session` / `--auto-detect`) opens an arrow-key
-picker showing:
-
-- **resume** rows for the most recent JSONL event logs in
-  `~/.cldx/sessions/<profile>/`.
-- **connect** rows for every live tmux pane that looks like Claude Code.
-- **start new** — spawn a detached tmux session and start Claude in it.
-
-Navigation:
-
-- `↑` / `↓` — move the `❯` cursor.
-- `PageUp` / `PageDown` — jump 5 rows.
-- `Home` / `End` — top / bottom.
-- `Enter` — select.
-- `d` then `y` — delete the highlighted row (removes the event log for
-  resume rows; runs `tmux kill-session` for connect rows).
-- `q` / Ctrl-C — cancel.
-
-Old `cldx-*` tmux sessions and stale event logs can be cleaned up
-right from this picker without needing a separate command.
-
----
-
-## Audit log
-
-Every cldx run writes a JSONL event log to
-`~/.cldx/sessions/<profile>/<ISO-timestamp>.jsonl`. Each line is one
-event:
-
-```jsonl
-{"t":"2026-05-27T10:42:01+00:00","kind":"prompt","type":"approval_menu","command":"Bash(npm install)",...}
-{"t":"2026-05-27T10:42:01+00:00","kind":"decision","decision":"auto_yes","reason":"matched auto_approve","profile":"auto-approve",...}
-{"t":"2026-05-27T10:42:03+00:00","kind":"action","keys":"sent option 1 (Yes)","source":"policy"}
-{"t":"2026-05-27T10:42:08+00:00","kind":"complete"}
-{"t":"2026-05-27T10:42:08+00:00","kind":"telegram_out","summary":"Created /tmp/foo.py","mode":"completion_summary"}
-```
-
-Sources for `action` events: `policy` (auto-fire), `user_terminal` (you
-typed in cldx), `user_telegram` (you replied via Telegram). Tail the
-file with `jq` for live debugging:
-
-```bash
-tail -f $(ls -t ~/.cldx/sessions/auto-approve/*.jsonl | head -1) | jq .
-```
-
----
-
-## Slash commands (inside the cldx prompt)
-
-| Command           | What it does                                                       |
-|-------------------|--------------------------------------------------------------------|
-| `/y`, `/yes`      | Approve the pending prompt (or send `y` if nothing pending).       |
-| `/n`, `/no`       | Deny the pending prompt.                                           |
-| `/1`, `/2`, ...   | Pick a specific menu option.                                       |
-| `/skip`           | Clear `pending` — leave the prompt for you to handle in tmux.      |
-| `/refresh`        | Force-reprint the mirror panel.                                    |
-| `/snapshot`       | Debug: dump the current pane + classifier output + signature.      |
-| `/profile NAME`   | Switch policy profile mid-session.                                 |
-| `/panes`          | List all tmux panes (with the watched one marked).                 |
-| `/raw KEYS`       | Send named tmux keys (e.g. `/raw C-c`, `/raw Escape`).             |
-| `/help`           | Show the command list.                                             |
-| `/quit`, Ctrl-D   | Exit cleanly.                                                      |
-
-Anything not starting with `/` is **typed into Claude's text box**.
-
-When an approval is pending, bare `y` / `n` / a digit act on the
-pending prompt (instead of being typed into Claude).
-
----
-
-## File structure
-
-```
-cldx/                              # Python package
-├── __init__.py                    # __version__
-├── __main__.py                    # `python -m cldx`
-├── cli.py                         # entrypoint + TUI
-├── _paths.py                      # ~/.cldx/ resolver
-├── agent.py                       # agent_name.yml loader + backend dispatch
-├── framed_input.py                # bordered input box (Tab-accept suggestions)
-├── llm_test.py                    # `cldx test llm`
-├── memory.py                      # ~/.cldx/memory.json (yolo-learned patterns)
-├── picker.py                      # arrow-key session picker
-├── policy_engine.py               # PromptType + policy.yml → PolicyDecision
-├── prompt_classifier.py           # snapshot → PromptType + menu_options
-├── secrets.py                     # loads ~/.cldx/config/*.env into os.environ
-├── session_picker.py              # tmux pane enumeration
-├── session_store.py               # JSONL audit log
-├── setup_wizard.py                # cldx setup [target] flows
-├── startup.py                     # banner + picker + spawn-new flow
-├── summarizer.py                  # Anthropic / Bedrock / Gemini / none backends
-├── telegram_bridge.py             # python-telegram-bot integration
-├── tmux_controller.py             # send-keys wrapper
-├── tmux_monitor.py                # async pane watcher
-├── wait_bar.py                    # cancellable countdown helper
-└── defaults/
-    ├── policy.yml                 # bundled default policy
-    └── agent_name.yml             # bundled default agent persona
-
-install.sh                         # one-shot installer
-pyproject.toml                     # build + entry point + extras
-LICENSE                            # GPL-3.0
-PLAN.md                            # historical product roadmap
-README.md                          # this file
-tests/                             # 341 passing tests
-```
-
-User state at runtime lives under `~/.cldx/` (override with
-`$CLDX_HOME`):
-
-```
-~/.cldx/
-├── config/
-│   ├── policy.yml                 # user-editable rules
-│   ├── agent_name.yml             # agent persona for summaries
-│   ├── anthropic.env              # 0600 — ANTHROPIC_API_KEY
-│   ├── bedrock.env                # 0600 — AWS_BEARER_TOKEN_BEDROCK + region
-│   ├── gemini.env                 # 0600 — GEMINI_API_KEY
-│   └── telegram.env               # 0600 — TELEGRAM_BOT_TOKEN + chat id
-├── memory.json                    # yolo-learned patterns, last_session, etc.
-└── sessions/<profile>/*.jsonl     # event logs
-```
-
----
-
-## Development
-
-```bash
-# Set up a dev env (no install needed for tests):
-python3.12 -m pip install -r requirements-dev.txt
-
-# Run the suite:
-pytest -q                          # 341 passing
-
-# Install the package in editable mode for end-to-end runs:
-pip install --user -e .
-cldx --version
-```
-
-`tests/README.md` documents the test layout. Phase markers
-(`phase2`..`phase7`) let you filter to a specific surface area.
+- **Auto-approval is the default**, not a power-user toggle. The whole point is *not clicking*.
+- **Telegram is the chosen medium**, not because it's the best, but because it's the cheapest, most universal, and easiest to integrate. Free on every phone. No proprietary clients. No subscription. Your bot, your chat, your control.
 
 ---
 
 ## License
 
-Released under the [GNU General Public License v3.0](./LICENSE).
-Contributions welcome via pull request.
+[GPL-3.0-or-later](./LICENSE). If you use cldx commercially, the GPL terms apply — share modifications back, keep the source open. If GPL conflicts with your use case, [open an issue](https://github.com/Pranjalab/cldx/issues) and we'll talk.

@@ -114,6 +114,13 @@ _DIGIT_RE = re.compile(r"^\d$")
 class ParsedReply:
     kind: str  # "yes" | "no" | "digit" | "text" | "ignore"
     value: str = ""
+    # ``raw_text`` carries the user's exact original message so the
+    # handler can fall back to text-injection when there's no pending
+    # approval to answer. Without it, a reply like ``y`` or ``1``
+    # arrives with ``value=""`` (yes/no) or ``value="1"`` (digit) but
+    # we lose what the user actually typed — and we'd have to silently
+    # drop the message. With raw_text we can always forward something.
+    raw_text: str = ""
 
 
 def parse_reply(text: str) -> ParsedReply:
@@ -126,12 +133,12 @@ def parse_reply(text: str) -> ParsedReply:
 
     low = stripped.lower()
     if low in ("y", "yes", "ok", "ack", "👍"):
-        return ParsedReply("yes")
+        return ParsedReply("yes", raw_text=stripped)
     if low in ("n", "no", "stop", "deny", "👎"):
-        return ParsedReply("no")
+        return ParsedReply("no", raw_text=stripped)
     if _DIGIT_RE.match(low):
-        return ParsedReply("digit", value=low)
-    return ParsedReply("text", value=stripped)
+        return ParsedReply("digit", value=low, raw_text=stripped)
+    return ParsedReply("text", value=stripped, raw_text=stripped)
 
 
 # --- The bridge -----------------------------------------------------------
@@ -238,9 +245,26 @@ class TelegramBridge:
                 f"LLM summary unavailable ({result.fallback_reason}); "
                 f"sending raw context to Telegram."
             )
-        risk = "destructive" if getattr(decision, "is_destructive", False) else "normal"
+        # Risk: prefer the ToolCall's refined value (e.g. Bash → destructive
+        # for `rm -rf`) when present; fall back to the policy decision's
+        # is_destructive flag for prompts without a typed tool.
+        tool = getattr(prompt, "tool", None)
+        if tool is not None:
+            risk = tool.risk
+        elif getattr(decision, "is_destructive", False):
+            risk = "destructive"
+        else:
+            risk = "normal"
+
+        # If we have a typed tool, build a richer command line that
+        # surfaces the icon + category for instant phone-glance scanning.
+        if tool is not None:
+            command = f"{tool.icon} {tool.name} · {tool.category}\n{tool.args}"
+        else:
+            command = prompt.extracted_command or ""
+
         card = ApprovalCard(
-            command=prompt.extracted_command or "",
+            command=command,
             summary=result.text,
             risk=risk,
             menu_options=tuple(prompt.menu_options or ()),

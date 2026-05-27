@@ -210,15 +210,81 @@ async def test_chat_only_reply_skips_completion_panel(tmp_path, monkeypatch):
 
 
 def test_pane_has_tool_calls_detects_each_tool(tmp_path, monkeypatch):
-    """Sanity check: each tool marker in the recent pane triggers the filter."""
+    """Every tool from the registry triggers the filter. WebSearch and
+    the multi-word display variants (Web Search, Web Fetch, Multi Edit,
+    Notebook Edit, Slash Command, Tool Search) are explicitly checked —
+    the original hardcoded regex missed them, which is exactly the bug
+    that misrouted weather-search turns through the chat-only panel."""
     ui = _make_bridge_ui(tmp_path, monkeypatch)
     for marker in (
+        # Classic set
         "⏺ Bash(echo hi)", "⏺ Read(/x)", "⏺ Edit(/y)",
         "⏺ Write(/z)", "⏺ Grep(foo)", "⏺ Glob(*.py)",
+        # Newer single-word tools (would have been missed before fix)
+        "⏺ WebSearch(\"weather\")",
+        "⏺ TodoWrite(...)",
+        # Multi-word display variants (also missed)
+        "⏺ Web Search(\"weather\")",
+        "⏺ Web Fetch(\"https://x\")",
+        "⏺ Multi Edit(file.py)",
+        "⏺ Notebook Edit(nb.ipynb)",
     ):
-        assert ui._pane_has_tool_calls(marker)
+        assert ui._pane_has_tool_calls(marker), (
+            f"_pane_has_tool_calls failed to recognise {marker!r}"
+        )
     assert not ui._pane_has_tool_calls("⏺ Hi! What's up?")
     assert not ui._pane_has_tool_calls("just a plain message")
+
+
+async def test_websearch_completion_renders_full_green_panel(tmp_path, monkeypatch):
+    """Regression — WebSearch turns must take the real-task path, not
+    the chat-only path.
+
+    Before the fix, ``_pane_has_tool_calls`` had a hardcoded list of
+    tools that didn't include WebSearch. So even though Claude clearly
+    did work (two web searches + a long prose result), cldx rendered
+    the truncated 💬 cyan chat-reply panel instead of the ✓ green
+    completion card. The user lost the bulk of the weather details
+    because chat-reply was capped at 12 lines.
+    """
+    from cldx.summarizer import SummaryResult
+
+    ui = _make_bridge_ui(tmp_path, monkeypatch)
+
+    async def fake_summary(mode, ctx, agent):
+        # Mimic the no-LLM "raw fallback" path the user is on.
+        return SummaryResult(
+            text=ctx, summarized=False,
+            fallback_reason="LLM disabled (model: none:*)",
+        )
+
+    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_summary)
+
+    snapshot = (
+        "❯ Search for Indore and Khandwa\n"
+        "⏺ Web Search(\"weather Indore today\")\n"
+        "  ⎿ Did 1 search in 4s\n"
+        "⏺ Web Search(\"weather Khandwa today\")\n"
+        "  ⎿ Did 1 search in 4s\n"
+        "⏺ Here's the weather for Indore and Khandwa today:\n"
+        "  Indore: 90°F, breezy and very warm\n"
+        "  Khandwa: 100°F, hazy sunshine\n"
+        "✻ Brewed for 10s\n"
+        "❯\n"
+        "  ? for shortcuts · ← for agents\n"
+    )
+
+    # The pre-condition: this snapshot must be recognised as tool-using.
+    assert ui._pane_has_tool_calls(snapshot), (
+        "WebSearch turn must trigger the tool-call filter so it routes "
+        "through the real-task green panel, not the chat-reply path"
+    )
+
+    # End-to-end: the on_stable path classifies COMPLETE and runs
+    # _handle_completion, which must set the lock (signalling that the
+    # green panel was rendered for a real task).
+    await ui.on_stable(snapshot)
+    assert ui._completion_locked is True
 
 
 async def test_mirror_suppressed_after_completion_locks(tmp_path, monkeypatch):

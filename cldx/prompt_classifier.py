@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cldx.tool_call import ToolCall  # circular-safe under TYPE_CHECKING
 
 
 class PromptType(str, Enum):
@@ -24,16 +28,48 @@ class ClassifiedPrompt:
     context: str = ""                     # Last ~10 lines, for human review
     matched_pattern: str | None = None    # Which pattern fired
     menu_options: tuple[str, ...] = ()    # ("1. Yes", "2. ...", "3. No") for menus
+    # Typed view of the tool call this approval is about. Populated when
+    # the snapshot contains a recognisable ``⏺ Tool(args)`` line. ``None``
+    # for plain Y/N prompts that don't reference a tool (e.g. "Continue?").
+    tool: "ToolCall | None" = None
 
     def signature(self) -> str:
         """Stable fingerprint for deduping repeated detections of the same prompt.
 
-        Menu options stay constant across redraws even when extracted_command
-        flickers, so prefer them when available.
+        The signature has to satisfy two competing properties:
+
+        1. **Stable across redraws.** Claude Code repaints its TUI on a
+           timer (cursor blink, "Cogitated for Ns" counter); the same
+           logical prompt can produce slightly different snapshots from
+           frame to frame.
+        2. **Distinguishes consecutive prompts.** Claude often asks for
+           several approvals in a row with identical menu options
+           (``1. Yes / 2. Yes, allow all edits ... / 3. No``) for
+           different tool calls (``Write(a.py)``, ``Write(b.md)``).
+           Successive prompts MUST hash differently or dispatch dedup
+           swallows the later ones and the auto-approval flow stops.
+
+        We assemble the fingerprint from ``(type, extracted_command,
+        menu_options)``. ``extracted_command`` is what differs between
+        consecutive approvals; menu options keep the signature stable
+        under cosmetic redraws. Empty parts are omitted so a Y/N prompt
+        without a menu still gets a useful key.
         """
+        parts = [self.type.value]
+        if self.tool is not None:
+            parts.append(f"{self.tool.name}({self.tool.args})")
+        elif self.extracted_command:
+            parts.append(self.extracted_command)
         if self.menu_options:
-            return f"menu|{'|'.join(self.menu_options)}"
-        return f"{self.type.value}|{self.extracted_command or self.raw_text}"
+            parts.append("|".join(self.menu_options))
+        if (
+            self.tool is None
+            and not self.extracted_command
+            and not self.menu_options
+        ):
+            # Last-ditch fallback: hash the raw text so we still dedup.
+            parts.append(self.raw_text)
+        return "|".join(parts)
 
 
 # Generous box-drawing characters Claude Code uses around tool-call panels.
@@ -87,14 +123,42 @@ class PromptClassifier:
     when Claude Code's UI changes without editing this file.
     """
 
+    # Built-in completion signals — applied IN ADDITION to whatever the
+    # user's policy.yml specifies. This protects users whose ``~/.cldx/
+    # config/policy.yml`` predates the verb-rotation fix.
+    #
+    # The structural shape of Claude Code's end-of-turn line is:
+    #
+    #     ✻ <verb> for <time>
+    #
+    # where:
+    #   - ``<verb>`` rotates randomly across many words, sometimes with
+    #     accented letters (Cogitated, Cooked, Baked, Crunched, Churned,
+    #     Pondered, Mused, Worked, Sautéed, …). We use ``\S+`` instead
+    #     of ``\w+`` so locale-sensitive Unicode word boundaries don't
+    #     cost us a match.
+    #   - ``<time>`` can be a single unit (``1s``, ``4.5s``, ``3m``) OR
+    #     a compound like ``3m 5s`` / ``1h 2m`` / ``1h 30m 5s``. The
+    #     repeating group ``(\d+\.?\d*\s*[smhd]\s*)+`` covers all forms.
+    _BUILTIN_COMPLETION_PATTERNS: tuple[str, ...] = (
+        r"✻\s+\S+\s+for\s+(?:\d+(?:\.\d+)?\s*[smhd]\s*)+",
+        r"\? for shortcuts",
+    )
+
     def __init__(self, detection_cfg: dict | None = None, tail_lines: int = 20):
         cfg = detection_cfg or {}
         self.tail_lines = tail_lines
+        # Merge user patterns with the built-in fallbacks. Dedup so a user
+        # who already listed our generic pattern doesn't compile it twice.
+        user_completion = list(cfg.get("completion_patterns", []))
+        for builtin in self._BUILTIN_COMPLETION_PATTERNS:
+            if builtin not in user_completion:
+                user_completion.append(builtin)
         self.patterns = _DetectionPatterns(
             approval_yn=_compile_patterns(cfg.get("approval_yn_patterns", [])),
             approval_menu=_compile_patterns(cfg.get("approval_menu_patterns", [])),
             text_input=_compile_patterns(cfg.get("text_input_patterns", [])),
-            completion=_compile_patterns(cfg.get("completion_patterns", [])),
+            completion=_compile_patterns(user_completion),
             running=_compile_patterns(cfg.get("running_patterns", [])),
         )
 
@@ -104,18 +168,18 @@ class PromptClassifier:
         tail = self._tail(snapshot, self.tail_lines)
         context = tail
 
-        # Order matters: completion > approval > text-input > running > idle.
-        match = self._first_match(self.patterns.completion, tail)
-        if match:
-            return ClassifiedPrompt(
-                type=PromptType.COMPLETE,
-                raw_text=match.group(0),
-                context=context,
-                matched_pattern=match.re.pattern,
-            )
-
+        # Order: ACTIVE PROMPTS > completion > running > idle.
+        #
+        # Why active first: when Claude is asking for approval, the pane
+        # tail contains BOTH the live ``❯ 1. Yes`` menu AND (often) a
+        # stale ``✻ <verb> for Ns`` line from a *previous* chat reply
+        # that's still visible in the scrollback. If completion wins,
+        # we silently absorb the approval and the auto-approve never
+        # fires. The live approval is the actionable state, so it must
+        # take priority.
         match = self._first_match(self.patterns.approval_menu, tail)
         if match:
+            from cldx.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_MENU,
                 raw_text=match.group(0),
@@ -123,22 +187,34 @@ class PromptClassifier:
                 context=context,
                 matched_pattern=match.re.pattern,
                 menu_options=self._extract_menu_options(tail),
+                tool=_parse_tool(tail),
             )
 
         match = self._first_match(self.patterns.approval_yn, tail)
         if match:
+            from cldx.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_YN,
                 raw_text=match.group(0),
                 extracted_command=self._extract_command(tail),
                 context=context,
                 matched_pattern=match.re.pattern,
+                tool=_parse_tool(tail),
             )
 
         match = self._first_match(self.patterns.text_input, tail)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.TEXT_INPUT,
+                raw_text=match.group(0),
+                context=context,
+                matched_pattern=match.re.pattern,
+            )
+
+        match = self._first_match(self.patterns.completion, tail)
+        if match:
+            return ClassifiedPrompt(
+                type=PromptType.COMPLETE,
                 raw_text=match.group(0),
                 context=context,
                 matched_pattern=match.re.pattern,

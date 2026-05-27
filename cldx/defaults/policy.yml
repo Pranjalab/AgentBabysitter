@@ -20,8 +20,13 @@ detection:
     - "All tasks completed"
     # Real Claude Code idle signals — these appear at the bottom of the
     # pane once Claude finishes the current turn and is awaiting the
-    # next user input:
-    - "✻ Cogitated for"        # post-task self-report ("Cogitated for 4s")
+    # next user input. The "✻ <verb> for <time>" line is Claude's
+    # post-task self-report:
+    #   - verb rotates randomly (Cogitated, Cooked, Baked, Crunched,
+    #     Churned, Pondered, Mused, Worked, Sautéed, …) — we use \\S+
+    #     so accented letters survive a non-Unicode locale.
+    #   - time can be "1s", "4.5s", "3m", "3m 5s", "1h 2m", "1h 30m 5s".
+    - "✻\\s+\\S+\\s+for\\s+(?:\\d+(?:\\.\\d+)?\\s*[smhd]\\s*)+"
     - "\\? for shortcuts"      # bottom hint, only present when idle
   running_patterns:
     - "esc to interrupt"

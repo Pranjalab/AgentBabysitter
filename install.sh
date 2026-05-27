@@ -38,9 +38,14 @@ pick_python() {
 }
 
 # --- Detect user-scripts dir for the chosen Python ------------------------
+#
+# Python 3.13 dropped the historical ``osx_user`` install scheme and Homebrew
+# Python uses ``osx_framework_user`` instead. Use ``get_preferred_scheme("user")``
+# (available since Python 3.10) which returns the right scheme name for every
+# platform and Python version — no manual platform branching required.
 user_scripts_dir() {
   local py="$1"
-  "$py" -c 'import sysconfig; print(sysconfig.get_path("scripts", scheme=("osx_user" if __import__("sys").platform=="darwin" else "posix_user")))'
+  "$py" -c 'import sysconfig; print(sysconfig.get_path("scripts", scheme=sysconfig.get_preferred_scheme("user")))'
 }
 
 # --- Uninstall path -------------------------------------------------------
@@ -106,7 +111,35 @@ case ":$PATH:" in
     ;;
 esac
 
+head "Verify"
+# Show which cldx binary will run when the user types `cldx` — this catches
+# the case where a stale binary from another Python's user-scripts dir is
+# earlier on PATH and shadows the freshly-installed one.
+if command -v cldx >/dev/null 2>&1; then
+  CLDX_BIN=$(command -v cldx)
+  CLDX_VER=$(cldx --version 2>&1 || echo "?")
+  say "cldx on PATH: ${CLDX_BIN}  (${CLDX_VER})"
+  EXPECTED_BIN="${SCRIPTS_DIR}/cldx"
+  if [ "$CLDX_BIN" != "$EXPECTED_BIN" ]; then
+    warn "PATH resolves to ${CLDX_BIN}, but this install wrote to ${EXPECTED_BIN}."
+    warn "An older copy is shadowing the fresh install."
+    echo
+    echo "   Easiest fix — symlink the new binary into the location already on \$PATH:"
+    echo
+    echo "     ln -sf \"${EXPECTED_BIN}\" \"${CLDX_BIN}\""
+    echo
+    echo "   Then run:  cldx --version   (should match ${CLDX_VER%% *} after re-install)"
+    echo
+    echo "   Alternatives:"
+    echo "     • Remove the stale copy: rm \"${CLDX_BIN}\""
+    echo "     • Or put ${SCRIPTS_DIR} earlier on \$PATH in ${RC:-your shell rc}."
+  fi
+else
+  warn "cldx is not yet on \$PATH — see the PATH hint above."
+fi
+
 head "Done."
 echo "    Run:    cldx --help"
 echo "    Config: ${CLDX_HOME}/config/policy.yml"
-echo "    Logs:   ${CLDX_HOME}/sessions/"
+echo "    Logs:   ${CLDX_HOME}/logs/  (plain text, per session, dated folders)"
+echo "    Events: ${CLDX_HOME}/sessions/ (JSONL replay log)"

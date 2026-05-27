@@ -1,20 +1,70 @@
+# --- Python ---------------------------------------------------------------
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg
 *.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+
+# Virtual environments
 .venv/
 venv/
 env/
+ENV/
 .env
 
-# Secrets
+# Test / coverage artefacts
+.pytest_cache/
+.coverage
+.coverage.*
+.tox/
+.nox/
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type-check caches
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# --- Local cldx state -----------------------------------------------------
+# Secrets — never commit
 config/telegram.env
+config/anthropic.env
+config/bedrock.env
+config/gemini.env
+*.env
 
-# Generated session logs
+# Session logs & interaction logs (user-local)
 sessions/*.jsonl
+logs/
 
-# IDE
+# Local scratch directories used during dev / testing
+test/
+src/
+
+# --- Editor / IDE / OS noise ---------------------------------------------
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 .DS_Store
+Thumbs.db
+
+# --- Agent / planning artefacts ------------------------------------------
+.claude/
+start.md
+PLAN.md

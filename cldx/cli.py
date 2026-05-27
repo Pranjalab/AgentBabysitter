@@ -42,8 +42,14 @@ from cldx.policy_engine import (
 )
 from cldx.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
 from cldx.session_picker import SessionPickerError, list_panes, pick_session
+from cldx.conversation import extract_assistant_step
 from cldx.interaction_log import InteractionLog
+from cldx.session_limit import SessionLimit, parse_session_limit
 from cldx.session_store import SessionStore
+from cldx.telegram_sanitize import (
+    clean_for_telegram,
+    extract_assistant_reply,
+)
 from cldx.framed_input import FramedInputSession
 from cldx.memory import Memory, normalize_pattern
 from cldx.secrets import load_into_environ
@@ -238,6 +244,21 @@ class BridgeUI:
         # Telegram completion card.
         self._task_started_at: float | None = None
 
+        # Runtime Telegram forwarding gate. ``True`` means notify_* calls
+        # are allowed; ``False`` means we still answer slash commands but
+        # don't push approval / completion cards out. Default to True so
+        # behaviour matches "Telegram is wired and active" once the bridge
+        # connects.
+        self.telegram_enabled: bool = True
+
+        # Detected Claude session-limit state. ``None`` outside of a quota
+        # hit; populated by the on_change watcher when the banner appears.
+        # The background ``_reset_task`` sleeps until ``session_limit.reset_at``
+        # and then surfaces the "session reset" notification.
+        self.session_limit: SessionLimit | None = None
+        self._reset_task: asyncio.Task | None = None
+        self._session_limit_seen_sig: str | None = None
+
         # Phase 3: signal that's set whenever the user types something while
         # a wait-bar is counting down. `None` outside of a wait epoch.
         self._wait_event: asyncio.Event | None = None
@@ -365,6 +386,9 @@ class BridgeUI:
         """Fired on every pane diff. Catches approval prompts the moment they
         render, so we don't have to wait for the pane to go fully quiet."""
         async with self._action_lock:
+            # Session-limit banner can appear mid-stream — check before
+            # we burn cycles on classification.
+            self._check_session_limit(snapshot)
             prompt = self.classifier.classify(snapshot)
             if prompt.type not in self._EAGER_TYPES:
                 return
@@ -406,8 +430,16 @@ class BridgeUI:
     # When none of these appear in the recent snapshot, the "completion"
     # is just a conversational reply and we render it as a one-liner
     # rather than a full green panel.
+    # NOTE: this hardcoded regex used to live here but it missed any tool
+    # added after the original list (most painfully ``WebSearch`` /
+    # ``Web Search``). ``_pane_has_tool_calls`` now delegates to
+    # ``cldx.tool_call.parse_tool_call`` which is driven by the
+    # canonical ``TOOL_REGISTRY`` and handles multi-word display names.
+    # Keep the compiled pattern here as a stable fallback for anything
+    # that doesn't go through ``parse_tool_call`` (currently nothing
+    # does, but the lookup is cheap and the regex documents intent).
     _TOOL_CALL_PATTERN = re.compile(
-        r"⏺\s*(Bash|Read|Edit|Write|Glob|Grep|LS|WebFetch|Run|Task)\s*\("
+        r"⏺\s*[A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*)*\s*\("
     )
 
     # A line that looks like a SUBMITTED user message in Claude Code's pane:
@@ -424,9 +456,27 @@ class BridgeUI:
 
     @classmethod
     def _pane_has_tool_calls(cls, snapshot: str) -> bool:
-        """Did Claude actually do work, or just reply with text?"""
+        """Did Claude actually do work, or just reply with text?
+
+        Delegates to ``cldx.tool_call.parse_tool_call`` so the answer
+        stays consistent with the registry (single source of truth).
+        That parser recognises:
+
+        - every canonical name in ``TOOL_REGISTRY``
+        - the multi-word display variants Claude prints in the pane
+          (``Web Search``, ``Web Fetch``, ``Multi Edit``, …)
+        - any future tool spec added to the registry, automatically
+
+        Without this, turns that used only the newer tools (notably
+        ``WebSearch``) were silently misclassified as chat replies —
+        they ran through the truncated 💬 cyan panel instead of the
+        full ✓ green completion card.
+        """
+        from cldx.tool_call import parse_tool_call as _parse_tool
+        # Limit to the recent pane so we don't false-fire on tool calls
+        # from much-older turns sitting deep in scrollback.
         tail = "\n".join(snapshot.splitlines()[-80:])
-        return cls._TOOL_CALL_PATTERN.search(tail) is not None
+        return _parse_tool(tail) is not None
 
     # Any ❯ line — input area, suggestion, OR submitted message.
     _ANY_CARET_PATTERN = re.compile(r"^\s*❯\s")
@@ -548,21 +598,49 @@ class BridgeUI:
 
         is_real_task = self._pane_has_tool_calls(snapshot)
 
-        # Conversational reply (no tool calls) → no green panel.
+        # Conversational reply (no tool calls) → small cyan card,
+        # NOT the big green completion panel. We still surface the
+        # response in both the terminal and Telegram so every interaction
+        # closes the loop.
         if not is_real_task:
-            self.log(
-                "[green]✓ Claude replied[/green] [dim](no tool calls — "
-                "skipping summary)[/dim]"
-            )
+            # Use the structural ⏺...✻ extractor — same rule applies to
+            # chat-only turns. Fall back to the older string-stripping
+            # extractor if the structural one returns nothing (rare).
+            reply_text = extract_assistant_step(snapshot)
+            if not reply_text:
+                reply_text = extract_assistant_reply(snapshot)
+            if not reply_text:
+                # Last resort — broader current-task slice, cleaned.
+                reply_text = clean_for_telegram(
+                    self._extract_current_task(snapshot)
+                )
+
+            # Terminal: compact cyan panel.
+            self.print_rich(Panel(
+                reply_text or "(empty reply)",
+                title="[bold cyan]💬 Claude replied[/bold cyan]",
+                border_style="cyan",
+                expand=False,
+            ))
+            self.interaction_log.claude_out(reply_text)
+
+            # Telegram: small "Claude says" message, gated by enabled flag.
+            await self._telegram_chat_reply(reply_text)
+
             self.pending = None
             self.pending_signature = None
             self._update_prompt_label()
             return
 
-        # Trim the snapshot down to just the current task — the LLM call
-        # and the fallback raw display both should only see this turn's
-        # work, not banners or previous tasks.
+        # Trim the snapshot down to just the current task — the LLM gets
+        # this richer slice (includes the user's ❯ question for context).
         task_text = self._extract_current_task(snapshot)
+        # The VISIBLE body uses the structural ⏺...✻ extractor so the
+        # green panel + Telegram message show just Claude's response,
+        # not the user's own question rehashed at the top. This is the
+        # user-requested format: "everything between the line that starts
+        # with ⏺ and the line that ends with ✻".
+        visible_step = extract_assistant_step(snapshot) or task_text
 
         # Real task: build the summary text we'll show + (maybe) send.
         from cldx.agent import Agent
@@ -580,6 +658,17 @@ class BridgeUI:
                 text=task_text,
                 summarized=False,
                 fallback_reason=str(e),
+            )
+
+        # When the LLM didn't produce a summary (disabled / failed), the
+        # raw ``result.text`` is the LLM-input text (which contained the
+        # user's question). Swap it for the clean structural slice so the
+        # panel/Telegram don't echo the user back to themselves.
+        if not result.summarized:
+            result = type(result)(
+                text=visible_step,
+                summarized=False,
+                fallback_reason=result.fallback_reason,
             )
 
         # ALWAYS green panel — the result is the result, regardless of
@@ -605,10 +694,15 @@ class BridgeUI:
                 "\n\n[yellow]Telegram: ✗ not configured "
                 "(run `cldx setup telegram`)[/yellow]"
             )
+        elif not self.telegram_enabled:
+            telegram_line = (
+                "\n\n[dim]Telegram: forwarding off (/telegram on to re-enable)[/dim]"
+            )
         else:
             try:
+                clean_body = clean_for_telegram(result.text)
                 await self.telegram._send(
-                    f"✓ Claude finished:\n\n{result.text}"
+                    f"✅ *Task complete*\n{'━' * 20}\n{clean_body}"
                 )
                 telegram_line = "\n\n[bold green]Telegram: ✓ sent[/bold green]"
                 telegram_send_succeeded = True
@@ -632,6 +726,235 @@ class BridgeUI:
         self.pending = None
         self.pending_signature = None
         self._update_prompt_label()
+
+    # --- session limit + reset watcher ---------------------------------
+
+    def _check_session_limit(self, snapshot: str) -> None:
+        """Detect the Claude session-limit banner in ``snapshot``.
+
+        Fires once per unique limit line — the same banner staying on
+        screen across many frames doesn't re-trigger notifications. When
+        a new limit is detected, we surface it to the terminal + Telegram
+        and start the reset-watcher task.
+        """
+        limit = parse_session_limit(snapshot)
+        if limit is None:
+            return
+        sig = limit.raw_line
+        if sig and sig == self._session_limit_seen_sig:
+            return  # same banner, already handled
+        self._session_limit_seen_sig = sig
+        self.session_limit = limit
+
+        message = (
+            f"Claude session limit reached. Resets at {limit.label}"
+            + (f" ({limit.timezone_str})" if limit.timezone_str else "")
+            + "."
+        )
+        # Terminal: red panel so it can't be missed.
+        self.print_rich(Panel(
+            message + "\n\n[dim]cldx will alert you the moment the session "
+            "reopens.[/dim]",
+            title="[bold red]⏰ Session limit reached[/bold red]",
+            border_style="red",
+            expand=False,
+        ))
+        self.interaction_log.cldx_note(
+            f"session limit detected — resets at {limit.label} "
+            f"({limit.timezone_str or 'local'})"
+        )
+        self.store.log_event(
+            "session_limit",
+            label=limit.label,
+            timezone=limit.timezone_str,
+            reset_at=limit.reset_at.isoformat(),
+        )
+
+        # Telegram: send via the same enabled-gate path.
+        if (
+            not getattr(self.args, "no_telegram", False)
+            and self.telegram is not None
+            and self.telegram_enabled
+        ):
+            body = (
+                f"⏰ *Session limit reached*\n{'━' * 20}\n"
+                f"{message}\n\nI'll ping you the moment Claude is back."
+            )
+            try:
+                asyncio.create_task(self.telegram._send(body))
+                self.interaction_log.telegram_out("session limit notice")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[dim]Telegram session-limit send failed: {e}[/dim]")
+
+        # (Re)start the reset watcher — cancel any in-flight task first
+        # so a fresh limit doesn't double-fire.
+        if self._reset_task is not None and not self._reset_task.done():
+            self._reset_task.cancel()
+        self._reset_task = asyncio.create_task(
+            self._session_reset_watcher(limit)
+        )
+        self._update_prompt_label()
+
+    async def _session_reset_watcher(self, limit: SessionLimit) -> None:
+        """Sleep until ``limit.reset_at``, then notify and clear state."""
+        from datetime import datetime as _dt, timezone as _tz
+        delay = max(0.0, limit.seconds_until_reset(_dt.now(_tz.utc)))
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+
+        body = (
+            "Claude session has been reset. Would you like to continue "
+            "your previous task or start new work?"
+        )
+
+        # Terminal: green panel.
+        self.print_rich(Panel(
+            body,
+            title="[bold green]✅ Session reset[/bold green]",
+            border_style="green",
+            expand=False,
+        ))
+        self.interaction_log.cldx_note("session reset — banner cleared")
+
+        # Telegram (gated).
+        if (
+            not getattr(self.args, "no_telegram", False)
+            and self.telegram is not None
+            and self.telegram_enabled
+        ):
+            tg_body = f"✅ *Session reset*\n{'━' * 20}\n{body}"
+            try:
+                await self.telegram._send(tg_body)
+                self.interaction_log.telegram_out("session reset notice")
+            except Exception as e:  # noqa: BLE001
+                self.log(f"[dim]Telegram session-reset send failed: {e}[/dim]")
+
+        # Clear the limit state so the dynamic header drops the tag.
+        self.session_limit = None
+        self._session_limit_seen_sig = None
+        self._update_prompt_label()
+
+    def _show_help(self) -> None:
+        """Render the /help panel — grouped, with every command this build
+        actually understands. Kept in sync with ``_handle_slash`` by hand;
+        each section here corresponds to a branch over there."""
+        body = (
+            "[bold]Approval shortcuts[/bold] (only when a prompt is pending)\n"
+            "  [cyan]/y[/cyan] / [cyan]/n[/cyan] / [cyan]/<digit>[/cyan]   "
+            "approve / deny / pick menu option\n"
+            "  [cyan]/skip[/cyan]                  clear the pending prompt without acting\n"
+            "\n"
+            "[bold]Telegram[/bold]\n"
+            "  [cyan]/telegram[/cyan]              show current state\n"
+            "  [cyan]/telegram on[/cyan]           enable Telegram forwarding (starts bridge if needed)\n"
+            "  [cyan]/telegram off[/cyan]          silence outbound Telegram cards\n"
+            "\n"
+            "[bold]Inspection[/bold]\n"
+            "  [cyan]/snapshot[/cyan]              show the cldx view of the pane + classifier output\n"
+            "  [cyan]/refresh[/cyan]               reprint the mirror panel\n"
+            "  [cyan]/panes[/cyan]                 list tmux panes (active one marked)\n"
+            "\n"
+            "[bold]Modes[/bold]\n"
+            "  [cyan]/profile[/cyan]               show current policy profile\n"
+            "  [cyan]/profile <name>[/cyan]        switch profile (e.g. /profile yolo)\n"
+            "\n"
+            "[bold]Raw / exit[/bold]\n"
+            "  [cyan]/raw <keys>[/cyan]            send named tmux keys to the pane (e.g. /raw C-c)\n"
+            "  [cyan]/quit[/cyan]                  exit cldx\n"
+            "\n"
+            "[dim]Anything not starting with '/' is typed into Claude.[/dim]"
+        )
+        self.print_rich(Panel(
+            body,
+            title="[bold cyan]cldx — terminal commands[/bold cyan]",
+            border_style="cyan",
+            expand=False,
+        ))
+
+    async def _handle_telegram_toggle(self, arg: str) -> None:
+        """Implement ``/telegram on``, ``/telegram off``, and ``/telegram``.
+
+        Behaviour:
+        - ``/telegram`` (no arg) → report current state.
+        - ``/telegram on``  → enable forwarding; if the bridge isn't yet
+          running, try to start it (credentials must already be configured).
+        - ``/telegram off`` → flip the gate; the bridge keeps running so
+          inbound replies / slash commands still work, but outbound cards
+          are suppressed until re-enabled.
+        """
+        arg = arg.strip().lower()
+        if not arg:
+            state = "off"
+            if self.telegram is not None and self.telegram_enabled:
+                state = "on"
+            elif self.telegram is None:
+                state = "not configured"
+            self.log(f"telegram forwarding: {state}")
+            return
+
+        if arg not in ("on", "off"):
+            self.log("usage: /telegram on | /telegram off")
+            return
+
+        if arg == "off":
+            if self.telegram is None:
+                self.log("[dim]telegram not running — nothing to disable.[/dim]")
+                return
+            self.telegram_enabled = False
+            self.log("[yellow]telegram forwarding OFF[/yellow]")
+            self.interaction_log.cldx_note("telegram forwarding disabled (/telegram off)")
+            self._update_prompt_label()
+            return
+
+        # arg == "on"
+        if self.telegram is not None:
+            self.telegram_enabled = True
+            self.log("[green]telegram forwarding ON[/green]")
+            self.interaction_log.cldx_note("telegram forwarding enabled (/telegram on)")
+            self._update_prompt_label()
+            return
+
+        # Bridge wasn't running — try to start it now.
+        self.log("[dim]bringing telegram bridge online…[/dim]")
+        prev_no_telegram = getattr(self.args, "no_telegram", False)
+        if prev_no_telegram:
+            # /telegram on overrides --no-telegram for the rest of the run.
+            self.args.no_telegram = False
+        await self._maybe_start_telegram()
+        if self.telegram is None:
+            self.log(
+                "[yellow]telegram still not connected — check `cldx setup telegram`[/yellow]"
+            )
+            return
+        self.telegram_enabled = True
+        self.log("[green]telegram forwarding ON[/green]")
+        self._update_prompt_label()
+
+    async def _telegram_chat_reply(self, reply_text: str) -> None:
+        """Forward a chat-only Claude reply to Telegram if forwarding is on.
+
+        Skips the big "task complete" card — this is the small "Claude
+        said something" path. The text is sanitized before sending so
+        any leaked pane chrome doesn't reach the user's phone.
+        """
+        if getattr(self.args, "no_telegram", False):
+            return
+        if self.telegram is None or not self.telegram_enabled:
+            return
+        clean = clean_for_telegram(reply_text or "")
+        if not clean:
+            return
+        body = f"💬 *Claude*\n{'━' * 20}\n{clean}"
+        try:
+            await self.telegram._send(body)
+            self.interaction_log.telegram_out(f"chat reply: {clean}")
+            self.store.log_event(
+                "telegram_out", mode="chat_reply", summary=clean,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[dim]Telegram chat send failed: {e}[/dim]")
 
     async def _dispatch_classified(
         self, prompt: ClassifiedPrompt, snapshot: str, source: str,
@@ -688,7 +1011,7 @@ class BridgeUI:
                 ),
             )
             self.store.log_note("destructive op pending — bypassed auto")
-            if self.telegram is not None:
+            if self.telegram is not None and self.telegram_enabled:
                 try:
                     await self.telegram.notify_approval_needed(prompt, decision)
                     self.log("[cyan]→ destructive op alert sent to Telegram[/cyan]")
@@ -730,7 +1053,7 @@ class BridgeUI:
                     f"[dim]({decision.reason}; type y/n/<digit> or `/skip`)[/dim]"
                 ),
             )
-            if self.telegram is not None:
+            if self.telegram is not None and self.telegram_enabled:
                 try:
                     await self.telegram.notify_approval_needed(prompt, decision)
                     self.log("[cyan]→ sent to Telegram[/cyan]")
@@ -756,12 +1079,34 @@ class BridgeUI:
         border_style: str,
         footer: str,
     ) -> None:
-        """Compact panel summarising an approval decision."""
+        """Compact panel summarising an approval decision.
+
+        When the prompt carries a typed ``tool`` (``ToolCall``), surface
+        the icon + category + risk inline so the user can tell at a
+        glance whether this is a Read (safe), a Write (elevated), or
+        a destructive Bash. Falls back to the plain ``extracted_command``
+        string for tools we don't yet have specs for."""
         body = Table.grid(padding=(0, 1))
         body.add_column(style="bold", no_wrap=True)
         body.add_column(overflow="fold")
         body.add_row("type", prompt.type.value)
-        if prompt.extracted_command:
+        if prompt.tool is not None:
+            tool = prompt.tool
+            risk_color = {
+                "destructive": "red",
+                "elevated":    "yellow",
+                "normal":      "white",
+                "safe":        "green",
+            }.get(tool.risk, "white")
+            body.add_row(
+                "tool",
+                f"{tool.icon} [bold]{tool.name}[/bold] "
+                f"[dim]· {tool.category}[/dim] "
+                f"[{risk_color}]· {tool.risk}[/{risk_color}]",
+            )
+            if tool.args:
+                body.add_row("args", tool.args)
+        elif prompt.extracted_command:
             body.add_row("tool", prompt.extracted_command)
         if prompt.menu_options:
             body.add_row("options", "\n".join(prompt.menu_options))
@@ -929,11 +1274,27 @@ class BridgeUI:
             )
             self.interaction_log.telegram_in(f"{kind}: {inbound_repr}")
 
+            # If a yes/no/digit reply arrives with NO pending approval,
+            # the user is just chatting — they typed "1" / "y" / "n" as
+            # part of a conversation. Forward the original text to Claude
+            # instead of silently dropping it. Symmetric to the terminal
+            # path, which already does this.
             if current is None and kind in ("yes", "no", "digit"):
+                text_to_send = reply.raw_text or reply.value or kind
+                await self.controller.send_text(text_to_send)
                 self.log(
-                    f"[dim]Telegram reply {kind!r} arrived but nothing's pending — "
-                    f"ignored.[/dim]"
+                    f"[cyan]→ injected:[/cyan] {text_to_send} "
+                    f"[dim](via Telegram — no pending prompt)[/dim]"
                 )
+                self.store.log_action(
+                    keys=f"text:{text_to_send}", source="user_telegram",
+                )
+                self.interaction_log.cldx_action(
+                    f"sent text {text_to_send!r} (via Telegram, no pending)"
+                )
+                self._completion_locked = False
+                self.pending_signature = None
+                self._update_prompt_label()
                 return
 
             if kind == "yes" and current is not None:
@@ -965,6 +1326,16 @@ class BridgeUI:
                 self.store.log_action(keys=f"text:{value}", source="user_telegram")
                 self.interaction_log.cldx_action(f"sent text {value!r} (via Telegram)")
                 self.pending = None
+                # CRITICAL: Telegram text injection starts a new task, just
+                # like the terminal path does. Clearing the completion lock
+                # here is what lets the NEXT chat-reply surface to terminal
+                # + Telegram. Without it, the first reply locks the panel
+                # and every subsequent Telegram-driven turn is silently
+                # absorbed by the COMPLETE+locked short-circuit in on_stable.
+                self._completion_locked = False
+                # Also reset pending_signature so dispatch dedup doesn't
+                # collide with the previous prompt's signature.
+                self.pending_signature = None
 
             self._update_prompt_label()
             # Also cancel any in-flight wait bar.
@@ -1025,17 +1396,35 @@ class BridgeUI:
         return "claude (reply)> "
 
     def _prompt_title(self) -> str:
-        """Title shown on the framed input box (no trailing '> ')."""
+        """Title shown on the framed input box (no trailing '> ').
+
+        Assembled from three layers, in order:
+
+        1. **Backend tag** — always ``Claude + TMUX``; ``+ Telegram`` is
+           appended whenever the bridge is connected AND enabled.
+        2. **Session-limit tag** — if a quota banner was detected, append
+           ``(Resets at HH:MM)`` so the user can see at a glance when
+           Claude will be available again.
+        3. **Pending-prompt suffix** — ``(y / n)`` or ``(1/2/3 | y | n)``
+           when there's a live approval prompt to answer.
+        """
+        parts = ["Claude + TMUX"]
+        if self.telegram is not None and self.telegram_enabled:
+            parts.append("+ Telegram")
+        base = " ".join(parts)
+        if self.session_limit is not None:
+            base += f" (Resets at {self.session_limit.label})"
+
         if self.pending is None:
-            return " claude "
+            return f" {base} "
         if self.pending.type == PromptType.APPROVAL_MENU and self.pending.menu_options:
             digits = "/".join(
                 str(i + 1) for i in range(len(self.pending.menu_options))
             )
-            return f" claude ({digits} | y | n) "
+            return f" {base} ({digits} | y | n) "
         if self.pending.type == PromptType.APPROVAL_YN:
-            return " claude (y / n) "
-        return " claude (reply) "
+            return f" {base} (y / n) "
+        return f" {base} (reply) "
 
     async def _input_loop(self) -> None:
         self.log("[dim]ready. /help for commands. Ctrl-D to quit.[/dim]")
@@ -1129,14 +1518,7 @@ class BridgeUI:
             return
 
         if head == "help":
-            self.log(
-                "commands: /y /n /<digit>  approve/deny pending prompt; "
-                "/skip clear pending; /refresh reprint mirror; "
-                "/snapshot show what cldx currently thinks the pane contains; "
-                "/profile <name> switch policy profile; /panes list tmux panes; "
-                "/raw <keys> send named tmux keys (e.g. 'C-c'); "
-                "/quit exit. Anything else types into Claude."
-            )
+            self._show_help()
             return
 
         if head == "snapshot":
@@ -1217,6 +1599,10 @@ class BridgeUI:
             async with self._action_lock:
                 await self.controller.send_raw_keys(rest)
             self.log(f"sent raw keys: {rest}")
+            return
+
+        if head == "telegram":
+            await self._handle_telegram_toggle(rest)
             return
 
         # /y, /n, /<digit>
@@ -1338,6 +1724,8 @@ class BridgeUI:
                         await self.telegram.stop()
                     except Exception as e:  # noqa: BLE001
                         self.log(f"[dim]Telegram shutdown: {e}[/dim]")
+                if self._reset_task is not None and not self._reset_task.done():
+                    self._reset_task.cancel()
                 self.store.log_event("session_end", events=self.store.event_count)
                 self.store.close()
                 self.interaction_log.close()

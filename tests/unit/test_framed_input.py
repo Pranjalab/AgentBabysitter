@@ -39,9 +39,12 @@ def test_bridgeui_prompt_title_matches_pending_state(tmp_path, monkeypatch):
 
     ui = _make_bridge_ui(tmp_path, monkeypatch)
 
-    # No pending prompt → bare "claude" title.
-    assert "claude" in ui._prompt_title()
-    assert "y" not in ui._prompt_title()
+    # No pending prompt → bare title (now "Claude + TMUX").
+    title = ui._prompt_title()
+    assert "Claude" in title
+    # No y/n suffix without a pending prompt.
+    assert "y / n" not in title
+    assert "y | n" not in title
 
     # YN prompt → title says (y / n).
     ui.pending = ClassifiedPrompt(
