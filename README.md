@@ -6,7 +6,7 @@
 [![Tests](https://img.shields.io/badge/tests-508%20passing-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-beta-yellow.svg)]()
 
-> **Agent Babysitter monitors your AI coding agent — Claude Code, Gemini CLI, Codex — so you don't have to. A local LLM enforces your policy, approves safe moves, escalates risky ones to your phone, and watches your project from planning to deployment. You go live your life. The AI babysits the AI.**
+> **Agent Babysitter monitors your AI coding agent — Claude Code, Gemini CLI, Codex — so you don't have to. A local LLM enforces your policy, approves safe moves, escalates risky ones to your phone, and watches your project from planning to deployment. You go live your life. The Agent babysits the Agent.**
 
 ---
 
@@ -14,7 +14,7 @@
 
 AI coding agents are powerful. They're also chatty: every `Bash`, every `Write`, every `Edit` pops an approval prompt. And the risky ones — a force-push, a `DROP TABLE`, a write to `~/.ssh` — genuinely need a human call.
 
-So you sit there. Watching. Clicking. Babysitting the AI that was supposed to free you.
+So you sit there. Watching. Clicking. Babysitting the agent that was supposed to free you.
 
 **Agent Babysitter flips that.** You define a policy. A local LLM reads it and babysits the agent on your behalf — approving the safe moves, escalating the risky ones to your phone via Telegram. You go to the gym. Your family gets dinner together. The AI keeps coding. You get a summary when it's done.
 

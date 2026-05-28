@@ -192,7 +192,7 @@ class LLMDecision:
 ### Prompt template (in policy.yml, overridable)
 
 ```
-You are an AI babysitter reviewing an action by an AI coding agent.
+You are an Agent Babysitter reviewing an action by an AI coding agent.
 
 PROJECT CONTEXT:
 {project_context}
