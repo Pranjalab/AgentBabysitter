@@ -203,10 +203,54 @@ abs config         # show current config (secrets masked)
 
 ---
 
+## Quick start
+
+**1. Install**
+
+```bash
+git clone https://github.com/Pranjalab/AgentBabysitter.git
+cd AgentBabysitter
+./install.sh
+```
+
+**2. Set up Telegram** _(optional — lets you approve from your phone)_
+
+```bash
+abs setup telegram
+```
+
+This walks you through `@BotFather`, captures your `chat_id`, and sends a welcome card to your phone.
+
+**3. Pick a local LLM backend** _(optional — powers the policy engine)_
+
+```bash
+abs setup llm
+```
+
+Choose Ollama, LM Studio, Anthropic, Gemini, or `disabled` (pattern-match only, no LLM).
+
+**4. Start your AI coding agent in tmux**
+
+```bash
+tmux new -s claude
+# inside the tmux pane:
+claude
+```
+
+**5. Run Agent Babysitter in another window**
+
+```bash
+abs --auto-detect
+```
+
+Agent Babysitter attaches to the pane, loads your `policy.yml`, and starts watching. Safe moves are auto-approved. Risky ones go to your phone. You step away.
+
+---
+
 ## Run
 
 ```bash
-abs                  # pick a pane or start a new session
+abs                  # interactive picker — choose a pane or resume a session
 abs --auto-detect    # attach to the only running agent pane
 abs --list-panes     # show all tmux panes
 ```
