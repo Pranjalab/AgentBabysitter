@@ -1,7 +1,7 @@
-# cldx agent definition — controls how the Telegram bridge summarises
+# abs agent definition — controls how the Telegram bridge summarises
 # Claude Code activity for you when you're away from the keyboard.
 #
-# Edit ~/.cldx/config/agent_name.yml to change the voice / model.
+# Edit ~/.abs/config/agent_name.yml to change the voice / model.
 
 name: Sentinel
 
@@ -40,8 +40,8 @@ persona: |
 #   you can't / don't want to pay for an upstream model:
 #     model: none:raw
 #
-# Run `cldx setup llm` to pick interactively (option 4 disables the LLM),
-# or `cldx setup none` to jump straight to the disabled mode. Either flow
+# Run `abs setup llm` to pick interactively (option 4 disables the LLM),
+# or `abs setup none` to jump straight to the disabled mode. Either flow
 # rewrites this file with your selection.
 
 model: claude-haiku-4-5

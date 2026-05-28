@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cldx.session_store import (
+from abs.session_store import (
     SessionStore,
     recent_sessions,
     replay,
@@ -17,8 +17,8 @@ from cldx.session_store import (
 
 @pytest.fixture
 def store_root(tmp_path, monkeypatch):
-    """Redirect $CLDX_HOME to a tmpdir so tests don't touch real state."""
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    """Redirect $ABS_HOME to a tmpdir so tests don't touch real state."""
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
     return tmp_path / "sessions"
 
 
@@ -118,7 +118,7 @@ def test_session_store_context_manager(store_root):
 
 
 def test_log_prompt_serializes_classified_prompt(store_root):
-    from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+    from abs.prompt_classifier import ClassifiedPrompt, PromptType
     p = ClassifiedPrompt(
         type=PromptType.APPROVAL_MENU,
         extracted_command="Bash(npm install)",

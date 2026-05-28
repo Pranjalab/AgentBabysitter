@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.tool_call import (
+from abs.tool_call import (
     TOOL_REGISTRY,
     ToolCall,
     ToolResult,
@@ -139,12 +139,12 @@ def test_classifier_populates_multiword_tool_field():
     """The classifier integration: when the approval block references
     ``Web Search(...)``, ClassifiedPrompt.tool must be populated with
     the canonicalised WebSearch entry."""
-    from cldx.policy_engine import PolicyEngine
-    from cldx.prompt_classifier import PromptClassifier
+    from abs.policy_engine import PolicyEngine
+    from abs.prompt_classifier import PromptClassifier
     from pathlib import Path
 
     policy = PolicyEngine(
-        Path(__file__).resolve().parents[2] / "cldx" / "defaults" / "policy.yml",
+        Path(__file__).resolve().parents[2] / "abs" / "defaults" / "policy.yml",
         profile_override="auto-approve",
     )
     classifier = PromptClassifier(detection_cfg=policy.detection_config)
@@ -290,12 +290,12 @@ def test_parse_results_empty_when_no_tool_lines():
 def test_classifier_populates_tool_on_approval_menu():
     """The PromptClassifier must set the .tool field whenever it can
     parse a tool-call line out of the snapshot under an approval."""
-    from cldx.policy_engine import PolicyEngine
-    from cldx.prompt_classifier import PromptClassifier
+    from abs.policy_engine import PolicyEngine
+    from abs.prompt_classifier import PromptClassifier
     from pathlib import Path
 
     policy = PolicyEngine(
-        Path(__file__).resolve().parents[2] / "cldx" / "defaults" / "policy.yml",
+        Path(__file__).resolve().parents[2] / "abs" / "defaults" / "policy.yml",
         profile_override="auto-approve",
     )
     classifier = PromptClassifier(detection_cfg=policy.detection_config)
@@ -319,7 +319,7 @@ def test_signature_with_tool_distinguishes_same_menu():
     """The bug from the user's transcript: two consecutive Write
     approvals with identical menu options must produce different
     signatures so dispatch dedup doesn't swallow the second one."""
-    from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+    from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
     same_menu = (
         "1. Yes",

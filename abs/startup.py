@@ -1,11 +1,11 @@
 """Startup greeting + session picker.
 
-Shown when the user runs ``cldx`` without ``--session`` / ``--auto-detect``
+Shown when the user runs ``abs`` without ``--session`` / ``--auto-detect``
 / ``--list-panes``. Prints a banner with the user's last known state
 (agent name, profile, telegram status, last session) and then offers a
 numbered menu of session options:
 
-- **resume** an existing event log (from `~/.cldx/sessions/<profile>/`)
+- **resume** an existing event log (from `~/.abs/sessions/<profile>/`)
 - **connect** to a live tmux pane that looks like Claude Code
 - **start** a brand-new tmux session + claude
 - **manage** (placeholder for Phase 4+ admin commands)
@@ -26,12 +26,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from cldx import __version__
-from cldx.memory import Memory
-from cldx.picker import PickerRow, pick_numeric, pick_with_arrows
-from cldx.policy_engine import PolicyEngine
-from cldx.session_picker import Pane, _looks_like_claude, list_panes
-from cldx.session_store import recent_sessions, session_summary
+from abs import __version__
+from abs.memory import Memory
+from abs.picker import PickerRow, pick_numeric, pick_with_arrows
+from abs.policy_engine import PolicyEngine
+from abs.session_picker import Pane, _looks_like_claude, list_panes
+from abs.session_store import recent_sessions, session_summary
 
 
 # --- public API ---------------------------------------------------------
@@ -72,7 +72,7 @@ async def run_startup(
             console,
         )
 
-    # Map cldx-internal rows to picker rows. Resume + connect are deletable;
+    # Map abs-internal rows to picker rows. Resume + connect are deletable;
     # "start new" is not.
     picker_rows: list[PickerRow] = []
     for row in rows:
@@ -160,7 +160,7 @@ def show_banner(policy: PolicyEngine, memory: Memory,
 
     tg_state = memory.data.telegram.get("configured", False)
     tg_line = "[green]✓ configured[/green]" if tg_state else (
-        "[red]✗ not configured[/red]  [dim](run `cldx telegram setup`)[/dim]"
+        "[red]✗ not configured[/red]  [dim](run `abs telegram setup`)[/dim]"
     )
 
     last = memory.data.last_session or {}
@@ -180,7 +180,7 @@ def show_banner(policy: PolicyEngine, memory: Memory,
 
     console.print(Panel(
         table,
-        title=f"[bold cyan]cldx[/bold cyan] [dim]v{__version__}[/dim]",
+        title=f"[bold cyan]abs[/bold cyan] [dim]v{__version__}[/dim]",
         border_style="cyan",
     ))
 
@@ -289,7 +289,7 @@ def _find_or_spawn_pane(console: Console) -> str:
 
 
 def spawn_new_claude_session(
-    session_prefix: str = "cldx",
+    session_prefix: str = "abs",
     console: Console | None = None,
     runner: Callable[[list[str]], subprocess.CompletedProcess] | None = None,
 ) -> str:

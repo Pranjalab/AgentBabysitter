@@ -1,4 +1,4 @@
-# cldx — your remote control for Claude Code
+# Agent Babysitter
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Version](https://img.shields.io/badge/version-1.0.4-brightgreen.svg)](#release-104)
@@ -6,73 +6,180 @@
 [![Tests](https://img.shields.io/badge/tests-508%20passing-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-beta-yellow.svg)]()
 
-> **cldx is a layer on top of [Claude Code](https://docs.claude.com/en/docs/claude-code) that auto-approves safe tool calls and lets you supervise Claude from your phone via Telegram. Step away from your laptop. Come back to a finished feature.**
+> **Agent Babysitter monitors your AI coding agent — Claude Code, Gemini CLI, Codex — so you don't have to. A local LLM enforces your policy, approves safe moves, escalates risky ones to your phone, and watches your project from planning to deployment. You go live your life. The AI babysits the AI.**
 
 ---
 
-## Why this exists
+## The problem
 
-### 1. Auto-approval — stop babysitting your AI
+AI coding agents are powerful. They're also chatty: every `Bash`, every `Write`, every `Edit` pops an approval prompt. And the risky ones — a force-push, a `DROP TABLE`, a write to `~/.ssh` — genuinely need a human call.
 
-Claude Code is brilliant. It's also chatty: every `Bash`, every `Write`, every `Edit` pops a "Do you want to proceed?" menu. If you're a developer who writes a precise prompt and just wants the **tested, summarised result**, those approval clicks add up to dozens of context-switches per task.
+So you sit there. Watching. Clicking. Babysitting the AI that was supposed to free you.
 
-cldx classifies every approval by **tool category** and **risk level**, then auto-approves the safe ones based on a policy *you* control. `Read`, `Grep`, and `Glob` get a green pass. `Write` and `Edit` go through a configurable 2-second countdown (so you can still cancel). `rm -rf`, `dd`, `sudo`, and writes under `/etc` or `~/.ssh` always escalate to a human — no policy can override that.
-
-You stop clicking. Claude keeps moving. You see the final result.
-
-### 2. Telegram bridge — step away from the laptop
-
-Even with auto-approval, *some* things need a human call. The destructive ones. The genuinely ambiguous ones. That used to mean staying glued to your terminal.
-
-cldx forwards those approvals to **Telegram** — the cheapest, most universal messaging bridge that runs on every phone. Go to the gym. Take a walk. Get coffee. When Claude hits a real decision point, your phone buzzes with a formatted card showing the tool, the args, the risk level, and a `y / n / 1 / 2 / 3 / free-text` reply protocol. You answer; Claude continues.
-
-You get the agentic-coding life back. The model works while you live.
+**Agent Babysitter flips that.** You define a policy. A local LLM reads it and babysits the agent on your behalf — approving the safe moves, escalating the risky ones to your phone via Telegram. You go to the gym. Your family gets dinner together. The AI keeps coding. You get a summary when it's done.
 
 ---
 
-## What it does, in one screen
+## How it works
 
 ```
-┌────────────────────|  Claude + TMUX + Telegram  |─────────────────────┐
-│ ❯ Add an OAuth flow to the user signup                                │
-└───────────────────────────────────────────────────────────────────────┘
-[14:32] → injected: Add an OAuth flow to the user signup
-
-╭──────── ⏳ AUTO-APPROVE — firing in 2.0s ────────╮
-│ type    approval_menu                            │
-│ tool    ✏️ Write · write · elevated              │
-│ args    src/auth/oauth.py                        │
-│ profile auto-approve                             │
-│         type to override · /skip to leave to you │
-╰──────────────────────────────────────────────────╯
-[14:32] → sent option 1 (Yes)
-
-(4 more auto-approvals happen silently...)
-
-╭──────────── ✓ Task complete ────────────╮
-│ ⏺ Write(src/auth/oauth.py)              │
-│   ⎿ Wrote 142 lines                     │
-│ ⏺ Edit(src/auth/__init__.py)            │
-│   ⎿ Updated 3 lines                     │
-│ ⏺ Bash(pytest tests/test_oauth.py)      │
-│   ⎿ 8 passed in 0.3s                    │
-│ ⏺ Added OAuth signup. All tests pass.   │
-│                                         │
-│ Telegram: ✓ sent                        │
-╰─────────────────────────────────────────╯
+┌─────────────────┐     ┌───────────────────────────────┐
+│  AI Coding Agent│────▶│         Agent Babysitter          │
+│  Claude Code    │     │                               │
+│  Gemini CLI     │     │  1. Reads your policy.yml     │
+│  Codex          │     │  2. Classifies every action   │
+└─────────────────┘     │  3. Asks local LLM if unsure  │
+                        │  4. Auto-approves safe moves  │
+                        │  5. Escalates to your phone   │
+                        └───────────┬───────────────────┘
+                                    │
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+             ┌──────────┐   ┌──────────┐   ┌─────────────┐
+             │ Terminal │   │ Telegram │   │ ~/.abs/    │
+             │  (you)   │   │ (phone)  │   │ logs+state  │
+             └──────────┘   └──────────┘   └─────────────┘
 ```
 
-Meanwhile on your phone:
+- **Monitor** — watches the agent's tmux pane, detects every approval prompt
+- **Policy engine** — matches the action against your `policy.yml` (approve / escalate / block)
+- **LLM babysitter** — your local Ollama or LM Studio model gets the ambiguous calls
+- **Telegram bridge** — escalations go to your phone; you reply `y` / `n` from anywhere
+- **Lifecycle awareness** — stricter during deploy than during a dev spike
+
+No daemons. No background services. One process per agent pane, cleanly killable with Ctrl-D.
+
+---
+
+## The policy file — write it once, walk away
+
+This is the centrepiece. A single `policy.yml` that you can read and edit in under five minutes:
+
+```yaml
+version: "1.0"
+
+# The local LLM that babysits your agent
+babysitter:
+  backend: ollama          # ollama | lmstudio | anthropic | gemini | disabled
+  model: llama3.2
+  endpoint: http://localhost:11434
+
+# Where escalations go
+notify:
+  telegram:
+    enabled: true
+
+# Your policy
+policy:
+  profile: default
+
+  profiles:
+    default:
+      approve:
+        tools: [Read, Grep, Glob, LS, WebSearch]
+        commands:
+          - "git status"
+          - "git log*"
+          - "pytest*"
+          - "npm test*"
+          - "cargo test*"
+
+      escalate:
+        tools: [Write, Edit, Bash, MultiEdit]
+        commands:
+          - "git commit*"
+          - "npm install*"
+          - "pip install*"
+          - "docker build*"
+        wait_seconds: 5    # countdown before auto-escalating
+
+      block:
+        commands:
+          - "rm -rf*"
+          - "git push --force*"
+          - "DROP TABLE*"
+          - "mkfs*"
+          - "sudo*"
+        paths:
+          - "/etc/**"
+          - "~/.ssh/**"
+          - "~/.aws/**"
+          - "~/.gnupg/**"
+```
+
+The babysitter reads this file. The local LLM uses it as its decision constitution. Every auto-approval, every escalation, every block is traceable back to a rule you wrote.
+
+### Built-in profiles
+
+| Profile | Philosophy |
+|---|---|
+| `default` | Safe ops auto-approved, writes escalated, destructive ops blocked |
+| `auto-approve` | Maximum autonomy — only destructive ops blocked |
+| `yolo` | Like auto-approve, but learns your y/n choices per pattern |
+| `restricted` | Everything escalates except reads |
+| `paranoid` | Everything escalates. Everything. |
+
+Switch live: `abs /profile paranoid` or from Telegram.
+
+---
+
+## Supported AI agents
+
+| Agent | Status |
+|---|---|
+| Claude Code | ✅ Shipped (v1.0.4) |
+| Gemini CLI | 🔄 In roadmap |
+| OpenAI Codex terminal | 🔄 In roadmap |
+| Generic tmux pane | 🔄 In roadmap |
+
+---
+
+## Babysitter backends (local LLM)
+
+The babysitter uses a local or remote LLM to evaluate ambiguous actions. You own the model. Your code never leaves your machine.
+
+| Backend | Cost | Setup |
+|---|---|---|
+| **Ollama** (recommended) | Free | `ollama pull llama3.2` |
+| **LM Studio** | Free | GUI, OpenAI-compatible |
+| **Disabled** | $0 | Pattern-match only, no LLM |
+| **Anthropic** | ~$0.0001/eval (Haiku) | API key |
+| **Google Gemini** | Free tier | API key |
+
+---
+
+## Telegram — your phone is the control panel
+
+When the babysitter escalates, your phone buzzes:
 
 ```
-✅ cldx — task complete
-━━━━━━━━━━━━━━━━━━━━
+🤔 Agent Babysitter — Needs Your Call
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🤖 Agent: Claude Code
+🔧 Tool: Bash
+📋 Command: npm install express
+📁 Project: my-api  |  Phase: implementing
+
+📊 Policy verdict: ESCALATE
+🧠 Babysitter says: "New dependency — confirm you want this package"
+⚖️  Confidence: 78%
+
+Reply: y · n · ! (block forever) · ? (explain more)
+```
+
+You reply. Claude continues. You never had to open your laptop.
+
+When the task finishes:
+
+```
+✅ Agent Babysitter — Task complete
+━━━━━━━━━━━━━━━━━━━━━━━━
 📌 Task: Add OAuth flow to user signup
-📝 Summary: Added OAuth signup + tests (8 passing).
-⏱️  Duration: 47s
-⚙️  Profile: auto-approve
+📝 Summary: Added OAuth provider + 8 passing tests.
+⏱️  Duration: 47s  |  ✅ 12 auto-approved  |  💬 1 escalated
+⚙️  Profile: default
 
-💬 Reply with your next task, or /help for options.
+💬 Reply with your next task.
 ```
 
 ---
@@ -80,129 +187,87 @@ Meanwhile on your phone:
 ## Install
 
 ```bash
-git clone https://github.com/Pranjalab/cldx.git
-cd cldx
+git clone https://github.com/Pranjalab/AgentBabysitter.git
+cd AgentBabysitter
 ./install.sh
 ```
 
-The installer:
-
-1. Picks a compatible Python (≥ 3.11; tries 3.13 → 3.12 → 3.11 in that order).
-2. `pip install --user .` so the `cldx` command lands in your user-scripts dir.
-3. Creates `~/.cldx/{config,sessions,logs}/` with bundled defaults (existing files are left untouched).
-4. Tells you the exact `export PATH=...` line to add to `~/.zshrc` if `cldx` isn't on PATH yet.
-5. Detects stale binaries from a different Python version and offers the one-line `ln -sf` to fix it.
-
-**Override the state location** with `export CLDX_HOME=/some/path`. **Uninstall** with `./install.sh --uninstall` (leaves `~/.cldx/` in place so a re-install keeps your configs).
-
-### Optional setup wizard
+The installer picks a compatible Python (≥ 3.11), installs the `abs` command, and creates `~/.abs/` with bundled defaults. Existing configs are never overwritten.
 
 ```bash
-cldx setup          # interactive — picks LLM backend + Telegram in sequence
-cldx setup telegram # just the Telegram bridge
-cldx setup llm      # just the LLM picker
-cldx config         # show current secrets (masked)
+abs setup          # interactive — LLM backend + Telegram in sequence
+abs setup telegram # just Telegram
+abs setup llm      # just the LLM picker
+abs config         # show current config (secrets masked)
 ```
-
-The Telegram wizard walks you through `@BotFather`, auto-discovers your `chat_id`, sends a greeting message, and prints the slash-commands list to your phone.
-
-### Pluggable LLM backends
-
-cldx uses an LLM to **summarise** Claude's output before sending to Telegram (so you get one paragraph instead of 200 lines of tool output). Backends ship pluggable:
-
-| Backend | Cost | Setup command |
-|---|---|---|
-| **Anthropic** (direct API key) | ~$0.0001 / summary (Haiku) | `cldx setup anthropic` |
-| **AWS Bedrock** (bearer token) | Your AWS rate | `cldx setup bedrock` |
-| **Google Gemini** (free tier OK) | Free up to a quota | `cldx setup gemini` |
-| **Disabled** (raw pane to Telegram) | $0 | `cldx setup` → option 4 |
-
-When disabled, the raw structural `⏺...✻` slice of Claude's pane goes to Telegram (sanitised: no box-drawing chars, no banner art, no UI chrome).
 
 ---
 
 ## Run
 
 ```bash
-cldx                  # interactive picker — pick a pane or start a new one
-cldx --auto-detect    # auto-attach to the only running Claude pane
-cldx --list-panes     # show all tmux panes and what's in them
+abs                  # pick a pane or start a new session
+abs --auto-detect    # attach to the only running agent pane
+abs --list-panes     # show all tmux panes
 ```
-
-For a complete command reference (terminal slash commands, Telegram slash commands, policy profiles, troubleshooting) see **[GUIDELINE.md](./GUIDELINE.md)**.
 
 ---
 
-## Features (v1.0.4)
+## Lifecycle awareness
 
-### Auto-approval
-- **Per-tool classification** — `Read`/`Grep`/`Glob` are `safe`; `Write`/`Edit` are `elevated`; `Bash` gets risk refined from the command (`rm -rf` → `destructive`, `pip install` → `elevated`); writes under `/etc` or `~/.ssh` always escalate.
-- **Per-profile defaults** — `auto-approve`, `yolo`, `restricted`, `default`, `paranoid`. Pick yours in `policy.yml` or switch live with `/profile <name>`.
-- **Configurable wait bar** — auto-fires after N seconds; type anything during the countdown to override.
-- **Yolo learning** — in `yolo` profile, your y/n choices get remembered per pattern (never for destructive ops).
-- **Built-in safety floor** — `rm -rf`, `dd`, `mkfs`, `chmod -R`, `sudo`, `git push --force` etc. bypass auto-approve regardless of profile.
+The babysitter adjusts its strictness based on what phase your project is in:
+
+| Phase | Detected by | Behaviour |
+|---|---|---|
+| Planning | Recent commits: `plan`, `spike`, `rfc` | Broad web access approved |
+| Implementing | Code files being written | Profile defaults |
+| Testing | `pytest`, `npm test`, `cargo test` detected | Bash runs more freely |
+| Deploying | `kubectl`, `terraform`, `helm`, `docker push` | Strictest — even reads get flagged |
+
+---
+
+## Features (v1.0.4 — Claude Code)
+
+> v1.0.4 is the foundation: a fully working Claude Code babysitter. The universal policy engine and multi-agent support are the next milestone.
+
+### Auto-approval engine
+- Per-tool classification — `Read`/`Grep`/`Glob` safe; `Write`/`Edit` elevated; `Bash` risk-refined from command
+- Five built-in profiles — live-switchable via terminal or Telegram
+- Configurable wait-bar countdown before auto-fire
+- Yolo learning — remembers your y/n choices per pattern
+- Built-in safety floor — `rm -rf`, `dd`, `sudo`, `git push --force` bypass auto-approve regardless of profile
 
 ### Telegram bridge
-- **Structured cards** — separate templates for approval / completion / escalation / greeting / error, all phone-screen-friendly.
-- **Two-way control** — reply `y` / `n` / `1` / `2` / free-form text from anywhere in the world.
-- **Slash commands** on Telegram: `/help`, `/status`, `/panes`, `/snapshot`, `/stop`, `/pause`, `/resume`, `/profile`, `/yes`, `/no`, `/cancel`. These never leak into Claude.
-- **Runtime toggle** — `/telegram on` / `/telegram off` in the cldx terminal to silence forwarding without restarting.
-- **Session-limit detector** — when Claude's 5-hour rolling Pro window hits, cldx parses the reset time, updates the header, and pings you on Telegram when the window reopens.
+- Structured approval / completion / escalation cards
+- Two-way control — reply from anywhere in the world
+- Slash commands: `/help`, `/status`, `/panes`, `/snapshot`, `/stop`, `/pause`, `/resume`, `/profile`, `/yes`, `/no`
+- Runtime toggle — `/telegram on` / `/telegram off` without restarting
+- Session-limit detector — parses Claude's reset time, pings you when the window reopens
 
 ### UX
-- **Bordered input box** styled like Claude Code's own (Tab to accept Claude's suggestion).
-- **Dynamic header** shows what's connected: `Claude + TMUX`, `Claude + TMUX + Telegram`, `... (Resets at 7:50 pm)`.
-- **Three-tier decision panels** — yellow (auto-approve pending), red (needs your call), green (task complete).
-- **Mirror panel** preserves Claude's own ANSI styling, syntax colours, dim placeholders.
-- **Structural ⏺...✻ extraction** — completion panels show exactly Claude's response, dropping your echo'd question and the duration line.
+- Bordered input box styled like Claude Code's own
+- Dynamic header: `Claude + TMUX [+ Telegram] [(Resets at HH:MM)]`
+- Three-tier decision panels — yellow (pending) / red (your call) / green (done)
+- Mirror panel preserves Claude's ANSI styling
+- Arrow-key session picker with delete-by-`d`
 
 ### Observability
-- **Per-session interaction log** at `~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log` — every terminal input, every Telegram in/out, every cldx decision, every Claude output. Plain text. `tail -f` friendly.
-- **JSONL event log** at `~/.cldx/sessions/<profile>/<timestamp>.jsonl` — machine-replayable.
-- **Multi-session picker** — arrow keys, `d` to delete, resume from any prior session by date.
+- Per-session log at `~/.abs/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log`
+- JSONL event log at `~/.abs/sessions/<profile>/<timestamp>.jsonl`
+- Every input, every decision, every Telegram message — plain text, `tail -f` friendly
 
 ---
 
-## Release 1.0.4
+## Roadmap
 
-The first stable release. Everything since the original prototype has gone through real-world use:
+See [`FEATURES.md`](./FEATURES.md) for the full list. The next major milestone:
 
-- ✅ All 7 build phases shipped (session storage, three-tier policy + wait bar, startup picker, yolo learning, agent persona + LLM, Telegram bridge).
-- ✅ Multi-backend LLM (Anthropic / Bedrock / Gemini / disabled).
-- ✅ Tool-call classification with risk refinement.
-- ✅ Structural `⏺...✻` result extractor.
-- ✅ Multi-word display-name parsing (`Web Search`, `Web Fetch`, `Multi Edit`…).
-- ✅ Auto-detect Claude's session limit + reset notifier.
-- ✅ 508 passing tests covering classifier, policy, Telegram, sanitiser, conversation extractor, tool registry.
-- ✅ Documented: install, GUIDELINE, FEATURES roadmap, code of conduct.
-
-See [`FEATURES.md`](./FEATURES.md) for what's next.
-
----
-
-## How it works
-
-```
-┌────────────────┐                    ┌─────────────────┐
-│   Claude Code  │ ──── tmux pane ──→ │      cldx       │
-│   (in tmux)    │ ←──  send-keys  ── │  (this thing)   │
-└────────────────┘                    └────────┬────────┘
-                                               │
-                              ┌────────────────┼────────────────┐
-                              │                │                │
-                              ▼                ▼                ▼
-                       ┌────────────┐  ┌────────────┐  ┌─────────────┐
-                       │  Terminal  │  │  Telegram  │  │ ~/.cldx/    │
-                       │  (you)     │  │  (phone)   │  │ logs+state  │
-                       └────────────┘  └────────────┘  └─────────────┘
-```
-
-- **Monitor** — polls `tmux capture-pane` once a second, computes a stable hash of the pane tail, fires `on_change` / `on_stable` callbacks.
-- **Classify** — every snapshot runs through `PromptClassifier` which uses both pattern matching AND structural rules (a Claude turn = `⏺ ... ✻`).
-- **Decide** — `PolicyEngine` reads `policy.yml`, applies the active profile, runs destructive-pattern checks, returns `AUTO_YES / AUTO_NO / WAIT_LOCAL / ESCALATE_TELEGRAM`.
-- **Act** — for auto-decisions, `TmuxController.send_keys` types the response into the pane. For escalations, `TelegramBridge` sends a card and waits for your reply.
-
-No daemons. No background services. One process per Claude pane, cleanly killable with Ctrl-D.
+- [ ] Universal `policy.yml` schema with Pydantic validation
+- [ ] LLM babysitter backend (Ollama + LM Studio, P0)
+- [ ] Gemini CLI adapter
+- [ ] Codex terminal adapter
+- [ ] Lifecycle phase detector
+- [ ] Enhanced Telegram cards with LLM reasoning + confidence
 
 ---
 
@@ -210,51 +275,52 @@ No daemons. No background services. One process per Claude pane, cleanly killabl
 
 | File | What's in it |
 |---|---|
-| **[GUIDELINE.md](./GUIDELINE.md)** | Full command reference (terminal + Telegram), profile configuration, troubleshooting |
-| **[FEATURES.md](./FEATURES.md)** | Roadmap — done / near-term / mid-term / long-term, how to propose features |
-| **[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)** | How we work together — required reading before contributing |
+| **[PLAN_POLICY.md](./PLAN_POLICY.md)** | Full implementation plan for the policy engine |
+| **[GUIDELINE.md](./GUIDELINE.md)** | Full command reference — terminal + Telegram, profiles, troubleshooting |
+| **[FEATURES.md](./FEATURES.md)** | Roadmap — done / near-term / mid-term / long-term |
+| **[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)** | How we work together |
 | **[LICENSE](./LICENSE)** | GPL-3.0-or-later |
 
 ---
 
 ## Contributing
 
-cldx is built in the open. Bug reports, feature ideas, and PRs welcome at <https://github.com/Pranjalab/cldx>.
-
-Quick start for contributors:
+Agent Babysitter is built in the open. Bug reports, feature ideas, and adapters for new AI agents are all welcome.
 
 ```bash
-git clone https://github.com/Pranjalab/cldx.git
-cd cldx
+git clone https://github.com/Pranjalab/AgentBabysitter.git
+cd AgentBabysitter
 python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,all-llm]"
-pytest -q                       # all 508 tests must stay green
+pytest -q
 ```
 
-Before opening a PR, read [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md) and check [`FEATURES.md`](./FEATURES.md) to see where your idea fits.
+The highest-value contributions right now:
+- **Gemini CLI adapter** — detection patterns for Gemini's approval prompts
+- **Codex adapter** — same for OpenAI Codex terminal
+- **LM Studio backend** — OpenAI-compatible local backend
+- **Policy schema** — Pydantic models for `policy.yml`
 
----
-
-## Inspiration
-
-cldx is inspired by the pattern of **remote-controlling a long-running agent**. If you've used OpenInterpreter or thought "I wish I could just text my Claude session from the bus", that's the same itch.
-
-The two design choices that define cldx:
-
-- **Auto-approval is the default**, not a power-user toggle. The whole point is *not clicking*.
-- **Telegram is the chosen medium**, not because it's the best, but because it's the cheapest, most universal, and easiest to integrate. Free on every phone. No proprietary clients. No subscription. Your bot, your chat, your control.
+Before opening a PR, read [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md).
 
 ---
 
 ## Acknowledgments
 
-Special thanks to:
-- **Claude** (Anthropic) for the incredible agentic tool capabilities.
-- **tmux** for enabling reliable terminal multiplexing and session control.
-- **Telegram** for providing a fast, universal, and accessible messaging platform.
+Agent Babysitter stands on the shoulders of tools that made agentic coding possible:
+
+- **[Claude Code](https://docs.claude.com/en/docs/claude-code)** (Anthropic) — the first agent this tool babysits, and the one that proved agentic coding is real
+- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** (Google) — the second agent in scope, and a signal that this is a category
+- **[tmux](https://github.com/tmux/tmux)** — the invisible backbone; none of this works without reliable terminal multiplexing
+- **[Ollama](https://ollama.com)** — making local LLMs a one-line install; the reason the babysitter can run on your laptop for free
+- **[LM Studio](https://lmstudio.ai)** — the GUI path to local LLMs; lowers the barrier for developers who aren't comfortable with CLIs
+- **[Telegram](https://telegram.org)** — free, universal, runs on every phone, no proprietary clients, no subscription; the only messaging platform worth building on for a tool like this
+- **[python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)** — the async Telegram library that made the bridge straightforward
+- **[prompt_toolkit](https://github.com/prompt-toolkit/python-prompt-toolkit)** — the terminal UI layer behind the bordered input box
+- **The open source community** — every library, every issue filed, every PR merged that made this possible
 
 ---
 
 ## License
 
-[GPL-3.0-or-later](./LICENSE). If you use cldx commercially, the GPL terms apply — share modifications back, keep the source open. If GPL conflicts with your use case, [open an issue](https://github.com/Pranjalab/cldx/issues) and we'll talk.
+[GPL-3.0-or-later](./LICENSE). If you use Agent Babysitter commercially, the GPL terms apply — share modifications back, keep the source open. If GPL conflicts with your use case, [open an issue](https://github.com/Pranjalab/abs/issues) and we'll talk.

@@ -27,7 +27,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from cldx.agent import Agent
+from abs.agent import Agent
 
 
 SummaryMode = Literal["prompt_summary", "escalation_summary", "completion_summary"]
@@ -198,7 +198,7 @@ async def _summarize_with_anthropic(
 ) -> str:
     api_key = os.environ.get(agent.api_key_env or "ANTHROPIC_API_KEY")
     if not api_key:
-        raise _SummarizerFallback("no Anthropic API key (run `cldx setup anthropic`)")
+        raise _SummarizerFallback("no Anthropic API key (run `abs setup anthropic`)")
 
     try:
         from anthropic import AsyncAnthropic  # type: ignore[import-not-found]
@@ -251,14 +251,14 @@ async def _summarize_with_bedrock(
     )
     if not (has_bearer or has_standard):
         raise _SummarizerFallback(
-            "no AWS credentials (run `cldx setup bedrock` or `aws configure`)"
+            "no AWS credentials (run `abs setup bedrock` or `aws configure`)"
         )
 
     try:
         import boto3  # type: ignore[import-not-found]
     except ImportError:
         raise _SummarizerFallback(
-            "boto3 not installed (pip install 'cldx[bedrock]' or pip install boto3)"
+            "boto3 not installed (pip install 'abs[bedrock]' or pip install boto3)"
         )
 
     import asyncio
@@ -307,7 +307,7 @@ async def _summarize_with_gemini(
     )
     if not api_key:
         raise _SummarizerFallback(
-            "no Gemini API key (run `cldx setup gemini` or set GEMINI_API_KEY)"
+            "no Gemini API key (run `abs setup gemini` or set GEMINI_API_KEY)"
         )
 
     try:
@@ -315,7 +315,7 @@ async def _summarize_with_gemini(
         from google.genai import types  # type: ignore[import-not-found]
     except ImportError:
         raise _SummarizerFallback(
-            "google-genai not installed (pip install 'cldx[gemini]' or pip install google-genai)"
+            "google-genai not installed (pip install 'abs[gemini]' or pip install google-genai)"
         )
 
     client = genai.Client(api_key=api_key)

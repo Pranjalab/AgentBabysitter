@@ -10,10 +10,10 @@ from unittest.mock import patch
 import pytest
 from rich.console import Console
 
-from cldx.memory import Memory
-from cldx.policy_engine import PolicyEngine
-from cldx.session_picker import Pane
-from cldx.startup import (
+from abs.memory import Memory
+from abs.policy_engine import PolicyEngine
+from abs.session_picker import Pane
+from abs.startup import (
     StartupChoice,
     _build_pick_rows,
     _format_ago,
@@ -25,7 +25,7 @@ from cldx.startup import (
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
     return tmp_path
 
 
@@ -49,7 +49,7 @@ def test_show_banner_contains_agent_and_profile(policy_path, isolated_home,
     assert "Aria" in out
     assert "auto-approve" in out
     assert "telegram" in out.lower()
-    assert "cldx" in out.lower()
+    assert "abs" in out.lower()
 
 
 def test_show_banner_announces_yolo_learned_count(policy_path, isolated_home,
@@ -90,8 +90,8 @@ async def test_run_startup_select_connect_returns_pane(policy_path, isolated_hom
     policy = PolicyEngine(policy_path)
     memory = Memory()
 
-    with patch("cldx.startup.list_panes") as mock_list, \
-         patch("cldx.startup.recent_sessions", return_value=[]):
+    with patch("abs.startup.list_panes") as mock_list, \
+         patch("abs.startup.recent_sessions", return_value=[]):
         mock_list.return_value = [
             Pane(target="0:0.0", current_command="claude", title="✳ Claude Code"),
         ]
@@ -114,9 +114,9 @@ async def test_run_startup_select_start_spawns_new(policy_path, isolated_home,
         fake_runs.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    with patch("cldx.startup.list_panes", return_value=[]), \
-         patch("cldx.startup.recent_sessions", return_value=[]), \
-         patch("cldx.startup._default_runner", side_effect=fake_runner):
+    with patch("abs.startup.list_panes", return_value=[]), \
+         patch("abs.startup.recent_sessions", return_value=[]), \
+         patch("abs.startup._default_runner", side_effect=fake_runner):
         choice = await run_startup(policy, memory, console=console,
                                     input_fn=lambda _prompt: "1")
 
@@ -159,8 +159,8 @@ async def test_run_startup_rejects_invalid_input(policy_path, isolated_home,
 
     inputs = iter(["abc", "99", "", "1"])
 
-    with patch("cldx.startup.list_panes", return_value=[]), \
-         patch("cldx.startup.recent_sessions", return_value=[]):
+    with patch("abs.startup.list_panes", return_value=[]), \
+         patch("abs.startup.recent_sessions", return_value=[]):
         choice = await run_startup(policy, memory, console=console,
                                     input_fn=lambda _prompt: next(inputs))
     # "1" picks the only row available (start new) — should succeed.

@@ -32,30 +32,30 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from cldx import __version__
-from cldx._paths import resolve_policy_path
-from cldx.policy_engine import (
+from abs import __version__
+from abs._paths import resolve_policy_path
+from abs.policy_engine import (
     DecisionResult,
     PolicyDecision,
     PolicyEngine,
     PolicyEngineError,
 )
-from cldx.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
-from cldx.session_picker import SessionPickerError, list_panes, pick_session
-from cldx.conversation import extract_assistant_step
-from cldx.interaction_log import InteractionLog
-from cldx.session_limit import SessionLimit, parse_session_limit
-from cldx.session_store import SessionStore
-from cldx.telegram_sanitize import (
+from abs.prompt_classifier import ClassifiedPrompt, PromptClassifier, PromptType
+from abs.session_picker import SessionPickerError, list_panes, pick_session
+from abs.conversation import extract_assistant_step
+from abs.interaction_log import InteractionLog
+from abs.session_limit import SessionLimit, parse_session_limit
+from abs.session_store import SessionStore
+from abs.telegram_sanitize import (
     clean_for_telegram,
     extract_assistant_reply,
 )
-from cldx.framed_input import FramedInputSession
-from cldx.memory import Memory, normalize_pattern
-from cldx.secrets import load_into_environ
-from cldx.tmux_controller import TmuxController
-from cldx.tmux_monitor import TmuxMonitor
-from cldx.wait_bar import animated_countdown_wait, countdown_wait
+from abs.framed_input import FramedInputSession
+from abs.memory import Memory, normalize_pattern
+from abs.secrets import load_into_environ
+from abs.tmux_controller import TmuxController
+from abs.tmux_monitor import TmuxMonitor
+from abs.wait_bar import animated_countdown_wait, countdown_wait
 
 # force_terminal so colors survive prompt_toolkit's stdout wrapper.
 console = Console(force_terminal=True, color_system="truecolor", soft_wrap=True)
@@ -70,10 +70,10 @@ DECISION_STYLE = {
 
 def parse_cli_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        prog="cldx",
+        prog="abs",
         description="Second-layer terminal for a tmux pane running Claude Code.",
     )
-    p.add_argument("--version", action="version", version=f"cldx {__version__}")
+    p.add_argument("--version", action="version", version=f"abs {__version__}")
 
     # All flags below are for the default (bridge) command. Subcommands
     # below are parsed by their own subparsers.
@@ -83,7 +83,7 @@ def parse_cli_args() -> argparse.Namespace:
     p.add_argument("--profile",
                    help="Override active profile (auto-approve/yolo/restricted/default/paranoid).")
     p.add_argument("--policy", default=None,
-                   help="Path to policy.yml. Default: ~/.cldx/config/policy.yml "
+                   help="Path to policy.yml. Default: ~/.abs/config/policy.yml "
                         "if it exists, else the bundled default.")
     p.add_argument("--poll-interval", type=float, default=1.0,
                    help="Seconds between pane snapshots (default 1.0).")
@@ -116,7 +116,7 @@ def parse_cli_args() -> argparse.Namespace:
     )
 
     config_p = sub.add_parser(
-        "config", help="Inspect cldx config (secrets are masked).",
+        "config", help="Inspect abs config (secrets are masked).",
     )
     config_p.add_argument(
         "action", nargs="?", default="show", choices=("show",),
@@ -231,8 +231,8 @@ class BridgeUI:
         # Phase 2: jsonl event log for this run (machine-replayable).
         self.store = SessionStore(profile=policy.active_profile_name, pane=pane)
         # Plain-text interaction log — everything the user typed, everything
-        # Telegram delivered, and every decision cldx made, written under
-        # ``~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log``.
+        # Telegram delivered, and every decision abs made, written under
+        # ``~/.abs/logs/YYYY-MM-DD/HH-MM-SS_<profile>_<pane>.log``.
         self.interaction_log = InteractionLog(
             profile=policy.active_profile_name, pane=pane,
         )
@@ -433,7 +433,7 @@ class BridgeUI:
     # NOTE: this hardcoded regex used to live here but it missed any tool
     # added after the original list (most painfully ``WebSearch`` /
     # ``Web Search``). ``_pane_has_tool_calls`` now delegates to
-    # ``cldx.tool_call.parse_tool_call`` which is driven by the
+    # ``abs.tool_call.parse_tool_call`` which is driven by the
     # canonical ``TOOL_REGISTRY`` and handles multi-word display names.
     # Keep the compiled pattern here as a stable fallback for anything
     # that doesn't go through ``parse_tool_call`` (currently nothing
@@ -458,7 +458,7 @@ class BridgeUI:
     def _pane_has_tool_calls(cls, snapshot: str) -> bool:
         """Did Claude actually do work, or just reply with text?
 
-        Delegates to ``cldx.tool_call.parse_tool_call`` so the answer
+        Delegates to ``abs.tool_call.parse_tool_call`` so the answer
         stays consistent with the registry (single source of truth).
         That parser recognises:
 
@@ -472,7 +472,7 @@ class BridgeUI:
         they ran through the truncated 💬 cyan panel instead of the
         full ✓ green completion card.
         """
-        from cldx.tool_call import parse_tool_call as _parse_tool
+        from abs.tool_call import parse_tool_call as _parse_tool
         # Limit to the recent pane so we don't false-fire on tool calls
         # from much-older turns sitting deep in scrollback.
         tail = "\n".join(snapshot.splitlines()[-80:])
@@ -643,8 +643,8 @@ class BridgeUI:
         visible_step = extract_assistant_step(snapshot) or task_text
 
         # Real task: build the summary text we'll show + (maybe) send.
-        from cldx.agent import Agent
-        from cldx.summarizer import summarize_with_status
+        from abs.agent import Agent
+        from abs.summarizer import summarize_with_status
         try:
             agent = Agent.load()
             if getattr(self.args, "no_llm", False):
@@ -653,7 +653,7 @@ class BridgeUI:
                 "completion_summary", task_text, agent,
             )
         except Exception as e:  # noqa: BLE001
-            from cldx.summarizer import SummaryResult
+            from abs.summarizer import SummaryResult
             result = SummaryResult(
                 text=task_text,
                 summarized=False,
@@ -692,7 +692,7 @@ class BridgeUI:
         elif self.telegram is None:
             telegram_line = (
                 "\n\n[yellow]Telegram: ✗ not configured "
-                "(run `cldx setup telegram`)[/yellow]"
+                "(run `abs setup telegram`)[/yellow]"
             )
         elif not self.telegram_enabled:
             telegram_line = (
@@ -753,7 +753,7 @@ class BridgeUI:
         )
         # Terminal: red panel so it can't be missed.
         self.print_rich(Panel(
-            message + "\n\n[dim]cldx will alert you the moment the session "
+            message + "\n\n[dim]Agent Babysitter will alert you the moment the session "
             "reopens.[/dim]",
             title="[bold red]⏰ Session limit reached[/bold red]",
             border_style="red",
@@ -852,7 +852,7 @@ class BridgeUI:
             "  [cyan]/telegram off[/cyan]          silence outbound Telegram cards\n"
             "\n"
             "[bold]Inspection[/bold]\n"
-            "  [cyan]/snapshot[/cyan]              show the cldx view of the pane + classifier output\n"
+            "  [cyan]/snapshot[/cyan]              show the abs view of the pane + classifier output\n"
             "  [cyan]/refresh[/cyan]               reprint the mirror panel\n"
             "  [cyan]/panes[/cyan]                 list tmux panes (active one marked)\n"
             "\n"
@@ -862,13 +862,13 @@ class BridgeUI:
             "\n"
             "[bold]Raw / exit[/bold]\n"
             "  [cyan]/raw <keys>[/cyan]            send named tmux keys to the pane (e.g. /raw C-c)\n"
-            "  [cyan]/quit[/cyan]                  exit cldx\n"
+            "  [cyan]/quit[/cyan]                  exit abs\n"
             "\n"
             "[dim]Anything not starting with '/' is typed into Claude.[/dim]"
         )
         self.print_rich(Panel(
             body,
-            title="[bold cyan]cldx — terminal commands[/bold cyan]",
+            title="[bold cyan]abs — terminal commands[/bold cyan]",
             border_style="cyan",
             expand=False,
         ))
@@ -925,7 +925,7 @@ class BridgeUI:
         await self._maybe_start_telegram()
         if self.telegram is None:
             self.log(
-                "[yellow]telegram still not connected — check `cldx setup telegram`[/yellow]"
+                "[yellow]telegram still not connected — check `abs setup telegram`[/yellow]"
             )
             return
         self.telegram_enabled = True
@@ -1191,7 +1191,7 @@ class BridgeUI:
 
     def _replay_transcript(self, path: Path) -> None:
         """Phase 4: print a condensed view of a prior session's events."""
-        from cldx.session_store import replay
+        from abs.session_store import replay
         console.print(Panel(
             f"[dim]replaying {path.name}[/dim]",
             title="[bold]previous session[/bold]",
@@ -1222,15 +1222,15 @@ class BridgeUI:
         if getattr(self.args, "no_telegram", False):
             return
         try:
-            from cldx.agent import Agent
-            from cldx.telegram_bridge import TelegramBridge, TelegramConfig
+            from abs.agent import Agent
+            from abs.telegram_bridge import TelegramBridge, TelegramConfig
         except ImportError as e:
             self.log(f"[yellow]Telegram deps not installed: {e}[/yellow]")
             return
 
         cfg = TelegramConfig.from_environ()
         if cfg is None:
-            self.log("[dim]Telegram not configured (run `cldx setup telegram` to enable)[/dim]")
+            self.log("[dim]Telegram not configured (run `abs setup telegram` to enable)[/dim]")
             return
 
         agent = Agent.load()
@@ -1768,8 +1768,8 @@ async def run(args: argparse.Namespace) -> int:
     # --session or --auto-detect to skip it.
     resume_from = None
     if args.session is None and not args.auto_detect:
-        from cldx.memory import Memory
-        from cldx.startup import run_startup
+        from abs.memory import Memory
+        from abs.startup import run_startup
         try:
             choice = await run_startup(policy, Memory(), console=console)
             pane = choice.pane
@@ -1803,8 +1803,8 @@ async def run(args: argparse.Namespace) -> int:
 
 
 def _run_setup_subcommand(args: argparse.Namespace) -> int:
-    """Dispatch `cldx setup [target]`. All wizards return cleanly on Ctrl-C."""
-    from cldx.setup_wizard import (
+    """Dispatch `abs setup [target]`. All wizards return cleanly on Ctrl-C."""
+    from abs.setup_wizard import (
         run_anthropic_setup,
         run_bedrock_setup,
         run_disable_llm,
@@ -1835,17 +1835,17 @@ def _run_setup_subcommand(args: argparse.Namespace) -> int:
 
 
 def _run_config_subcommand(args: argparse.Namespace) -> int:
-    """Dispatch `cldx config show` (only action so far)."""
-    from cldx.setup_wizard import show_config
+    """Dispatch `abs config show` (only action so far)."""
+    from abs.setup_wizard import show_config
     if args.action == "show":
         show_config(console=console)
     return 0
 
 
 def _run_test_subcommand(args: argparse.Namespace) -> int:
-    """Dispatch `cldx test <target>`."""
+    """Dispatch `abs test <target>`."""
     if args.target == "llm":
-        from cldx.llm_test import run_llm_test
+        from abs.llm_test import run_llm_test
         return asyncio.run(run_llm_test(console=console))
     return 0
 

@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cldx.agent import Agent
-from cldx.policy_engine import DecisionResult, PolicyDecision
-from cldx.prompt_classifier import ClassifiedPrompt, PromptType
-from cldx.telegram_bridge import (
+from abs.agent import Agent
+from abs.policy_engine import DecisionResult, PolicyDecision
+from abs.prompt_classifier import ClassifiedPrompt, PromptType
+from abs.telegram_bridge import (
     ParsedReply,
     TelegramBridge,
     TelegramConfig,

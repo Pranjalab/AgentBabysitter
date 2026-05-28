@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.telegram_templates import (
+from abs.telegram_templates import (
     ApprovalCard,
     CompletionCard,
     EscalationCard,

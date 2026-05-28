@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cldx.memory import Memory, MemoryData, normalize_pattern
+from abs.memory import Memory, MemoryData, normalize_pattern
 
 
 # --- normalize_pattern ----------------------------------------------------
@@ -34,7 +34,7 @@ def test_normalize_pattern(raw, expected):
 
 @pytest.fixture
 def mem_path(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
     return tmp_path / "memory.json"
 
 
@@ -142,8 +142,8 @@ def test_set_last_session_persists(mem_path):
 # --- Policy integration ---------------------------------------------------
 
 def test_yolo_decide_short_circuits_on_approved_pattern(mem_path, policy_path):
-    from cldx.policy_engine import PolicyDecision, PolicyEngine
-    from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+    from abs.policy_engine import PolicyDecision, PolicyEngine
+    from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
     mem = Memory()
     mem.learn(approve=True, pattern="Bash(npm)", profile="yolo")
@@ -160,8 +160,8 @@ def test_yolo_decide_short_circuits_on_approved_pattern(mem_path, policy_path):
 
 
 def test_yolo_decide_short_circuits_on_denied_pattern(mem_path, policy_path):
-    from cldx.policy_engine import PolicyDecision, PolicyEngine
-    from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+    from abs.policy_engine import PolicyDecision, PolicyEngine
+    from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
     mem = Memory()
     mem.learn(approve=False, pattern="Bash(curl)", profile="yolo")
@@ -180,8 +180,8 @@ def test_yolo_decide_short_circuits_on_denied_pattern(mem_path, policy_path):
 def test_yolo_decide_skips_memory_for_destructive(mem_path, policy_path):
     """Even if the user approved 'Bash(rm)' (impossible — learning blocks it),
     a destructive prompt must NOT short-circuit through memory."""
-    from cldx.policy_engine import PolicyEngine
-    from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+    from abs.policy_engine import PolicyEngine
+    from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
     mem = Memory()
     mem.data.approved_patterns["yolo"] = ["Bash(rm)"]

@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 
 import pytest
 
-from cldx.session_limit import SessionLimit, parse_session_limit
+from abs.session_limit import SessionLimit, parse_session_limit
 
 
 # --- happy paths ----------------------------------------------------------

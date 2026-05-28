@@ -24,7 +24,7 @@ Two public extractors:
   the live approval prompt at the bottom of the pane, anchored on
   ``Do you want to proceed?`` followed by ``❯ 1. Yes``.
 
-These complement (rather than replace) :mod:`cldx.prompt_classifier` —
+These complement (rather than replace) :mod:`abs.prompt_classifier` —
 the classifier still decides the `PromptType`; these functions extract
 the human-meaningful payload once the state is known.
 """

@@ -1,6 +1,6 @@
-"""Persistent memory for cldx — yolo learned patterns, telegram state, etc.
+"""Persistent memory for abs — yolo learned patterns, telegram state, etc.
 
-Lives at ``~/.cldx/memory.json`` (or ``$CLDX_HOME/memory.json``).
+Lives at ``~/.abs/memory.json`` (or ``$CLDX_HOME/memory.json``).
 
 Yolo profile semantics:
 
@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cldx._paths import cldx_home
+from abs._paths import abs_home
 
 
 # --- Pattern normalization ------------------------------------------------
@@ -111,7 +111,7 @@ class MemoryData:
 
 
 class Memory:
-    """Read/write wrapper over ``~/.cldx/memory.json``.
+    """Read/write wrapper over ``~/.abs/memory.json``.
 
     Reads happen lazily. Every mutating call writes back to disk so
     yolo learning survives a crash.
@@ -119,7 +119,7 @@ class Memory:
 
     def __init__(self, path: Path | None = None,
                  destructive_patterns: list[str] | None = None) -> None:
-        self.path = path or (cldx_home() / "memory.json")
+        self.path = path or (abs_home() / "memory.json")
         self.data = self._load()
         self._destructive_res: list[re.Pattern[str]] = []
         for raw in destructive_patterns or []:

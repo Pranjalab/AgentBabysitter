@@ -1,4 +1,4 @@
-# cldx — Features & Roadmap
+# Agent Babysitter — Features & Roadmap
 
 A living document of what's done, what's planned, and what's "would love
 help with". Updated as the project grows.
@@ -52,7 +52,7 @@ For day-to-day usage of what's already shipped, see
       `/snapshot`, `/stop`, `/cancel`, `/yes`, `/no`, `/pause`,
       `/resume`, `/profile`.
 - [x] Auth boundary — messages from non-configured chat IDs are dropped.
-- [x] Runtime `/telegram on` / `/telegram off` toggle in cldx terminal.
+- [x] Runtime `/telegram on` / `/telegram off` toggle in abs terminal.
 - [x] Auto-discovered chat ID via `getUpdates` in setup wizard.
 - [x] Welcome card sent on first setup.
 
@@ -85,9 +85,9 @@ For day-to-day usage of what's already shipped, see
 
 ### Observability
 - [x] Per-session human-readable interaction log
-      (`~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_*.log`).
+      (`~/.abs/logs/YYYY-MM-DD/HH-MM-SS_*.log`).
 - [x] JSONL machine-replayable event log
-      (`~/.cldx/sessions/<profile>/*.jsonl`).
+      (`~/.abs/sessions/<profile>/*.jsonl`).
 - [x] 508 passing tests covering classifier, policy engine, tool
       registry, Telegram parser, sanitiser, conversation extractor,
       session limit parser, completion lock flow.
@@ -106,7 +106,7 @@ The things we want to ship next. PRs especially welcome.
       - Subprocess execution surface (`tmux send-keys`, `boto3`,
         `anthropic`).
       - Secret handling (mode-600 + `.env` parser).
-- [ ] **Secrets at rest** — optional encryption of `~/.cldx/config/*.env`
+- [ ] **Secrets at rest** — optional encryption of `~/.abs/config/*.env`
       via the OS keyring.
 - [ ] **PR / CI security scan** — `pip-audit` / `safety` on every PR;
       reject if upstream dependency has a known CVE.
@@ -119,7 +119,7 @@ The things we want to ship next. PRs especially welcome.
 - [ ] **Per-category profiles** — `read: auto_yes`, `write: wait_5s`,
       `exec: escalate`.
 - [ ] **Live policy reload** — `/policy reload` after editing `policy.yml`
-      without restarting cldx.
+      without restarting abs.
 
 ### More LLM backends
 - [ ] **OpenAI** as a summary backend (gpt-4o-mini is cheap enough).
@@ -141,7 +141,7 @@ Bigger lifts. Likely require a non-trivial design conversation first.
 
 ### Multi-CLI bridge
 - [ ] **Gemini CLI integration** — same auto-approval + Telegram
-      pattern, but for Google's Gemini CLI. Same `cldx` binary, new
+      pattern, but for Google's Gemini CLI. Same `abs` binary, new
       backend.
 - [ ] **Codex CLI integration** — when OpenAI ships their CLI publicly,
       bridge that too.
@@ -149,9 +149,9 @@ Bigger lifts. Likely require a non-trivial design conversation first.
       approval prompts can be wrapped.
 
 ### Multi-pane
-- [ ] **Watch multiple Claude panes in one cldx instance** — one cldx,
+- [ ] **Watch multiple Claude panes in one abs instance** — one abs,
       many agents, single Telegram chat for all.
-- [ ] **Tab-style switcher** in the cldx terminal between active panes.
+- [ ] **Tab-style switcher** in the abs terminal between active panes.
 
 ### Better summaries
 - [ ] **Streaming summary** — start writing the Telegram summary while
@@ -164,7 +164,7 @@ Bigger lifts. Likely require a non-trivial design conversation first.
 ### Memory / personalisation
 - [ ] **Cross-session yolo memory persistence** — share learned
       patterns across reinstalls.
-- [ ] **Per-project policy overrides** — `.cldx/policy.yml` in a project
+- [ ] **Per-project policy overrides** — `.abs/policy.yml` in a project
       dir shadows the global one.
 
 ---
@@ -185,22 +185,22 @@ Aspirational. Likely require significant new design.
       function that returns the decision instead of editing YAML.
 - [ ] **Confidence-weighted summaries** — LLM tells us how sure it is the
       task is done; we flag uncertain completions for review.
-- [ ] **Multi-step approval chains** — let cldx ask Claude to break down
+- [ ] **Multi-step approval chains** — let abs ask Claude to break down
       a destructive op into safe steps before approving.
 
 ### Ecosystem
 - [ ] **Plugin system** — third-party tools / templates loadable from
-      `~/.cldx/plugins/`.
-- [ ] **Hosted setup helper** — generate `~/.cldx/config/*.env` from a
+      `~/.abs/plugins/`.
+- [ ] **Hosted setup helper** — generate `~/.abs/config/*.env` from a
       web form (no keys touch our servers; output is downloadable).
 - [ ] **Public benchmark suite** — standard "agent dev scenarios" to
-      measure cldx's auto-approval accuracy across releases.
+      measure abs's auto-approval accuracy across releases.
 
 ---
 
 ## How to propose a feature
 
-1. **Open an issue** at <https://github.com/Pranjalab/cldx/issues>.
+1. **Open an issue** at <https://github.com/Pranjalab/AgentBabysitter/issues>.
    Lead with the problem (not your proposed solution). Examples:
    - "I want to disable auto-approval for `WebFetch` specifically"
      (good — describes a goal)
@@ -213,7 +213,7 @@ Aspirational. Likely require significant new design.
 3. **For small / obvious features**, open a PR directly. Match the
    surrounding style. Add tests. Update GUIDELINE.md if user-visible.
 
-4. **For controversial features**, expect discussion. cldx tries to stay
+4. **For controversial features**, expect discussion. abs tries to stay
    small. "Why not just …" is a real answer. We'd rather ship one
    tightly-designed thing than ten half-baked ones.
 
@@ -228,21 +228,21 @@ Aspirational. Likely require significant new design.
 A small list of things we've explicitly decided against, so people don't
 need to keep asking:
 
-- **Cloud-hosted multi-tenant cldx.** Not the design. cldx is your local
+- **Cloud-hosted multi-tenant abs.** Not the design. abs is your local
   process talking to your local tmux and your personal Telegram bot.
   Any "hosted" version would create the exact privacy / control problem
-  cldx exists to avoid.
+  abs exists to avoid.
 - **A non-GPL re-license for proprietary forks.** If you need a custom
   arrangement, open an issue. Default is GPL-3.0-or-later — share
   modifications back.
 - **Auto-approving destructive ops** (no matter how confident the LLM is).
   The safety floor is non-negotiable. You can edit `destructive_patterns:`
   to ADD entries, never to silently bypass them.
-- **Telemetry by default.** cldx never phones home. The session log
+- **Telemetry by default.** abs never phones home. The session log
   stays on your disk. The Telegram bot is yours.
 
 ---
 
 If something on this list excites you, **pick one and start the
-conversation**. cldx grows because real users say "here's the workflow
+conversation**. abs grows because real users say "here's the workflow
 this would unlock for me".

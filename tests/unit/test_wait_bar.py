@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from cldx.wait_bar import WaitResult, countdown_wait
+from abs.wait_bar import WaitResult, countdown_wait
 
 
 async def test_wait_bar_auto_approves_after_interval():

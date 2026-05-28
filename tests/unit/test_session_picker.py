@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.session_picker import (
+from abs.session_picker import (
     Pane,
     SessionPickerError,
     _auto_detect,
@@ -66,7 +66,7 @@ def test_auto_detect_finds_version_command_pane():
 
 def test_find_claude_panes_prefers_literal_claude_first():
     """find_claude_panes sorts literal `claude` ahead of node/version matches."""
-    from cldx.session_picker import find_claude_panes
+    from abs.session_picker import find_claude_panes
     panes = [
         Pane(target="0:0.0", current_command="node", title=""),
         Pane(target="1:0.0", current_command="claude", title=""),
@@ -83,7 +83,7 @@ def test_pick_session_uses_cli_arg_unchanged():
 
 def test_pick_session_auto_detect_raises_with_panes_listed(monkeypatch):
     monkeypatch.setattr(
-        "cldx.session_picker.list_panes",
+        "abs.session_picker.list_panes",
         lambda: [Pane(target="0:0.0", current_command="zsh", title="just a shell")],
     )
     with pytest.raises(SessionPickerError) as excinfo:
@@ -99,14 +99,14 @@ def test_pick_session_auto_detect_raises_with_panes_listed(monkeypatch):
 def test_find_claude_panes_returns_all_candidates(monkeypatch):
     """find_claude_panes returns the whole list of Claude-looking panes."""
     monkeypatch.setattr(
-        "cldx.session_picker.list_panes",
+        "abs.session_picker.list_panes",
         lambda: [
             Pane(target="0:0.0", current_command="zsh"),
             Pane(target="work:0.0", current_command="claude", title="✳"),
             Pane(target="play:0.0", current_command="2.1.150", title="✳ Code"),
         ],
     )
-    from cldx.session_picker import find_claude_panes
+    from abs.session_picker import find_claude_panes
     found = find_claude_panes()
     assert len(found) == 2
     # "claude" command should sort first.
@@ -115,7 +115,7 @@ def test_find_claude_panes_returns_all_candidates(monkeypatch):
 
 def test_auto_detect_returns_none_when_multiple_candidates():
     """With more than one candidate, _auto_detect must defer to the picker."""
-    from cldx.session_picker import _auto_detect
+    from abs.session_picker import _auto_detect
     panes = [
         Pane(target="a:0.0", current_command="claude", title=""),
         Pane(target="b:0.0", current_command="claude", title=""),
@@ -125,9 +125,9 @@ def test_auto_detect_returns_none_when_multiple_candidates():
 
 def test_pick_session_picks_via_interactive_when_multiple_claude_panes(monkeypatch):
     """Two Claude panes + --auto-detect → numbered picker scoped to them."""
-    from cldx.session_picker import pick_session
+    from abs.session_picker import pick_session
     monkeypatch.setattr(
-        "cldx.session_picker.list_panes",
+        "abs.session_picker.list_panes",
         lambda: [
             Pane(target="zsh:0.0", current_command="zsh"),
             Pane(target="claude-a:0.0", current_command="claude", title="✳"),
@@ -147,9 +147,9 @@ def test_pick_session_picks_via_interactive_when_multiple_claude_panes(monkeypat
 
 def test_pick_session_auto_detect_single_candidate_skips_picker(monkeypatch):
     """When there's exactly one Claude pane, --auto-detect picks it silently."""
-    from cldx.session_picker import pick_session
+    from abs.session_picker import pick_session
     monkeypatch.setattr(
-        "cldx.session_picker.list_panes",
+        "abs.session_picker.list_panes",
         lambda: [
             Pane(target="zsh:0.0", current_command="zsh"),
             Pane(target="claude:0.0", current_command="claude", title="✳"),

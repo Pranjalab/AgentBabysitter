@@ -8,7 +8,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from cldx.tool_call import ToolCall  # circular-safe under TYPE_CHECKING
+    from abs.tool_call import ToolCall  # circular-safe under TYPE_CHECKING
 
 
 class PromptType(str, Enum):
@@ -124,7 +124,7 @@ class PromptClassifier:
     """
 
     # Built-in completion signals — applied IN ADDITION to whatever the
-    # user's policy.yml specifies. This protects users whose ``~/.cldx/
+    # user's policy.yml specifies. This protects users whose ``~/.abs/
     # config/policy.yml`` predates the verb-rotation fix.
     #
     # The structural shape of Claude Code's end-of-turn line is:
@@ -179,7 +179,7 @@ class PromptClassifier:
         # take priority.
         match = self._first_match(self.patterns.approval_menu, tail)
         if match:
-            from cldx.tool_call import parse_tool_call as _parse_tool
+            from abs.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_MENU,
                 raw_text=match.group(0),
@@ -192,7 +192,7 @@ class PromptClassifier:
 
         match = self._first_match(self.patterns.approval_yn, tail)
         if match:
-            from cldx.tool_call import parse_tool_call as _parse_tool
+            from abs.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_YN,
                 raw_text=match.group(0),

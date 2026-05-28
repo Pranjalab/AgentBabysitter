@@ -1,7 +1,7 @@
 """Load and validate the agent persona from agent_name.yml.
 
-Looks up the user's override at ``~/.cldx/config/agent_name.yml`` first,
-falls back to the bundled default ``cldx/defaults/agent_name.yml``.
+Looks up the user's override at ``~/.abs/config/agent_name.yml`` first,
+falls back to the bundled default ``abs/defaults/agent_name.yml``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from cldx._paths import cldx_home
+from abs._paths import abs_home
 
 
 DEFAULT_LIMITS = {
@@ -91,17 +91,17 @@ class Agent:
         """Load an agent definition.
 
         Precedence (when ``path`` is None):
-            1. ``~/.cldx/config/agent_name.yml`` if it exists
+            1. ``~/.abs/config/agent_name.yml`` if it exists
             2. The bundled default
         """
         if path is not None:
             return cls._from_yaml(Path(path))
 
-        user_path = cldx_home() / "config" / "agent_name.yml"
+        user_path = abs_home() / "config" / "agent_name.yml"
         if user_path.exists():
             return cls._from_yaml(user_path)
 
-        bundled = Path(str(files("cldx") / "defaults" / "agent_name.yml"))
+        bundled = Path(str(files("abs") / "defaults" / "agent_name.yml"))
         if bundled.exists():
             return cls._from_yaml(bundled)
 

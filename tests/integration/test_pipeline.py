@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.policy_engine import PolicyDecision, PolicyEngine
-from cldx.prompt_classifier import PromptClassifier, PromptType
+from abs.policy_engine import PolicyDecision, PolicyEngine
+from abs.prompt_classifier import PromptClassifier, PromptType
 
 
 pytestmark = pytest.mark.integration

@@ -1,7 +1,7 @@
-"""Append-only event log for cldx sessions.
+"""Append-only event log for abs sessions.
 
-Each cldx run writes one JSONL file under
-``~/.cldx/sessions/<profile>/<timestamp>.jsonl`` (or wherever
+Each abs run writes one JSONL file under
+``~/.abs/sessions/<profile>/<timestamp>.jsonl`` (or wherever
 ``$CLDX_HOME`` points). Every classification, decision, action, and
 inbound/outbound Telegram message is one line.
 
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from cldx._paths import cldx_home
+from abs._paths import abs_home
 
 
 def _now_iso() -> str:
@@ -43,13 +43,13 @@ def _stamp_for_filename() -> str:
 
 def sessions_root() -> Path:
     """Root directory for all session logs. Created lazily."""
-    root = cldx_home() / "sessions"
+    root = abs_home() / "sessions"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 class SessionStore:
-    """Append-only JSONL writer for one cldx run.
+    """Append-only JSONL writer for one abs run.
 
     The file is opened lazily on the first ``log_event`` call, so creating
     a SessionStore is cheap and side-effect-free.
@@ -107,7 +107,7 @@ class SessionStore:
         self._fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")  # type: ignore[union-attr]
         self._event_count += 1
 
-    # Convenience helpers -- these are the canonical event kinds cldx writes.
+    # Convenience helpers -- these are the canonical event kinds abs writes.
 
     def log_snapshot(self, snapshot: str) -> None:
         self.log_event("snapshot", lines=snapshot.splitlines())

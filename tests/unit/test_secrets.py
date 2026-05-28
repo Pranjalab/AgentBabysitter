@@ -7,7 +7,7 @@ import stat
 
 import pytest
 
-from cldx.secrets import (
+from abs.secrets import (
     _parse_env_file,
     clear_secret,
     env_file_path,
@@ -21,9 +21,9 @@ from cldx.secrets import (
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
     # Wipe any secret env vars the test shell already had so we test
-    # cldx's behavior, not the parent environment.
+    # abs's behavior, not the parent environment.
     for k in (
         "ANTHROPIC_API_KEY",
         "TELEGRAM_BOT_TOKEN",
@@ -145,7 +145,7 @@ def test_load_into_environ_can_overwrite(isolated_home, monkeypatch):
 
 
 def test_load_into_environ_returns_empty_when_dir_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path / "does-not-exist"))
+    monkeypatch.setenv("ABS_HOME", str(tmp_path / "does-not-exist"))
     assert load_into_environ() == {}
 
 

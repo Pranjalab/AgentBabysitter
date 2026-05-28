@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.conversation import (
+from abs.conversation import (
     PendingApproval,
     extract_assistant_step,
     extract_pending_approval,

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
 
-from cldx.telegram_templates import error_message, help_message
+from abs.telegram_templates import error_message, help_message
 
 
 CommandHandler = Callable[[Any, str], Awaitable[str]]
@@ -44,7 +44,7 @@ async def cmd_status(bridge: Any, _args: str) -> str:
     pending = _pending_label(bridge) or "—"
     paused = "yes" if _is_paused(bridge) else "no"
     lines = [
-        "📋 *cldx — status*",
+        "📋 *Agent Babysitter — status*",
         "━" * 30,
         f"📺 Pane: `{pane}`",
         f"⚙️  Profile: {profile}",
@@ -63,14 +63,14 @@ async def cmd_status(bridge: Any, _args: str) -> str:
 
 async def cmd_panes(bridge: Any, _args: str) -> str:
     try:
-        from cldx.session_picker import list_panes
+        from abs.session_picker import list_panes
         panes = list_panes()
     except Exception as e:  # noqa: BLE001
         return error_message("could not list panes", str(e))
     if not panes:
         return "No tmux panes found (start one with `tmux new`)."
     active = getattr(bridge, "pane_target", "") or ""
-    lines = ["📺 *cldx — panes*", "━" * 30]
+    lines = ["📺 *Agent Babysitter — panes*", "━" * 30]
     for p in panes:
         marker = " ← active" if p.target == active else ""
         lines.append(f"  `{p.target}`  {p.current_command}{marker}")
@@ -208,7 +208,7 @@ def is_command(text: str) -> bool:
 def parse_command(text: str) -> tuple[str, str] | None:
     """Split ``"/profile yolo"`` → ``("profile", "yolo")``.
 
-    Returns None if the text isn't a known cldx command. Strips the
+    Returns None if the text isn't a known abs command. Strips the
     Telegram ``@BotName`` suffix that group chats add.
     """
     if not text or not text.startswith("/"):
@@ -224,7 +224,7 @@ async def dispatch(bridge: Any, text: str) -> str | None:
     """Execute the command in ``text`` against ``bridge``.
 
     Returns the reply string to send back, or ``None`` if ``text`` isn't
-    a recognised cldx command (caller should fall through to the
+    a recognised abs command (caller should fall through to the
     regular text-injection path).
     """
     parsed = parse_command(text)
@@ -292,7 +292,7 @@ def _set_paused(bridge: Any, value: bool) -> bool:
 
 async def _dispatch_reply(bridge: Any, kind: str) -> str:
     """Route /yes and /no through the same reply path as text replies."""
-    from cldx.telegram_bridge import ParsedReply  # local import: avoid cycle
+    from abs.telegram_bridge import ParsedReply  # local import: avoid cycle
     handler = getattr(bridge, "_telegram_reply_handler", None)
     if handler is None:
         return error_message("no reply handler on bridge")

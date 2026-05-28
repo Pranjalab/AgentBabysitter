@@ -1,4 +1,4 @@
-"""Interactive ``cldx setup`` wizards for Anthropic + Telegram credentials.
+"""Interactive ``abs setup`` wizards for Anthropic + Telegram credentials.
 
 All wizards take an injectable ``input_fn`` so tests can drive them
 without real stdin, and an injectable ``http_fn`` for the bits that
@@ -9,7 +9,7 @@ Design notes:
 - Anthropic key validation is opt-in (a tiny ``messages.create`` call).
 - Telegram chat ID is **auto-discovered** by polling ``getUpdates`` after
   the user sends any message to the new bot. No copy-pasting numbers.
-- All file writes go through ``cldx.secrets.save_secret``, which is
+- All file writes go through ``abs.secrets.save_secret``, which is
   atomic and chmods the file to ``0600``.
 - The default ``input_fn`` is paste-tolerant: on a real terminal we use
   prompt_toolkit (bracketed-paste mode, no 1KB limit), only falling back
@@ -31,7 +31,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from cldx.secrets import (
+from abs.secrets import (
     clear_secret,
     env_file_path,
     have_anthropic_key,
@@ -109,7 +109,7 @@ def run_anthropic_setup(
     console = console or Console()
     console.print(Panel(
         "[bold]Anthropic Claude API key[/bold]\n\n"
-        "Used by cldx to summarize Claude Code activity before sending\n"
+        "Used by abs to summarize Claude Code activity before sending\n"
         "to Telegram. Costs about [cyan]$0.0001 per summary[/cyan] with Haiku.\n\n"
         "If you don't have a key:\n"
         "  1. Go to [cyan]https://console.anthropic.com/settings/keys[/cyan]\n"
@@ -146,7 +146,7 @@ def run_anthropic_setup(
             console.print(f"[green]✓ {msg}[/green]")
         else:
             console.print(f"[red]Test failed: {msg}[/red]")
-            console.print("[yellow]Key was saved anyway — re-run `cldx setup anthropic` to replace it.[/yellow]")
+            console.print("[yellow]Key was saved anyway — re-run `abs setup anthropic` to replace it.[/yellow]")
 
     return True
 
@@ -253,12 +253,12 @@ def run_bedrock_setup(
     Sets ``AWS_BEARER_TOKEN_BEDROCK`` and an ``AWS_REGION`` for the
     Bedrock client. Optionally tests with a tiny ``invoke_model`` call.
     On success, asks the user whether to make Bedrock the active LLM
-    backend (rewrites ``~/.cldx/config/agent_name.yml``).
+    backend (rewrites ``~/.abs/config/agent_name.yml``).
     """
     console = console or Console()
     console.print(Panel(
         "[bold]AWS Bedrock setup[/bold]\n\n"
-        "Lets cldx run Claude (or other models) through your AWS account\n"
+        "Lets abs run Claude (or other models) through your AWS account\n"
         "instead of using a direct Anthropic API key.\n\n"
         "If you don't have a Bedrock API key:\n"
         "  1. Sign in to the [cyan]AWS Console[/cyan]\n"
@@ -365,7 +365,7 @@ def _default_bedrock_test(token: str, region: str, model_id: str) -> tuple[bool,
     try:
         import boto3  # type: ignore[import-not-found]
     except ImportError:
-        return False, "boto3 not installed (pip install 'cldx[bedrock]')"
+        return False, "boto3 not installed (pip install 'abs[bedrock]')"
     try:
         # boto3 picks up AWS_BEARER_TOKEN_BEDROCK automatically.
         client = boto3.client("bedrock-runtime", region_name=region)
@@ -406,7 +406,7 @@ def run_gemini_setup(
         "to summarize Claude Code activity for Telegram.\n\n"
         "Get a key:\n"
         "  1. Visit [cyan]https://aistudio.google.com/apikey[/cyan]\n"
-        "  2. Create an API key (free tier is plenty for cldx summaries)\n"
+        "  2. Create an API key (free tier is plenty for abs summaries)\n"
         "  3. Copy it",
         title="[bold cyan]Gemini setup[/bold cyan]",
         border_style="cyan",
@@ -446,7 +446,7 @@ def run_gemini_setup(
         else:
             console.print(f"[red]Test failed: {msg}[/red]")
             console.print(
-                "[yellow]Saved anyway — re-run `cldx setup gemini` to fix.[/yellow]"
+                "[yellow]Saved anyway — re-run `abs setup gemini` to fix.[/yellow]"
             )
 
     if _confirm("Make Gemini the active LLM backend in agent_name.yml?",
@@ -460,7 +460,7 @@ def _default_gemini_test(api_key: str, model_id: str) -> tuple[bool, str]:
         from google import genai  # type: ignore[import-not-found]
         from google.genai import types  # type: ignore[import-not-found]
     except ImportError:
-        return False, "google-genai not installed (pip install 'cldx[gemini]')"
+        return False, "google-genai not installed (pip install 'abs[gemini]')"
     try:
         client = genai.Client(api_key=api_key)
         resp = client.models.generate_content(
@@ -483,7 +483,7 @@ def run_llm_setup(
     """Interactive 'which LLM do you want?' picker."""
     console = console or Console()
     console.print(Panel(
-        "Pick an LLM backend for cldx's Telegram summaries:\n\n"
+        "Pick an LLM backend for abs's Telegram summaries:\n\n"
         "  [cyan]1.[/cyan] Anthropic (direct API key)         — easiest, best quality\n"
         "  [cyan]2.[/cyan] AWS Bedrock (bearer token + boto3) — use your AWS account\n"
         "  [cyan]3.[/cyan] Google Gemini (gemini-2.0-flash)   — free tier available\n"
@@ -510,7 +510,7 @@ def run_disable_llm(
 ) -> bool:
     """Persistently disable the LLM step — Telegram gets the raw pane.
 
-    Writes ``model: none:raw`` to ``~/.cldx/config/agent_name.yml``. The
+    Writes ``model: none:raw`` to ``~/.abs/config/agent_name.yml``. The
     summarizer recognises that prefix and short-circuits — no upstream
     API call is made, so there's nothing to fail or pay for.
     """
@@ -522,7 +522,7 @@ def run_disable_llm(
         "No upstream API call is made. Use this if your Anthropic /\n"
         "Bedrock / Gemini access isn't set up, has billing issues, or\n"
         "you just don't want a third party in the loop.\n\n"
-        "You can re-enable any time with [cyan]cldx setup llm[/cyan].",
+        "You can re-enable any time with [cyan]abs setup llm[/cyan].",
         title="[bold cyan]LLM disabled mode[/bold cyan]",
         border_style="cyan",
     ))
@@ -545,7 +545,7 @@ def _set_agent_model(
     aws_region: str | None = None,
     console: Console | None = None,
 ) -> None:
-    """Rewrite ``~/.cldx/config/agent_name.yml`` with a new ``model:`` field.
+    """Rewrite ``~/.abs/config/agent_name.yml`` with a new ``model:`` field.
 
     Preserves ``name``, ``persona``, ``api_key_env``, and ``limits`` if they
     were set; pulls any missing fields from the bundled default agent.
@@ -553,7 +553,7 @@ def _set_agent_model(
     form by ``yaml.safe_dump``.
     """
     import yaml as _yaml
-    from cldx.agent import Agent
+    from abs.agent import Agent
 
     console = console or Console()
     agent = Agent.load()  # current state (file or bundled default)
@@ -588,7 +588,7 @@ def run_telegram_setup(
     console = console or Console()
     console.print(Panel(
         "[bold]Telegram bot setup[/bold]\n\n"
-        "Lets cldx ask for approvals when you're away from your laptop.\n\n"
+        "Lets abs ask for approvals when you're away from your laptop.\n\n"
         "[bold]Step 1 — create a bot:[/bold]\n"
         "  1. Open Telegram and message [cyan]@BotFather[/cyan]\n"
         "  2. Send [cyan]/newbot[/cyan]\n"
@@ -715,11 +715,11 @@ def _telegram_send_test(
 ) -> bool:
     """Sends two messages: a short connection ping followed by the warm
     greeting that orients the user to all available commands."""
-    from cldx.telegram_templates import greeting_message
+    from abs.telegram_templates import greeting_message
 
     ping_body = urllib.parse.urlencode({
         "chat_id": chat_id,
-        "text": "✓ cldx is connected.",
+        "text": "✓ Agent Babysitter is connected.",
     }).encode()
     try:
         data = http_fn(f"https://api.telegram.org/bot{token}/sendMessage", ping_body, 10.0)
@@ -755,7 +755,7 @@ def _telegram_send_test(
         f"[green]✓ Sent welcome message — check @{bot_username} on Telegram.[/green]"
     )
     console.print(
-        "[dim]Tip: send /help in Telegram to see what cldx can do from chat.[/dim]"
+        "[dim]Tip: send /help in Telegram to see what Agent Babysitter can do from chat.[/dim]"
     )
     return True
 
@@ -770,11 +770,11 @@ def run_full_setup(
     """Run LLM-picker + Telegram in sequence, then show the final config."""
     console = console or Console()
     console.print(Panel(
-        "Let's set up the optional integrations cldx can use:\n\n"
+        "Let's set up the optional integrations abs can use:\n\n"
         "  • [cyan]LLM backend[/cyan] — Anthropic / AWS Bedrock / Google Gemini\n"
         "                  (used to summarize Claude activity for Telegram)\n"
         "  • [cyan]Telegram bot[/cyan] — for remote approvals from your phone",
-        title="[bold cyan]cldx setup[/bold cyan]",
+        title="[bold cyan]abs setup[/bold cyan]",
         border_style="cyan",
     ))
     run_llm_setup(console=console, input_fn=input_fn)
@@ -785,8 +785,8 @@ def run_full_setup(
 
 
 def show_config(console: Console | None = None) -> None:
-    """Print a masked view of every secret cldx currently knows about."""
-    from cldx.agent import Agent
+    """Print a masked view of every secret abs currently knows about."""
+    from abs.agent import Agent
 
     console = console or Console()
 
@@ -831,7 +831,7 @@ def show_config(console: Console | None = None) -> None:
     config_dir = env_file_path("anthropic").parent
     console.print(f"[dim]Config dir: {config_dir}[/dim]")
     console.print(
-        "[dim]Re-run any wizard with: cldx setup [llm|anthropic|bedrock|gemini|telegram|all][/dim]"
+        "[dim]Re-run any wizard with: abs setup [llm|anthropic|bedrock|gemini|telegram|all][/dim]"
     )
 
 

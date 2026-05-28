@@ -1,4 +1,4 @@
-"""`cldx test llm` end-to-end smoke runner."""
+"""`abs test llm` end-to-end smoke runner."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from rich.console import Console
 
-from cldx.agent import Agent
-from cldx.llm_test import SAMPLE_CONTEXTS, run_llm_test
-from cldx.summarizer import SummaryResult
+from abs.agent import Agent
+from abs.llm_test import SAMPLE_CONTEXTS, run_llm_test
+from abs.summarizer import SummaryResult
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ async def test_llm_test_returns_zero_when_all_modes_succeed(cap_console):
     async def fake_status(mode, ctx, ag):
         return SummaryResult(text=f"summary for {mode}", summarized=True)
 
-    with patch("cldx.llm_test.summarize_with_status", side_effect=fake_status):
+    with patch("abs.llm_test.summarize_with_status", side_effect=fake_status):
         rc = await run_llm_test(console=console, agent=agent)
     assert rc == 0
     out = buf.getvalue()
@@ -48,7 +48,7 @@ async def test_llm_test_returns_one_when_fallback_detected(cap_console):
             )
         return SummaryResult(text="real summary", summarized=True)
 
-    with patch("cldx.llm_test.summarize_with_status", side_effect=fake_status):
+    with patch("abs.llm_test.summarize_with_status", side_effect=fake_status):
         rc = await run_llm_test(console=console, agent=agent)
     assert rc == 1
     out = buf.getvalue()
@@ -65,7 +65,7 @@ async def test_llm_test_returns_one_on_exception(cap_console):
     async def fake_status(mode, ctx, ag):
         raise RuntimeError("network down")
 
-    with patch("cldx.llm_test.summarize_with_status", side_effect=fake_status):
+    with patch("abs.llm_test.summarize_with_status", side_effect=fake_status):
         rc = await run_llm_test(console=console, agent=agent)
     assert rc == 1
     assert "network down" in buf.getvalue()
@@ -88,7 +88,7 @@ async def test_llm_test_header_shows_backend_and_model(cap_console):
     async def fake_status(mode, ctx, ag):
         return SummaryResult(text="ok", summarized=True)
 
-    with patch("cldx.llm_test.summarize_with_status", side_effect=fake_status):
+    with patch("abs.llm_test.summarize_with_status", side_effect=fake_status):
         await run_llm_test(console=console, agent=agent)
     out = buf.getvalue()
     assert "bedrock" in out

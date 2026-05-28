@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cldx.prompt_classifier import PromptType
-from cldx.session_limit import SessionLimit
+from abs.prompt_classifier import PromptType
+from abs.session_limit import SessionLimit
 from datetime import datetime, timezone
 
 
@@ -85,7 +85,7 @@ async def test_telegram_text_inject_clears_completion_lock(tmp_path, monkeypatch
       21:18:27  TERMINAL hi  → reply (terminal path clears the lock)
       21:18:44  Telegram Hi  → silent (lock held again)
     """
-    from cldx.telegram_bridge import ParsedReply
+    from abs.telegram_bridge import ParsedReply
 
     ui = _make_bridge_ui(tmp_path, monkeypatch)
     # Lock the panel as if a previous task just completed.
@@ -120,7 +120,7 @@ async def test_telegram_digit_reply_forwarded_when_nothing_pending(
     1. foo  2. bar  3. Both". User replied "1" via Telegram. The
     old code parsed it as kind=digit, saw self.pending is None, and
     logged "ignored". Fix: fall through to text-inject."""
-    from cldx.telegram_bridge import ParsedReply
+    from abs.telegram_bridge import ParsedReply
 
     ui = _make_bridge_ui(tmp_path, monkeypatch)
     ui.pending = None  # No active approval
@@ -137,7 +137,7 @@ async def test_telegram_yes_reply_forwarded_when_nothing_pending(
 ):
     """Same rule for 'y'/'yes'/'ok' — when nothing's pending these are
     just words. Forward them to Claude as text."""
-    from cldx.telegram_bridge import ParsedReply
+    from abs.telegram_bridge import ParsedReply
 
     ui = _make_bridge_ui(tmp_path, monkeypatch)
     ui.pending = None
@@ -151,7 +151,7 @@ async def test_telegram_yes_reply_forwarded_when_nothing_pending(
 async def test_telegram_no_reply_forwarded_when_nothing_pending(
     tmp_path, monkeypatch
 ):
-    from cldx.telegram_bridge import ParsedReply
+    from abs.telegram_bridge import ParsedReply
 
     ui = _make_bridge_ui(tmp_path, monkeypatch)
     ui.pending = None
@@ -166,8 +166,8 @@ async def test_telegram_digit_still_acts_on_pending_menu(tmp_path, monkeypatch):
     """The fall-through must NOT regress the original behaviour — when
     a real approval menu IS pending, a digit reply must pick that
     menu option (not text-inject the digit)."""
-    from cldx.telegram_bridge import ParsedReply
-    from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+    from abs.telegram_bridge import ParsedReply
+    from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
     ui = _make_bridge_ui(tmp_path, monkeypatch)
     ui.pending = ClassifiedPrompt(
@@ -190,7 +190,7 @@ async def test_terminal_and_telegram_text_inject_clear_lock_symmetrically(
     otherwise the user's experience differs by channel (silent on
     Telegram, working in terminal), which is exactly the intermittent
     behaviour the user reported."""
-    from cldx.telegram_bridge import ParsedReply
+    from abs.telegram_bridge import ParsedReply
 
     # Round 1: terminal path.
     ui_term = _make_bridge_ui(tmp_path, monkeypatch)
@@ -257,7 +257,7 @@ def test_header_combines_telegram_and_reset(tmp_path, monkeypatch):
 
 
 def test_header_preserves_pending_suffix(tmp_path, monkeypatch):
-    from cldx.prompt_classifier import ClassifiedPrompt
+    from abs.prompt_classifier import ClassifiedPrompt
     ui = _make_bridge_ui(tmp_path, monkeypatch)
     ui.pending = ClassifiedPrompt(
         type=PromptType.APPROVAL_YN, extracted_command="Bash(ls)",

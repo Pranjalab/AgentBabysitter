@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.policy_engine import PolicyEngine
-from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+from abs.policy_engine import PolicyEngine
+from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
 
 def _prompt(cmd: str) -> ClassifiedPrompt:

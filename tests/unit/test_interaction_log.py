@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cldx.interaction_log import InteractionLog, CHANNELS, logs_root
+from abs.interaction_log import InteractionLog, CHANNELS, logs_root
 
 
 def test_path_is_lazy(tmp_path: Path):
@@ -21,7 +21,7 @@ def test_path_is_lazy(tmp_path: Path):
 def test_first_write_creates_dated_dir(tmp_path: Path):
     log = InteractionLog(profile="auto-approve", pane="0:0.0", root=tmp_path)
     log.cldx_note("hello")
-    # ~/.cldx/logs/YYYY-MM-DD/HH-MM-SS_auto-approve_0_0_0.log
+    # ~/.abs/logs/YYYY-MM-DD/HH-MM-SS_auto-approve_0_0_0.log
     files = list(tmp_path.rglob("*.log"))
     assert len(files) == 1
     p = files[0]
@@ -38,7 +38,7 @@ def test_header_and_footer_lines(tmp_path: Path):
     log.cldx_note("ok")
     log.close()
     content = log.path.read_text()
-    assert content.startswith("# cldx session log")
+    assert content.startswith("# abs session log")
     assert "profile=default" in content
     assert content.rstrip().endswith("events")  # footer line includes count
 
@@ -86,7 +86,7 @@ def test_multiline_message_indents_continuations(tmp_path: Path):
 
 def test_channel_canonical_set():
     """Documented channels stay stable so external tooling can grep on them."""
-    assert set(CHANNELS) == {"terminal", "telegram", "cldx", "claude"}
+    assert set(CHANNELS) == {"terminal", "telegram", "abs", "claude"}
 
 
 def test_pane_chars_sanitised(tmp_path: Path):
@@ -96,8 +96,8 @@ def test_pane_chars_sanitised(tmp_path: Path):
 
 
 def test_logs_root_uses_home(monkeypatch, tmp_path: Path):
-    """The default root sits under ``$CLDX_HOME/logs``."""
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    """The default root sits under ``$ABS_HOME/logs``."""
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
     root = logs_root()
     assert root == tmp_path / "logs"
     assert root.exists()

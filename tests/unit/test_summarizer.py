@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cldx.agent import Agent
-from cldx.summarizer import (
+from abs.agent import Agent
+from abs.summarizer import (
     MODE_INSTRUCTIONS,
     SummaryResult,
     _fallback,
@@ -71,7 +71,7 @@ async def test_summarize_falls_back_on_api_error(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
     agent = Agent.default()
 
-    with patch("cldx.summarizer._summarize_with_anthropic",
+    with patch("abs.summarizer._summarize_with_anthropic",
                side_effect=RuntimeError("boom")):
         status = await summarize_with_status("prompt_summary", "ctx", agent)
     assert status.summarized is False
@@ -344,7 +344,7 @@ def test_agent_backend_for_ollama_prefix(tmp_path):
 
 def test_agent_validates_prefixed_model_must_have_id():
     """A prefix with empty body must raise."""
-    from cldx.agent import AgentError
+    from abs.agent import AgentError
     import yaml
     import tempfile
     with tempfile.NamedTemporaryFile(suffix=".yml", mode="w", delete=False) as f:

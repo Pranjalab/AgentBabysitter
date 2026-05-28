@@ -8,8 +8,8 @@ from io import StringIO
 import pytest
 from rich.console import Console
 
-from cldx.secrets import env_file_path
-from cldx.setup_wizard import (
+from abs.secrets import env_file_path
+from abs.setup_wizard import (
     run_anthropic_setup,
     run_bedrock_setup,
     run_full_setup,
@@ -22,7 +22,7 @@ from cldx.setup_wizard import (
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
     for k in (
         "ANTHROPIC_API_KEY",
         "TELEGRAM_BOT_TOKEN",
@@ -277,7 +277,7 @@ def test_bedrock_wizard_happy_path(isolated_home, cap_console):
     assert os.environ["AWS_BEARER_TOKEN_BEDROCK"] == saved_token
     assert os.environ["AWS_REGION"] == "ap-south-1"
     # File should be on disk too.
-    from cldx.secrets import env_file_path
+    from abs.secrets import env_file_path
     assert env_file_path("bedrock").exists()
 
 
@@ -479,8 +479,8 @@ def test_llm_picker_rejects_invalid_choice(isolated_home, cap_console):
 
 
 def test_disable_llm_wizard_writes_none_raw(isolated_home, cap_console):
-    """`cldx setup none` rewrites agent_name.yml with model: none:raw."""
-    from cldx.setup_wizard import run_disable_llm
+    """`abs setup none` rewrites agent_name.yml with model: none:raw."""
+    from abs.setup_wizard import run_disable_llm
     console, _ = cap_console
     ok = run_disable_llm(
         console=console,
@@ -496,7 +496,7 @@ def test_disable_llm_wizard_writes_none_raw(isolated_home, cap_console):
 
 def test_disable_llm_wizard_aborts_on_no(isolated_home, cap_console):
     """Saying 'no' must NOT touch agent_name.yml."""
-    from cldx.setup_wizard import run_disable_llm
+    from abs.setup_wizard import run_disable_llm
     console, _ = cap_console
     ok = run_disable_llm(
         console=console,
@@ -526,14 +526,14 @@ def test_bedrock_wizard_accepts_multi_kilobyte_token(isolated_home, cap_console)
     assert ok is True
     assert os.environ["AWS_BEARER_TOKEN_BEDROCK"] == long_token
     # Verify the file on disk also holds the full value.
-    from cldx.secrets import _parse_env_file, env_file_path
+    from abs.secrets import _parse_env_file, env_file_path
     saved = _parse_env_file(env_file_path("bedrock"))
     assert saved["AWS_BEARER_TOKEN_BEDROCK"] == long_token
 
 
 def test_bedrock_default_model_is_region_aware():
     """Cross-region inference profile prefix must match the AWS region."""
-    from cldx.setup_wizard import _bedrock_default_model_for_region
+    from abs.setup_wizard import _bedrock_default_model_for_region
 
     assert _bedrock_default_model_for_region("us-east-1").startswith("us.")
     assert _bedrock_default_model_for_region("us-west-2").startswith("us.")
@@ -585,7 +585,7 @@ def test_bedrock_test_failure_lists_available_when_validation_error(
         "apac.anthropic.claude-sonnet-4-6-20251001-v1:0",
     ]
     monkeypatch.setattr(
-        "cldx.setup_wizard._bedrock_list_available_models",
+        "abs.setup_wizard._bedrock_list_available_models",
         lambda region, max_results=8: available,
     )
 
@@ -627,7 +627,7 @@ def test_bedrock_test_failure_lists_available_when_validation_error(
 def test_paste_friendly_input_falls_back_when_stdin_not_a_tty(monkeypatch, isolated_home):
     """Pipe-mode (no TTY) must fall through to plain input()."""
     from io import StringIO
-    from cldx.setup_wizard import paste_friendly_input
+    from abs.setup_wizard import paste_friendly_input
     import sys
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)

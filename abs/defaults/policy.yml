@@ -1,6 +1,6 @@
 active_profile: auto-approve
 
-# --- Detection (how cldx recognizes the *type* of prompt Claude is asking) ---
+# --- Detection (how abs recognizes the *type* of prompt Claude is asking) ---
 detection:
   approval_yn_patterns:
     - "\\(y/n\\)"

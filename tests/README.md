@@ -1,6 +1,6 @@
 # Tests
 
-This directory holds the full test suite for cldx — both the
+This directory holds the full test suite for Agent Babysitter — both the
 tests covering Phase 1 (what's already shipped) and **skeleton files
 for every upcoming phase** so each new feature has a place to drop its
 tests as it's built.

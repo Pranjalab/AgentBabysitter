@@ -3,14 +3,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cldx"
+name = "agent-babysitter"
 version = "1.0.4"
-description = "Second-layer terminal for Claude Code — auto-approves safe tool calls, bridges approvals to Telegram so you can step away from your laptop."
+description = "Agent Babysitter monitors your AI coding agent — Claude Code, Gemini CLI, Codex — so you don't have to. A local LLM enforces your policy, approves safe moves, escalates risky ones to your phone."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "Pranjalab" }]
-keywords = ["tmux", "claude", "cli", "automation", "approval", "bridge"]
+keywords = ["tmux", "claude", "gemini", "codex", "agent", "babysitter", "automation", "approval", "telegram", "policy"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -44,16 +44,16 @@ gemini = ["google-genai>=0.3"]
 all-llm = ["boto3>=1.34", "google-genai>=0.3"]
 
 [project.urls]
-Homepage = "https://github.com/Pranjalab/cldx"
-Repository = "https://github.com/Pranjalab/cldx"
-Issues = "https://github.com/Pranjalab/cldx/issues"
+Homepage = "https://github.com/Pranjalab/AgentBabysitter"
+Repository = "https://github.com/Pranjalab/AgentBabysitter"
+Issues = "https://github.com/Pranjalab/AgentBabysitter/issues"
 
 [project.scripts]
-cldx = "cldx.cli:main"
+abs = "abs.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["cldx*"]
+include = ["abs*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-cldx = ["defaults/*.yml", "defaults/*.yaml"]
+abs = ["defaults/*.yml", "defaults/*.yaml"]

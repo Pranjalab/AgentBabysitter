@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cldx.agent import Agent, AgentError, DEFAULT_LIMITS
+from abs.agent import Agent, AgentError, DEFAULT_LIMITS
 
 
 def test_agent_default_factory():
@@ -39,14 +39,14 @@ def test_agent_loads_from_yaml(tmp_path):
 
 def test_agent_load_falls_back_to_bundled_default_when_missing(monkeypatch, tmp_path):
     """If no user agent_name.yml exists, load() returns the bundled default."""
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
     a = Agent.load()
     # Bundled default has name=Sentinel.
     assert a.name == "Sentinel"
 
 
 def test_agent_load_uses_user_override(monkeypatch, tmp_path):
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "agent_name.yml").write_text(yaml.safe_dump({

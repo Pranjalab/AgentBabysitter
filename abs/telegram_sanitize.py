@@ -26,7 +26,7 @@ import re
 
 # --- character classes ----------------------------------------------------
 
-# All the box / block / banner glyphs the cldx + Claude Code UIs use.
+# All the box / block / banner glyphs the abs + Claude Code UIs use.
 _BOX_CHARS = set("─━│┌┐└┘╭╮╰╯┃═╔╗╚╝╠╣╦╩╬▐▛▜▝█▏▕▎▍▌▋▊▉▒░▓")
 
 # ANSI CSI escape sequences (colour, cursor moves, …).
@@ -47,7 +47,7 @@ _CHROME_LINE_PATTERNS = (
 # leaving regular text alone.
 _DECORATION_THRESHOLD = 0.5
 
-# Token marker cldx itself injects in some message paths.
+# Token marker abs itself injects in some message paths.
 _UNSUMMARIZED_PREFIX_RE = re.compile(r"^\s*\[unsummarized[^\]]*\]\s*", re.IGNORECASE)
 
 

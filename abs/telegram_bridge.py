@@ -1,6 +1,6 @@
 """Telegram bridge — outbound notifications + inbound reply routing.
 
-When configured (``~/.cldx/config/telegram.env``), cldx will:
+When configured (``~/.abs/config/telegram.env``), abs will:
 
 - Send a summary to your chat when a policy decision needs human input
   (``ESCALATE_TELEGRAM`` or a destructive op that bypassed the wait bar).
@@ -23,13 +23,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from cldx._paths import cldx_home
-from cldx.agent import Agent
-from cldx.policy_engine import DecisionResult
-from cldx.prompt_classifier import ClassifiedPrompt
-from cldx.summarizer import summarize_with_status
-from cldx.telegram_commands import dispatch as dispatch_command
-from cldx.telegram_templates import (
+from abs._paths import abs_home
+from abs.agent import Agent
+from abs.policy_engine import DecisionResult
+from abs.prompt_classifier import ClassifiedPrompt
+from abs.summarizer import summarize_with_status
+from abs.telegram_commands import dispatch as dispatch_command
+from abs.telegram_templates import (
     ApprovalCard,
     CompletionCard,
     EscalationCard,
@@ -54,8 +54,8 @@ class TelegramConfig:
     def from_environ(cls) -> "TelegramConfig | None":
         """Read from ``os.environ``. Returns None if either var is unset.
 
-        Pair with ``cldx.secrets.load_into_environ()`` at startup so the
-        ``~/.cldx/config/telegram.env`` file is automatically reachable.
+        Pair with ``abs.secrets.load_into_environ()`` at startup so the
+        ``~/.abs/config/telegram.env`` file is automatically reachable.
         """
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         chat = os.environ.get("TELEGRAM_CHAT_ID")
@@ -72,7 +72,7 @@ class TelegramConfig:
 
     @classmethod
     def from_env_file(cls, path: Path | None = None) -> "TelegramConfig | None":
-        """Read ``~/.cldx/config/telegram.env``. Returns None if unconfigured.
+        """Read ``~/.abs/config/telegram.env``. Returns None if unconfigured.
 
         Expected format::
 
@@ -81,7 +81,7 @@ class TelegramConfig:
             APPROVAL_TIMEOUT_SECONDS=600
             TIMEOUT_ACTION=auto_no
         """
-        path = path or (cldx_home() / "config" / "telegram.env")
+        path = path or (abs_home() / "config" / "telegram.env")
         if not path.exists():
             return None
         values: dict[str, str] = {}
@@ -190,13 +190,25 @@ class TelegramBridge:
             return self._bot_factory(self.config.bot_token)
         # Lazy import so the SDK only needs to be installed when actually used.
         from telegram.ext import Application  # type: ignore[import-not-found]
-        return Application.builder().token(self.config.bot_token).build()
+        # PTB's default timeouts (5 s connect, 5 s read) are too tight for
+        # higher-latency connections — start_polling()'s initial getMe/getUpdates
+        # calls fail with TimedOut before the bridge is even up.  Use 30 s here
+        # so a slow first connection still succeeds.
+        return (
+            Application.builder()
+            .token(self.config.bot_token)
+            .connect_timeout(30)
+            .read_timeout(30)
+            .write_timeout(30)
+            .pool_timeout(10)
+            .build()
+        )
 
     async def start(self) -> None:
         self._app = self._make_app()
         # Wire two handlers:
         #   1. CommandHandler — every ``/command`` we recognise routes
-        #      to ``cldx.telegram_commands.dispatch``. Crucially these
+        #      to ``abs.telegram_commands.dispatch``. Crucially these
         #      do NOT get injected into Claude Code.
         #   2. MessageHandler — plain text (no ``/`` prefix) is parsed
         #      as a reply: y / n / digit / text → goes into the pane.
@@ -205,7 +217,7 @@ class TelegramBridge:
             MessageHandler,
             filters,
         )
-        from cldx.telegram_commands import COMMANDS as _COMMANDS
+        from abs.telegram_commands import COMMANDS as _COMMANDS
 
         for name in _COMMANDS:
             self._app.add_handler(CommandHandler(name, self._on_telegram_command))
@@ -321,7 +333,7 @@ class TelegramBridge:
     # --- inbound ---
 
     async def _on_telegram_message(self, update, context) -> None:  # noqa: ANN001
-        # Auth boundary: only the configured chat_id may control cldx.
+        # Auth boundary: only the configured chat_id may control abs.
         incoming_chat_id = str(update.effective_chat.id)
         if incoming_chat_id != str(self.config.chat_id):
             return
@@ -338,7 +350,7 @@ class TelegramBridge:
                 self._pending_prompt = None
 
     async def _on_telegram_command(self, update, context) -> None:  # noqa: ANN001
-        """Slash-command path — these are cldx-only and never get
+        """Slash-command path — these are abs-only and never get
         injected into Claude Code."""
         incoming_chat_id = str(update.effective_chat.id)
         if incoming_chat_id != str(self.config.chat_id):

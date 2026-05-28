@@ -1,14 +1,14 @@
-"""Plain-text interaction log for one cldx run.
+"""Plain-text interaction log for one abs run.
 
-Complements ``cldx.session_store`` (which writes a machine-replayable
+Complements ``abs.session_store`` (which writes a machine-replayable
 JSONL). The interaction log is what you ``cat`` or ``tail -f`` when you
 want to *read* what happened in a session — every keystroke the user
-typed, every message Telegram delivered, every decision cldx made,
+typed, every message Telegram delivered, every decision abs made,
 and every chunk of pane output Claude produced.
 
 Layout::
 
-    ~/.cldx/logs/
+    ~/.abs/logs/
         2026-05-27/
             14-32-15_auto-approve_0-0.0.log
 
@@ -20,8 +20,8 @@ Each line uses a fixed-width prefix so grep / column-mode editors can
 filter cleanly::
 
     [2026-05-27T14:32:15Z] terminal-in   y
-    [2026-05-27T14:32:15Z] cldx-decision Auto-approved Bash(ls)
-    [2026-05-27T14:32:15Z] cldx-action   sent 'y'
+    [2026-05-27T14:32:15Z] abs-decision Auto-approved Bash(ls)
+    [2026-05-27T14:32:15Z] abs-action   sent 'y'
     [2026-05-27T14:32:30Z] telegram-out  approval needed: Bash(rm -rf /tmp)
     [2026-05-27T14:32:42Z] telegram-in   y
     [2026-05-27T14:33:01Z] claude-out    ⏺ Bash(rm -rf /tmp) → Done.
@@ -37,14 +37,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from cldx._paths import cldx_home
+from abs._paths import abs_home
 
 
 _SAFE = re.compile(r"[^0-9A-Za-z_\-]")
 
 # Channels recognised by ``log()``. Kept open-set in code — this tuple
 # is just the canonical list for tests and documentation.
-CHANNELS = ("terminal", "telegram", "cldx", "claude")
+CHANNELS = ("terminal", "telegram", "abs", "claude")
 
 
 def _now_iso_z() -> str:
@@ -59,13 +59,13 @@ def _safe(value: str) -> str:
 
 def logs_root() -> Path:
     """Root directory for all interaction logs. Created lazily."""
-    root = cldx_home() / "logs"
+    root = abs_home() / "logs"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 class InteractionLog:
-    """One-file plain-text log of a single cldx run.
+    """One-file plain-text log of a single abs run.
 
     Parameters
     ----------
@@ -78,11 +78,11 @@ class InteractionLog:
         filename. ``None`` for off-pane invocations.
     root:
         Override the logs root. Tests use a temp dir; the default is
-        ``~/.cldx/logs``.
+        ``~/.abs/logs``.
     """
 
     # Width of the ``channel-direction`` column. Picked so the longest
-    # canonical tag (``cldx-decision``, 13 chars) still has one trailing
+    # canonical tag (``abs-decision``, 13 chars) still has one trailing
     # space before the message starts.
     _TAG_WIDTH = 14
 
@@ -125,7 +125,7 @@ class InteractionLog:
             # crash-mid-run still leaves a useful trailing partial line.
             self._fh = open(self.path, "a", buffering=1, encoding="utf-8")
             header = (
-                f"# cldx session log — profile={self.profile} "
+                f"# abs session log — profile={self.profile} "
                 f"pane={self.pane or '-'} started={_now_iso_z()}\n"
             )
             self._fh.write(header)
@@ -152,7 +152,7 @@ class InteractionLog:
 
         ``channel`` is one of ``CHANNELS`` (e.g. ``"telegram"``);
         ``direction`` is ``"in"`` / ``"out"`` / a verb like ``"decision"`` /
-        ``"action"`` for cldx-originated events.
+        ``"action"`` for abs-originated events.
 
         Newlines in ``message`` are preserved but continuation lines are
         indented two spaces so the prefix column stays scannable.
@@ -183,11 +183,11 @@ class InteractionLog:
     # human-readable mirror.
 
     def terminal_in(self, message: str) -> None:
-        """User typed something in the cldx terminal."""
+        """User typed something in the abs terminal."""
         self.log("terminal", "in", message)
 
     def terminal_out(self, message: str) -> None:
-        """cldx wrote something to the user's terminal (panels, prompts)."""
+        """abs wrote something to the user's terminal (panels, prompts)."""
         self.log("terminal", "out", message)
 
     def telegram_in(self, message: str) -> None:
@@ -195,20 +195,20 @@ class InteractionLog:
         self.log("telegram", "in", message)
 
     def telegram_out(self, message: str) -> None:
-        """cldx pushed a message to the Telegram chat."""
+        """abs pushed a message to the Telegram chat."""
         self.log("telegram", "out", message)
 
     def cldx_decision(self, message: str) -> None:
         """A policy/engine decision was made."""
-        self.log("cldx", "decision", message)
+        self.log("abs", "decision", message)
 
     def cldx_action(self, message: str) -> None:
-        """cldx sent keys/text into the tmux pane."""
-        self.log("cldx", "action", message)
+        """abs sent keys/text into the tmux pane."""
+        self.log("abs", "action", message)
 
     def cldx_note(self, message: str) -> None:
         """Free-form note (warnings, lifecycle, errors)."""
-        self.log("cldx", "note", message)
+        self.log("abs", "note", message)
 
     def claude_out(self, message: str) -> None:
         """A chunk of Claude's pane output was captured."""

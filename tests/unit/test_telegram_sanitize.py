@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.telegram_sanitize import (
+from abs.telegram_sanitize import (
     clean_for_telegram,
     extract_assistant_reply,
 )

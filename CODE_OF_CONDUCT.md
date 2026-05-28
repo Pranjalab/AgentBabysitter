@@ -1,18 +1,18 @@
-# cldx — Code of Conduct
+# Agent Babysitter — Code of Conduct
 
-cldx is a small project run in the open. We welcome bug reports, feature
+Agent Babysitter is a small project run in the open. We welcome bug reports, feature
 ideas, code, and documentation from anyone. To keep the project healthy,
-everyone interacting with cldx — issues, PRs, discussions — agrees to
+everyone interacting with Agent Babysitter — issues, PRs, discussions — agrees to
 abide by this code.
 
 This is adapted from the [Contributor Covenant v2.1][cc] and tuned for
-cldx's small-team reality.
+Agent Babysitter's small-team reality.
 
 [cc]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
 
 ## Our pledge
 
-We pledge to make participation in cldx a harassment-free experience for
+We pledge to make participation in Agent Babysitter a harassment-free experience for
 everyone, regardless of age, body size, visible or invisible disability,
 ethnicity, sex characteristics, gender identity and expression, level of
 experience, education, socio-economic status, nationality, personal
@@ -53,10 +53,10 @@ inclusive, and healthy community.
 
 ## Scope
 
-This code applies to every cldx space — the GitHub repo (issues, PRs,
-discussions, the code itself, commit messages), any cldx Discord /
+This code applies to every Agent Babysitter space — the GitHub repo (issues, PRs,
+discussions, the code itself, commit messages), any Agent Babysitter Discord /
 Telegram channel we run, and any in-person events. It also applies when
-you represent cldx publicly (using a project email, posting from an
+you represent Agent Babysitter publicly (using a project email, posting from an
 official social account, acting as an appointed representative).
 
 ## Enforcement
@@ -75,8 +75,8 @@ limited to:
 2. **Warning** — restrictions on participation for a set period. No
    interaction with the people involved, including the maintainers, for
    that period.
-3. **Temporary ban** — temporary ban from any cldx space.
-4. **Permanent ban** — permanent ban from all cldx spaces.
+3. **Temporary ban** — temporary ban from any Agent Babysitter space.
+4. **Permanent ban** — permanent ban from all Agent Babysitter spaces.
 
 ## Attribution
 
@@ -95,7 +95,7 @@ available at <https://www.contributor-covenant.org/translations>.
 
 ## How to contribute
 
-If you've read this far and want to help cldx grow:
+If you've read this far and want to help Agent Babysitter grow:
 
 1. Open an issue describing the problem or idea before writing code.
    This saves both of us time if the answer is "we considered that and
@@ -105,7 +105,7 @@ If you've read this far and want to help cldx grow:
 4. Add tests for your change. PRs without tests for new behaviour will
    be asked to add them.
 5. Write a clear PR description: what changed, why, how you tested.
-6. Be patient with review. cldx is maintained on personal time.
+6. Be patient with review. Agent Babysitter is maintained on personal time.
 
 For things we'd specifically love help with, see
 [`FEATURES.md`](./FEATURES.md).

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.policy_engine import PolicyDecision, PolicyEngine, PolicyEngineError
-from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+from abs.policy_engine import PolicyDecision, PolicyEngine, PolicyEngineError
+from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
 
 # --- Fixtures: the bundled policy ships with `auto-approve` as default ----

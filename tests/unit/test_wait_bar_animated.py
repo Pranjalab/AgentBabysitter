@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from cldx.wait_bar import WaitResult, animated_countdown_wait
+from abs.wait_bar import WaitResult, animated_countdown_wait
 
 
 async def test_animated_wait_fires_ticks_until_timer_expires():

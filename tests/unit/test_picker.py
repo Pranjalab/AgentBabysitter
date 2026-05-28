@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.picker import PickerRow, pick_numeric
+from abs.picker import PickerRow, pick_numeric
 
 
 def _rows() -> list[PickerRow]:

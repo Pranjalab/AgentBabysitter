@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.cli import BridgeUI
+from abs.cli import BridgeUI
 
 
 def test_extract_takes_from_last_submitted_user_input():

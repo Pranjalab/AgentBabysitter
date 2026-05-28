@@ -1,6 +1,6 @@
-"""Load and persist user secrets from ``~/.cldx/config/*.env``.
+"""Load and persist user secrets from ``~/.abs/config/*.env``.
 
-cldx keeps secrets out of the policy file and out of git. Each integration
+abs keeps secrets out of the policy file and out of git. Each integration
 gets its own ``.env`` file:
 
 - ``anthropic.env``  →  ``ANTHROPIC_API_KEY``
@@ -20,14 +20,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from cldx._paths import cldx_home
+from abs._paths import abs_home
 
 
 SECRET_NAMES = ("anthropic", "telegram", "secrets")
 
 
 def secrets_dir() -> Path:
-    return cldx_home() / "config"
+    return abs_home() / "config"
 
 
 def env_file_path(name: str) -> Path:
@@ -80,7 +80,7 @@ def load_into_environ(
 
 
 def save_secret(name: str, key: str, value: str) -> Path:
-    """Atomic-ish write of ``KEY=value`` into ``~/.cldx/config/<name>.env``.
+    """Atomic-ish write of ``KEY=value`` into ``~/.abs/config/<name>.env``.
 
     Preserves every other key already in the file. Sets ``chmod 600`` on the
     final file so the secret is user-readable only.
@@ -110,7 +110,7 @@ def save_secret(name: str, key: str, value: str) -> Path:
 
 
 def clear_secret(name: str, key: str) -> bool:
-    """Remove ``key`` from ``~/.cldx/config/<name>.env``. Returns True if removed."""
+    """Remove ``key`` from ``~/.abs/config/<name>.env``. Returns True if removed."""
     path = env_file_path(name)
     current = _parse_env_file(path)
     if key not in current:

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cldx.telegram_commands import (
+from abs.telegram_commands import (
     COMMANDS,
     dispatch,
     is_command,
@@ -213,7 +213,7 @@ async def test_handler_exceptions_become_user_visible_reply():
         assert "kaboom" in reply
     finally:
         # Restore the real help handler.
-        from cldx.telegram_commands import cmd_help
+        from abs.telegram_commands import cmd_help
         COMMANDS["help"] = cmd_help
 
 

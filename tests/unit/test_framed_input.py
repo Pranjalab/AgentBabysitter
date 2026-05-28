@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.framed_input import FramedInputSession
+from abs.framed_input import FramedInputSession
 
 
 def test_construct_with_title_callable():
@@ -35,7 +35,7 @@ def test_bridgeui_prompt_title_matches_pending_state(tmp_path, monkeypatch):
     """BridgeUI._prompt_title must mirror the pending-prompt state so the
     framed input box border shows the right hint."""
     from tests.unit.test_eager_classification import _make_bridge_ui
-    from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+    from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
     ui = _make_bridge_ui(tmp_path, monkeypatch)
 

@@ -1,6 +1,6 @@
-# cldx — User Guideline
+# Agent Babysitter — User Guideline
 
-The complete reference for running cldx day-to-day: every flag, every slash
+The complete reference for running abs day-to-day: every flag, every slash
 command (terminal AND Telegram), every policy profile, and the things that
 trip people up the most. Pair this with the [README](./README.md) (the
 overview + install) and [FEATURES.md](./FEATURES.md) (what's coming next).
@@ -8,7 +8,7 @@ overview + install) and [FEATURES.md](./FEATURES.md) (what's coming next).
 ## Table of contents
 
 - [First-run checklist](#first-run-checklist)
-- [Starting cldx](#starting-cldx)
+- [Starting abs](#starting-abs)
 - [Policy profiles](#policy-profiles)
 - [Tool categories & risk levels](#tool-categories--risk-levels)
 - [Terminal slash commands](#terminal-slash-commands)
@@ -27,13 +27,13 @@ overview + install) and [FEATURES.md](./FEATURES.md) (what's coming next).
 1. **Install:** `./install.sh` (see [README](./README.md#install))
 2. **Optional — set up Telegram:**
    ```bash
-   cldx setup telegram
+   abs setup telegram
    ```
    This walks you through `@BotFather`, captures your `chat_id`, sends a
    welcome card to your phone.
 3. **Optional — pick an LLM backend** for Telegram summaries:
    ```bash
-   cldx setup llm
+   abs setup llm
    ```
    Pick Anthropic, Bedrock, Gemini, or "disabled" (raw pane forwarded).
 4. **Start a Claude Code session in tmux:**
@@ -42,19 +42,19 @@ overview + install) and [FEATURES.md](./FEATURES.md) (what's coming next).
    # inside the tmux pane:
    claude
    ```
-5. **Run cldx** in another window:
+5. **Run abs** in another window:
    ```bash
-   cldx --auto-detect
+   abs --auto-detect
    ```
 
 ---
 
-## Starting cldx
+## Starting abs
 
 ### Command-line flags
 
 ```
-cldx [SUBCOMMAND] [OPTIONS]
+abs [SUBCOMMAND] [OPTIONS]
 ```
 
 | Flag | What it does |
@@ -75,28 +75,28 @@ cldx [SUBCOMMAND] [OPTIONS]
 
 | Subcommand | What it does |
 |---|---|
-| `cldx setup` | Interactive — picks LLM backend + Telegram, prints final config |
-| `cldx setup llm` | Just the LLM backend picker |
-| `cldx setup anthropic` | Save an Anthropic API key, optionally test it |
-| `cldx setup bedrock` | Save an AWS Bedrock bearer token + region + model |
-| `cldx setup gemini` | Save a Google Gemini key + model |
-| `cldx setup telegram` | Save a bot token, auto-discover chat ID, send greeting |
-| `cldx setup all` | Same as `cldx setup` |
-| `cldx config` | Show every configured secret (masked) + LLM backend |
-| `cldx test llm` | End-to-end LLM smoke test (runs all three summary modes) |
+| `abs setup` | Interactive — picks LLM backend + Telegram, prints final config |
+| `abs setup llm` | Just the LLM backend picker |
+| `abs setup anthropic` | Save an Anthropic API key, optionally test it |
+| `abs setup bedrock` | Save an AWS Bedrock bearer token + region + model |
+| `abs setup gemini` | Save a Google Gemini key + model |
+| `abs setup telegram` | Save a bot token, auto-discover chat ID, send greeting |
+| `abs setup all` | Same as `abs setup` |
+| `abs config` | Show every configured secret (masked) + LLM backend |
+| `abs test llm` | End-to-end LLM smoke test (runs all three summary modes) |
 
 ---
 
 ## Policy profiles
 
 `policy.yml` ships with five profiles. Switch live with `/profile <name>` or
-override at startup with `--profile`. Edit `~/.cldx/config/policy.yml` to
+override at startup with `--profile`. Edit `~/.abs/config/policy.yml` to
 add your own.
 
 | Profile | Default action | Use when |
 |---|---|---|
 | **auto-approve** | All approvals auto-yes (2 s wait) | You trust your prompt + want a hands-off run |
-| **yolo** | Auto-yes everything, *learn* from your y/n on the few that escalate | You're iterating and want to teach cldx your patterns |
+| **yolo** | Auto-yes everything, *learn* from your y/n on the few that escalate | You're iterating and want to teach abs your patterns |
 | **restricted** | Auto-yes for read-only / search tools; escalate writes & exec to Telegram | Day-to-day with safe defaults |
 | **default** | Same as restricted but no Telegram escalation | Local-only, no phone bridge |
 | **paranoid** | Escalate every approval, no auto-fires | When you want to review everything |
@@ -159,7 +159,7 @@ Bash gets risk-refined by the arguments. Examples:
 ## Terminal slash commands
 
 Anything not starting with `/` is typed into Claude. The commands below are
-cldx-specific — they never reach Claude.
+abs-specific — they never reach Claude.
 
 ### Approval shortcuts (only when a prompt is pending)
 
@@ -182,7 +182,7 @@ cldx-specific — they never reach Claude.
 
 | Command | Effect |
 |---|---|
-| `/snapshot` | Print the cldx view of the pane + classifier output |
+| `/snapshot` | Print the abs view of the pane + classifier output |
 | `/refresh` | Reprint the mirror panel |
 | `/panes` | List tmux panes (active one marked) |
 
@@ -198,7 +198,7 @@ cldx-specific — they never reach Claude.
 | Command | Effect |
 |---|---|
 | `/raw <keys>` | Send named tmux keys to the pane (e.g. `/raw C-c`) |
-| `/quit` (or `/q`, `/exit`) | Cleanly exit cldx |
+| `/quit` (or `/q`, `/exit`) | Cleanly exit abs |
 
 ---
 
@@ -225,7 +225,7 @@ Send these from your phone to the bot. They never get injected into Claude.
 ## Reply formats
 
 When Claude is waiting for input (either an approval menu or a chat prompt),
-you can reply from either the cldx terminal or Telegram. cldx parses your
+you can reply from either the abs terminal or Telegram. abs parses your
 reply into one of these intents:
 
 | You send | Interpretation when approval is pending | Interpretation when nothing pending |
@@ -242,13 +242,13 @@ The rule: **every reply reaches Claude**. Never dropped.
 ## Setup wizards
 
 Each wizard is paste-tolerant (bracketed paste works for >1 KB tokens on
-macOS), saves to `~/.cldx/config/*.env` with `chmod 600`, and offers an
+macOS), saves to `~/.abs/config/*.env` with `chmod 600`, and offers an
 optional test call.
 
 ### Anthropic
 
 ```bash
-cldx setup anthropic
+abs setup anthropic
 ```
 Asks for a key starting with `sk-ant-`. Test call uses `claude-haiku-4-5`
 and costs ~$0.0001.
@@ -256,7 +256,7 @@ and costs ~$0.0001.
 ### AWS Bedrock
 
 ```bash
-cldx setup bedrock
+abs setup bedrock
 ```
 Asks for an AWS bearer token, region, and model ID. Defaults the model to
 the right cross-region inference profile for your region (`us.*`, `eu.*`,
@@ -266,27 +266,27 @@ offers an inline retry.
 ### Google Gemini
 
 ```bash
-cldx setup gemini
+abs setup gemini
 ```
 Asks for a Gemini API key (`https://aistudio.google.com/apikey`). Defaults
-the model to `gemini-2.0-flash`. Free tier is plenty for cldx summaries.
+the model to `gemini-2.0-flash`. Free tier is plenty for abs summaries.
 
 ### Telegram
 
 ```bash
-cldx setup telegram
+abs setup telegram
 ```
 1. Walks you through messaging `@BotFather`.
 2. Validates the token via `getMe`.
 3. Asks you to send any message to your bot.
 4. Auto-discovers your `chat_id` via `getUpdates`.
 5. Sends a connection ping + the full greeting card (with command list).
-6. Saves to `~/.cldx/config/telegram.env` (mode `600`).
+6. Saves to `~/.abs/config/telegram.env` (mode `600`).
 
 ### Show current config
 
 ```bash
-cldx config
+abs config
 ```
 Prints a masked view of every configured secret + which file it's in.
 
@@ -294,25 +294,25 @@ Prints a masked view of every configured secret + which file it's in.
 
 ## LLM backends
 
-cldx uses an LLM to summarise Claude's pane content before sending it to
+abs uses an LLM to summarise Claude's pane content before sending it to
 Telegram. The backend is selectable per-installation.
 
 ### Which one should I pick?
 
 - **Easiest / best quality:** Anthropic direct (~$0.0001 / summary with Haiku).
 - **Already paying for AWS:** Bedrock — uses your AWS account, no separate key.
-- **Want a free option:** Gemini — generous free tier covers casual cldx use.
+- **Want a free option:** Gemini — generous free tier covers casual abs use.
 - **Want zero LLM dependency:** disable. Telegram gets the raw `⏺...✻` slice,
   sanitised for chat readability.
 
 ### Switching backends
 
-Re-run `cldx setup llm` and pick a new option. It rewrites
-`~/.cldx/config/agent_name.yml` with the new `model:` field.
+Re-run `abs setup llm` and pick a new option. It rewrites
+`~/.abs/config/agent_name.yml` with the new `model:` field.
 
 ### How LLM disabled works
 
-Set `model: none:raw` (or pick option 4 in the wizard). cldx skips every
+Set `model: none:raw` (or pick option 4 in the wizard). abs skips every
 upstream API call. The raw conversation step (after sanitisation: ANSI
 stripped, box-drawing chars removed, banners dropped, runs of separator
 lines collapsed) is sent to Telegram.
@@ -322,7 +322,7 @@ lines collapsed) is sent to Telegram.
 ## Files & state
 
 ```
-~/.cldx/
+~/.abs/
 ├── config/
 │   ├── policy.yml          # the active policy (auto-copied from defaults on first run)
 │   ├── agent_name.yml      # LLM backend + persona
@@ -340,9 +340,9 @@ lines collapsed) is sent to Telegram.
 
 ### Where to look
 
-- **What did cldx do at 9:17 PM?** → `~/.cldx/logs/<today>/`
+- **What did abs do at 9:17 PM?** → `~/.abs/logs/<today>/`
 - **What approval did I decline last Tuesday?** → grep the JSONL session file
-- **What's my current policy?** → `cat ~/.cldx/config/policy.yml`
+- **What's my current policy?** → `cat ~/.abs/config/policy.yml`
 - **Did Telegram actually send?** → check the `cldx_action` / `telegram_out` lines in the latest log
 
 ---
@@ -351,7 +351,7 @@ lines collapsed) is sent to Telegram.
 
 ### "unknown command: /telegram on"
 
-You're running an older `cldx` binary. Either an earlier install used a
+You're running an older `abs` binary. Either an earlier install used a
 different Python's user-scripts dir and is shadowing the fresh one, or
 PATH resolves to the stale one. Run `./install.sh` again — the verify
 step at the end now prints the exact `ln -sf` one-liner to fix it.
@@ -361,26 +361,26 @@ step at the end now prints the exact `ln -sf` one-liner to fix it.
 The installer detected a stale binary. Run the one-liner it suggests, e.g.
 
 ```bash
-ln -sf ~/Library/Python/3.13/bin/cldx ~/.local/bin/cldx
+ln -sf ~/Library/Python/3.13/bin/abs ~/.local/bin/abs
 ```
 
-### Claude finishes but cldx is silent on Telegram
+### Claude finishes but abs is silent on Telegram
 
 Three things to check, in order:
 
 1. **Telegram running?** `/telegram` in the terminal — must say `on`.
-2. **Configured?** `cldx config` should show a `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`.
-3. **Reach you?** `cldx setup telegram` re-sends the greeting card.
+2. **Configured?** `abs config` should show a `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`.
+3. **Reach you?** `abs setup telegram` re-sends the greeting card.
 
 ### Auto-approve doesn't fire on a known-safe tool
 
-Check `cldx config` and the policy file. Likely candidates:
+Check `abs config` and the policy file. Likely candidates:
 
 - You're in the `paranoid` or `restricted` profile (escalates by default).
   Switch with `/profile auto-approve`.
 - A `destructive_patterns:` rule matched. Inspect the `matched:` line in
   the decision panel.
-- The tool is new and not in cldx's registry. Open an issue with a sample
+- The tool is new and not in abs's registry. Open an issue with a sample
   snapshot — registry additions are one-line PRs.
 
 ### Pasting tokens longer than 1 KB on macOS
@@ -392,7 +392,7 @@ a non-TTY (unusual), it falls back to `input()` which respects macOS's
 
 ### Session resets at the wrong time
 
-cldx parses the time string Claude prints (`resets 7:50pm` etc.) in the
+abs parses the time string Claude prints (`resets 7:50pm` etc.) in the
 declared timezone (parenthesised) or your system local timezone if none
 given. If your laptop's clock is wrong, the parsed reset will be off.
 
@@ -400,7 +400,7 @@ given. If your laptop's clock is wrong, the parsed reset will be off.
 
 Make sure you have v1.0.4 or newer — earlier versions had a known bug
 where the panel only showed truncated content and dropped multi-step
-turns. Run `cldx --version` to confirm.
+turns. Run `abs --version` to confirm.
 
 ---
 
@@ -408,7 +408,7 @@ turns. Run `cldx --version` to confirm.
 
 ### Multiple Claude sessions
 
-Run `tmux new -s claude1`, `tmux new -s claude2`, etc. cldx's startup
+Run `tmux new -s claude1`, `tmux new -s claude2`, etc. abs's startup
 picker shows you all panes with arrow-key navigation; `d` deletes a stale
 recorded session.
 
@@ -420,15 +420,15 @@ replays the event log as a transcript before going live.
 ### Running headlessly (no tmux already open)
 
 The picker offers "Start a new tmux + claude" — it runs
-`tmux new -d -s cldx-N && tmux send-keys claude Enter` and attaches.
+`tmux new -d -s abs-N && tmux send-keys claude Enter` and attaches.
 
 ### Custom policy.yml
 
 Copy the bundled default and edit:
 
 ```bash
-cp cldx/defaults/policy.yml ~/.cldx/config/policy.yml
-$EDITOR ~/.cldx/config/policy.yml
+cp abs/defaults/policy.yml ~/.abs/config/policy.yml
+$EDITOR ~/.abs/config/policy.yml
 ```
 
 Fields you might tune:
@@ -437,28 +437,28 @@ Fields you might tune:
 - `<profile>.wait_interval_seconds:` — change the countdown duration
 - `destructive_patterns:` — add your own dangerous-command regexes
 - `<profile>.approved_patterns:` / `denied_patterns:` — pre-seed yolo memory
-- `detection.*_patterns:` — extend classifier triggers (rarely needed; cldx has built-in fallbacks)
+- `detection.*_patterns:` — extend classifier triggers (rarely needed; abs has built-in fallbacks)
 
 ### Dry-run mode
 
 ```bash
-cldx --auto-detect --dry-run
+abs --auto-detect --dry-run
 ```
 
 Classifies and panels everything, but never sends keys to tmux. Useful
-when tuning policy patterns or auditing what cldx would do on a known
+when tuning policy patterns or auditing what abs would do on a known
 workflow.
 
 ### CI / automated runs
 
-Use `--no-telegram --dry-run` for a fully offline test. cldx still
+Use `--no-telegram --dry-run` for a fully offline test. abs still
 writes the JSONL session log so you can grep classifications later.
 
 ### Environment variables
 
 | Variable | Effect |
 |---|---|
-| `CLDX_HOME` | Override `~/.cldx/` (state dir) |
+| `ABS_HOME` | Override `~/.abs/` (state dir) |
 | `ANTHROPIC_API_KEY` | Anthropic API key (also loaded from config file) |
 | `AWS_BEARER_TOKEN_BEDROCK` | Bedrock token |
 | `AWS_REGION` / `AWS_DEFAULT_REGION` | Bedrock region |
@@ -472,15 +472,15 @@ writes the JSONL session log so you can grep classifications later.
 
 ## Reporting bugs
 
-Open an issue at <https://github.com/Pranjalab/cldx/issues> with:
+Open an issue at <https://github.com/Pranjalab/AgentBabysitter/issues> with:
 
-1. `cldx --version` output.
-2. A pane snapshot if relevant (`/snapshot` in cldx shows what it's seeing).
-3. The last few lines from your log under `~/.cldx/logs/`.
+1. `abs --version` output.
+2. A pane snapshot if relevant (`/snapshot` in abs shows what it's seeing).
+3. The last few lines from your log under `~/.abs/logs/`.
 4. What you expected vs what happened.
 
 Patches especially welcome for:
 
-- New tool entries in `cldx/tool_call.py` (Claude adds tools regularly).
-- New destructive patterns in `cldx/defaults/policy.yml`.
+- New tool entries in `abs/tool_call.py` (Claude adds tools regularly).
+- New destructive patterns in `abs/defaults/policy.yml`.
 - Edge-case classifier inputs (paste a real snapshot, we'll turn it into a test).

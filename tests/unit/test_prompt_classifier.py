@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cldx.prompt_classifier import PromptType
+from abs.prompt_classifier import PromptType
 
 
 def test_idle_snapshot_classifies_as_idle(snapshot, classifier):
@@ -76,7 +76,7 @@ def test_signature_distinguishes_identical_menus_with_different_commands():
     3. No``) for different tool calls. The signature must differ so
     dispatch dedup doesn't swallow the later prompts and stop the flow.
     """
-    from cldx.prompt_classifier import ClassifiedPrompt, PromptType
+    from abs.prompt_classifier import ClassifiedPrompt, PromptType
 
     same_menu = ("1. Yes",
                  "2. Yes, allow all edits during this session (shift+tab)",
@@ -123,7 +123,7 @@ def test_classifier_handles_malformed_user_pattern(monkeypatch, policy):
     """A bad user-supplied regex should be skipped, not raise."""
     cfg = dict(policy.detection_config)
     cfg["approval_yn_patterns"] = list(cfg.get("approval_yn_patterns", [])) + ["[unterminated"]
-    from cldx.prompt_classifier import PromptClassifier
+    from abs.prompt_classifier import PromptClassifier
     pc = PromptClassifier(detection_cfg=cfg)
     # Should not raise.
     p = pc.classify("Do you want to proceed? (y/n)")
@@ -143,7 +143,7 @@ def test_completion_matches_any_thinking_verb(verb):
     classify as COMPLETE so chat-only replies surface to terminal +
     Telegram (this was the bug: short ``Hi`` replies vanished because
     only the literal 'Cogitated' was matched)."""
-    from cldx.prompt_classifier import PromptClassifier
+    from abs.prompt_classifier import PromptClassifier
     snap = (
         "❯ Hi\n"
         "⏺ Hi! Need anything else?\n"
@@ -171,7 +171,7 @@ def test_completion_matches_any_time_format(time_str):
     """Claude's "✻ <verb> for <time>" line uses several time shapes —
     single unit, compound, fractional seconds. All must classify as
     COMPLETE so longer tasks also surface their result panel."""
-    from cldx.prompt_classifier import PromptClassifier
+    from abs.prompt_classifier import PromptClassifier
     snap = (
         "⏺ Done with the task.\n"
         f"✻ Cogitated for {time_str}\n"
@@ -187,7 +187,7 @@ def test_completion_matches_any_time_format(time_str):
 def test_completion_rejects_lookalikes_without_verb_or_time():
     """A bare star line or a "verb-less" entry must NOT classify as
     completion — that would false-fire on Claude's running indicator."""
-    from cldx.prompt_classifier import PromptClassifier
+    from abs.prompt_classifier import PromptClassifier
     classifier = PromptClassifier(detection_cfg={})
     for line in ("✻ Working...", "✻ for 5s", "no star at all"):
         snap = f"⏺ x\n{line}\n❯\n"
@@ -259,7 +259,7 @@ def test_stale_approval_does_not_beat_real_completion(classifier):
 def test_completion_builtin_works_with_empty_policy():
     """Even with no completion_patterns in policy.yml, the built-in
     fallback must keep detecting Claude's idle indicators."""
-    from cldx.prompt_classifier import PromptClassifier
+    from abs.prompt_classifier import PromptClassifier
     classifier = PromptClassifier(detection_cfg={})
     p = classifier.classify("⏺ Done\n  ? for shortcuts · ← for agents\n")
     assert p.type == PromptType.COMPLETE

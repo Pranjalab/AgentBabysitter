@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cldx installer — pip install --user . + first-run config + PATH hint.
+# Agent Babysitter installer — pip install --user . + first-run config + PATH hint.
 #
 #   ./install.sh           # install / upgrade
 #   ./install.sh --uninstall
@@ -7,7 +7,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLDX_HOME="${CLDX_HOME:-$HOME/.cldx}"
+ABS_HOME="${ABS_HOME:-$HOME/.abs}"
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=11
 
@@ -50,15 +50,15 @@ user_scripts_dir() {
 
 # --- Uninstall path -------------------------------------------------------
 if [ "${1:-}" = "--uninstall" ]; then
-  head "Uninstalling cldx"
+  head "Uninstalling Agent Babysitter"
   PY=$(pick_python) || die "no compatible Python ≥${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} on PATH"
-  "$PY" -m pip uninstall --yes cldx || warn "cldx wasn't installed"
-  warn "User state at ${CLDX_HOME} left in place. Delete manually if you want a clean slate."
+  "$PY" -m pip uninstall --yes agent-babysitter || warn "agent-babysitter wasn't installed"
+  warn "User state at ${ABS_HOME} left in place. Delete manually if you want a clean slate."
   exit 0
 fi
 
 # --- Install path ---------------------------------------------------------
-head "cldx installer"
+head "Agent Babysitter installer"
 
 PY=$(pick_python) || die "no Python ≥${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} found. Install one (e.g., \`brew install python@3.12\` or your distro's package) and re-run."
 PY_VER=$("$PY" --version 2>&1)
@@ -72,28 +72,28 @@ head "Installing package (pip install --user .)"
   die "pip install failed. Try \`$PY -m pip install --user .\` manually to see the error."
 say "Package installed"
 
-# 2. Bootstrap user state under ~/.cldx/ (idempotent).
-head "Setting up ${CLDX_HOME}"
-mkdir -p "${CLDX_HOME}/config" "${CLDX_HOME}/sessions"
-if [ ! -f "${CLDX_HOME}/config/policy.yml" ]; then
-  cp "${PROJECT_DIR}/cldx/defaults/policy.yml" "${CLDX_HOME}/config/policy.yml"
-  say "Wrote ${CLDX_HOME}/config/policy.yml (default profile)"
+# 2. Bootstrap user state under "~/.abs"/ (idempotent).
+head "Setting up ${ABS_HOME}"
+mkdir -p "${ABS_HOME}/config" "${ABS_HOME}/sessions"
+if [ ! -f "${ABS_HOME}/config/policy.yml" ]; then
+  cp "${PROJECT_DIR}/abs/defaults/policy.yml" "${ABS_HOME}/config/policy.yml"
+  say "Wrote ${ABS_HOME}/config/policy.yml (default profile)"
 else
-  warn "${CLDX_HOME}/config/policy.yml already exists — left untouched"
+  warn "${ABS_HOME}/config/policy.yml already exists — left untouched"
 fi
-if [ ! -f "${CLDX_HOME}/config/agent_name.yml" ]; then
-  cp "${PROJECT_DIR}/cldx/defaults/agent_name.yml" "${CLDX_HOME}/config/agent_name.yml"
-  say "Wrote ${CLDX_HOME}/config/agent_name.yml (agent persona for Telegram summaries)"
+if [ ! -f "${ABS_HOME}/config/agent_name.yml" ]; then
+  cp "${PROJECT_DIR}/abs/defaults/agent_name.yml" "${ABS_HOME}/config/agent_name.yml"
+  say "Wrote ${ABS_HOME}/config/agent_name.yml (agent persona for Telegram summaries)"
 else
-  warn "${CLDX_HOME}/config/agent_name.yml already exists — left untouched"
+  warn "${ABS_HOME}/config/agent_name.yml already exists — left untouched"
 fi
 
 # 3. PATH check + hint.
 SCRIPTS_DIR=$(user_scripts_dir "$PY")
-head "Make sure \`cldx\` is on your PATH"
+head "Make sure \`abs\` is on your PATH"
 case ":$PATH:" in
   *":$SCRIPTS_DIR:"*)
-    say "$SCRIPTS_DIR is already on \$PATH — you can run \`cldx\` now."
+    say "$SCRIPTS_DIR is already on \$PATH — you can run \`abs\` now."
     ;;
   *)
     warn "$SCRIPTS_DIR is NOT on your \$PATH."
@@ -112,34 +112,34 @@ case ":$PATH:" in
 esac
 
 head "Verify"
-# Show which cldx binary will run when the user types `cldx` — this catches
+# Show which abs binary will run when the user types `abs` — this catches
 # the case where a stale binary from another Python's user-scripts dir is
 # earlier on PATH and shadows the freshly-installed one.
-if command -v cldx >/dev/null 2>&1; then
-  CLDX_BIN=$(command -v cldx)
-  CLDX_VER=$(cldx --version 2>&1 || echo "?")
-  say "cldx on PATH: ${CLDX_BIN}  (${CLDX_VER})"
-  EXPECTED_BIN="${SCRIPTS_DIR}/cldx"
-  if [ "$CLDX_BIN" != "$EXPECTED_BIN" ]; then
-    warn "PATH resolves to ${CLDX_BIN}, but this install wrote to ${EXPECTED_BIN}."
+if command -v abs >/dev/null 2>&1; then
+  ABS_BIN=$(command -v abs)
+  ABS_VER=$(abs --version 2>&1 || echo "?")
+  say "abs on PATH: ${ABS_BIN}  (${ABS_VER})"
+  EXPECTED_BIN="${SCRIPTS_DIR}/abs"
+  if [ "$ABS_BIN" != "$EXPECTED_BIN" ]; then
+    warn "PATH resolves to ${ABS_BIN}, but this install wrote to ${EXPECTED_BIN}."
     warn "An older copy is shadowing the fresh install."
     echo
     echo "   Easiest fix — symlink the new binary into the location already on \$PATH:"
     echo
-    echo "     ln -sf \"${EXPECTED_BIN}\" \"${CLDX_BIN}\""
+    echo "     ln -sf \"${EXPECTED_BIN}\" \"${ABS_BIN}\""
     echo
-    echo "   Then run:  cldx --version   (should match ${CLDX_VER%% *} after re-install)"
+    echo "   Then run:  abs --version   (should match ${ABS_VER%% *} after re-install)"
     echo
     echo "   Alternatives:"
-    echo "     • Remove the stale copy: rm \"${CLDX_BIN}\""
+    echo "     • Remove the stale copy: rm \"${ABS_BIN}\""
     echo "     • Or put ${SCRIPTS_DIR} earlier on \$PATH in ${RC:-your shell rc}."
   fi
 else
-  warn "cldx is not yet on \$PATH — see the PATH hint above."
+  warn "abs is not yet on \$PATH — see the PATH hint above."
 fi
 
 head "Done."
-echo "    Run:    cldx --help"
-echo "    Config: ${CLDX_HOME}/config/policy.yml"
-echo "    Logs:   ${CLDX_HOME}/logs/  (plain text, per session, dated folders)"
-echo "    Events: ${CLDX_HOME}/sessions/ (JSONL replay log)"
+echo "    Run:    abs --help"
+echo "    Config: ${ABS_HOME}/config/policy.yml"
+echo "    Logs:   ${ABS_HOME}/logs/  (plain text, per session, dated folders)"
+echo "    Events: ${ABS_HOME}/sessions/ (JSONL replay log)"

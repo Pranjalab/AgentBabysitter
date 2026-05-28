@@ -1,8 +1,8 @@
 """Message templates for outbound Telegram traffic.
 
-cldx pushes three core message kinds to the user's Telegram chat:
+abs pushes three core message kinds to the user's Telegram chat:
 
-1. **Approval requests** — Claude wants to run something cldx can't
+1. **Approval requests** — Claude wants to run something abs can't
    auto-decide. The user can reply ``y``, ``n``, a digit (for menu
    prompts), free-form text (injected into Claude), or ``/stop`` to
    interrupt. The card shows the tool call, an LLM summary, a risk
@@ -80,7 +80,7 @@ def approval_message(card: ApprovalCard) -> str:
     }.get(card.risk, "🟡")
 
     lines = [
-        f"{risk_icon} *cldx — approval needed*",
+        f"{risk_icon} *Agent Babysitter — approval needed*",
         _RULE,
         _block("🔧 Tool", _truncate(card.command, 200)),
         _block("📝 Summary", _truncate(card.summary, 600)),
@@ -123,7 +123,7 @@ def completion_message(card: CompletionCard) -> str:
     dur = _format_duration(card.duration_s) if card.duration_s else ""
 
     lines = [
-        "✅ *cldx — task complete*",
+        "✅ *Agent Babysitter — task complete*",
         _RULE,
     ]
     if card.task:
@@ -150,7 +150,7 @@ class EscalationCard:
 def escalation_message(card: EscalationCard) -> str:
     """Build the visible chat message when policy can't auto-decide."""
     lines = [
-        "🚨 *cldx — decision needed*",
+        "🚨 *Agent Babysitter — decision needed*",
         _RULE,
         _block("🔧 Tool", _truncate(card.command, 200)),
         _block("📝 Summary", _truncate(card.summary, 600)),
@@ -174,7 +174,7 @@ def greeting_message(bot_username: str = "", profile: str = "") -> str:
     Welcomes the user and orients them to the commands they can run.
     """
     lines = [
-        "👋 *Welcome to cldx!*",
+        "👋 *Welcome to Agent Babysitter!*",
         _RULE,
         "",
         "Thanks for connecting — your bot is live and ready to bridge",
@@ -204,7 +204,7 @@ def greeting_message(bot_username: str = "", profile: str = "") -> str:
 def error_message(title: str, detail: str = "") -> str:
     """Generic error card — for LLM failures, dropped panes, etc."""
     lines = [
-        f"🛑 *cldx — {title}*",
+        f"🛑 *Agent Babysitter — {title}*",
         _RULE,
     ]
     if detail:
@@ -214,9 +214,9 @@ def error_message(title: str, detail: str = "") -> str:
 
 def help_message(profile: str = "", pending: str = "") -> str:
     """The response to ``/help``. Listed commands match
-    ``cldx.telegram_commands.COMMANDS``."""
+    ``abs.telegram_commands.COMMANDS``."""
     lines = [
-        "ℹ️ *cldx — commands*",
+        "ℹ️ *Agent Babysitter — commands*",
         _RULE,
         "",
         "*Approvals & input*",

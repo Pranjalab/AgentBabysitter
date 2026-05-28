@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from cldx.tmux_controller import TmuxController, TmuxControllerError
+from abs.tmux_controller import TmuxController, TmuxControllerError
 
 
 class FakeProc:

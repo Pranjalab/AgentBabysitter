@@ -1,11 +1,11 @@
 """End-to-end smoke test for the configured LLM backend.
 
-Exposed via ``cldx test llm``. Runs all three summary modes
+Exposed via ``abs test llm``. Runs all three summary modes
 (``prompt_summary`` / ``escalation_summary`` / ``completion_summary``)
 against realistic Claude Code pane snapshots, times each call, and
 reports any fallbacks (``[unsummarized: …]``) as failures.
 
-Use this between ``cldx setup llm`` and ``cldx setup telegram`` to
+Use this between ``abs setup llm`` and ``abs setup telegram`` to
 verify the LLM half of the pipeline before adding Telegram on top.
 """
 
@@ -18,8 +18,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from cldx.agent import Agent
-from cldx.summarizer import summarize_with_status
+from abs.agent import Agent
+from abs.summarizer import summarize_with_status
 
 
 # Realistic Claude Code snapshots — what a real pane looks like in each mode.
@@ -137,7 +137,7 @@ async def run_llm_test(console: Console | None = None,
     if failures:
         console.print(
             f"[red]{failures}/{len(SAMPLE_CONTEXTS)} modes failed.[/red]\n"
-            "[dim]Inspect your config with `cldx config show`. "
+            "[dim]Inspect your config with `abs config show`. "
             "If you see `[unsummarized: …]`, the message after the colon "
             "names the root cause (missing key, wrong region, missing SDK, "
             "etc.).[/dim]"
@@ -146,14 +146,14 @@ async def run_llm_test(console: Console | None = None,
     console.print(
         f"[green]✓ All {len(SAMPLE_CONTEXTS)} modes worked end-to-end via "
         f"{agent.backend}. LLM half of the pipeline is ready.[/green]\n"
-        "[dim]Next: run `cldx setup telegram` to wire up remote approvals.[/dim]"
+        "[dim]Next: run `abs setup telegram` to wire up remote approvals.[/dim]"
     )
     return 0
 
 
 def main() -> int:
-    """Allow `python -m cldx.llm_test` as a one-off entry point."""
-    from cldx.secrets import load_into_environ
+    """Allow `python -m abs.llm_test` as a one-off entry point."""
+    from abs.secrets import load_into_environ
     load_into_environ()
     return asyncio.run(run_llm_test())
 

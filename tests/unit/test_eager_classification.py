@@ -16,10 +16,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from cldx.cli import BridgeUI
-from cldx.policy_engine import PolicyDecision, PolicyEngine
-from cldx.prompt_classifier import PromptType
-from cldx.session_picker import Pane
+from abs.cli import BridgeUI
+from abs.policy_engine import PolicyDecision, PolicyEngine
+from abs.prompt_classifier import PromptType
+from abs.session_picker import Pane
 
 
 _APPROVAL_SNAPSHOT = (
@@ -40,7 +40,7 @@ _RUNNING_SNAPSHOT = (
 
 def _make_bridge_ui(tmp_path: Path, monkeypatch) -> BridgeUI:
     """Construct a BridgeUI with mocked subprocess + isolated state dir."""
-    monkeypatch.setenv("CLDX_HOME", str(tmp_path))
+    monkeypatch.setenv("ABS_HOME", str(tmp_path))
 
     args = SimpleNamespace(
         poll_interval=1.0,
@@ -49,7 +49,7 @@ def _make_bridge_ui(tmp_path: Path, monkeypatch) -> BridgeUI:
         no_telegram=True,
     )
     policy = PolicyEngine(
-        Path(__file__).resolve().parents[2] / "cldx" / "defaults" / "policy.yml",
+        Path(__file__).resolve().parents[2] / "abs" / "defaults" / "policy.yml",
         profile_override="auto-approve",
     )
     pane_info = Pane(target="0:0.0", current_command="claude", title="✳")
@@ -140,12 +140,12 @@ _CHAT_ONLY_SNAPSHOT = (
 async def test_completion_flow_fires_once_then_dedups(tmp_path, monkeypatch):
     """Two on_stable calls with the same completed pane → one panel only."""
     ui = _make_bridge_ui(tmp_path, monkeypatch)
-    from cldx.summarizer import SummaryResult
+    from abs.summarizer import SummaryResult
 
     async def fake_status(mode, ctx, agent):
         return SummaryResult(text="Created /tmp/cldx_check.py", summarized=True)
 
-    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_status)
+    monkeypatch.setattr("abs.summarizer.summarize_with_status", fake_status)
 
     await ui.on_stable(_COMPLETION_SNAPSHOT)
     assert ui._completion_locked is True, (
@@ -161,12 +161,12 @@ async def test_completion_lock_resets_on_new_approval(tmp_path, monkeypatch):
     """After a completion + a fresh approval prompt, the lock clears so the
     next completion (a new task) can render again."""
     ui = _make_bridge_ui(tmp_path, monkeypatch)
-    from cldx.summarizer import SummaryResult
+    from abs.summarizer import SummaryResult
 
     async def fake_status(mode, ctx, agent):
         return SummaryResult(text="ok", summarized=True)
 
-    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_status)
+    monkeypatch.setattr("abs.summarizer.summarize_with_status", fake_status)
 
     await ui.on_stable(_COMPLETION_SNAPSHOT)
     assert ui._completion_locked is True
@@ -184,7 +184,7 @@ async def test_completion_falls_back_to_raw_on_llm_failure(tmp_path, monkeypatch
     async def boom(*_a, **_kw):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr("cldx.summarizer.summarize_with_status", boom)
+    monkeypatch.setattr("abs.summarizer.summarize_with_status", boom)
 
     await ui.on_stable(_COMPLETION_SNAPSHOT)
     assert ui._completion_locked is True
@@ -202,7 +202,7 @@ async def test_chat_only_reply_skips_completion_panel(tmp_path, monkeypatch):
         calls.append("called")
         raise AssertionError("summarize should not run for chat-only completions")
 
-    monkeypatch.setattr("cldx.summarizer.summarize_with_status", trace_summarize)
+    monkeypatch.setattr("abs.summarizer.summarize_with_status", trace_summarize)
     await ui.on_stable(_CHAT_ONLY_SNAPSHOT)
     assert calls == []
     # The lock IS still set so we don't re-log "Claude replied" twice.
@@ -242,12 +242,12 @@ async def test_websearch_completion_renders_full_green_panel(tmp_path, monkeypat
 
     Before the fix, ``_pane_has_tool_calls`` had a hardcoded list of
     tools that didn't include WebSearch. So even though Claude clearly
-    did work (two web searches + a long prose result), cldx rendered
+    did work (two web searches + a long prose result), abs rendered
     the truncated 💬 cyan chat-reply panel instead of the ✓ green
     completion card. The user lost the bulk of the weather details
     because chat-reply was capped at 12 lines.
     """
-    from cldx.summarizer import SummaryResult
+    from abs.summarizer import SummaryResult
 
     ui = _make_bridge_ui(tmp_path, monkeypatch)
 
@@ -258,7 +258,7 @@ async def test_websearch_completion_renders_full_green_panel(tmp_path, monkeypat
             fallback_reason="LLM disabled (model: none:*)",
         )
 
-    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_summary)
+    monkeypatch.setattr("abs.summarizer.summarize_with_status", fake_summary)
 
     snapshot = (
         "❯ Search for Indore and Khandwa\n"
@@ -293,12 +293,12 @@ async def test_mirror_suppressed_after_completion_locks(tmp_path, monkeypatch):
     re-print the blue mirror panel."""
     ui = _make_bridge_ui(tmp_path, monkeypatch)
 
-    from cldx.summarizer import SummaryResult
+    from abs.summarizer import SummaryResult
 
     async def fake_status(mode, ctx, agent):
         return SummaryResult(text="ok", summarized=True)
 
-    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_status)
+    monkeypatch.setattr("abs.summarizer.summarize_with_status", fake_status)
 
     # First on_stable → completion fires, lock set, mirror printed once.
     await ui.on_stable(_COMPLETION_SNAPSHOT)
@@ -319,12 +319,12 @@ async def test_mirror_resumes_when_new_task_starts(tmp_path, monkeypatch):
     """Lock clears on new approval prompt, so the next stable refreshes mirror."""
     ui = _make_bridge_ui(tmp_path, monkeypatch)
 
-    from cldx.summarizer import SummaryResult
+    from abs.summarizer import SummaryResult
 
     async def fake_status(mode, ctx, agent):
         return SummaryResult(text="ok", summarized=True)
 
-    monkeypatch.setattr("cldx.summarizer.summarize_with_status", fake_status)
+    monkeypatch.setattr("abs.summarizer.summarize_with_status", fake_status)
 
     await ui.on_stable(_COMPLETION_SNAPSHOT)
     assert ui._completion_locked is True

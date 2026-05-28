@@ -119,7 +119,7 @@ class PolicyEngine:
             and self.memory is not None
             and not is_destructive
         ):
-            from cldx.memory import normalize_pattern  # local import to avoid cycle
+            from abs.memory import normalize_pattern  # local import to avoid cycle
             normalized = normalize_pattern(prompt.extracted_command)
             if normalized:
                 if self.memory.is_denied(normalized, "yolo"):
