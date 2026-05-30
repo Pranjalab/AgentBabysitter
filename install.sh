@@ -29,8 +29,12 @@ pick_python() {
       ver=$("$cand" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || echo 0.0)
       maj=${ver%.*}; min=${ver#*.}
       if [ "$maj" -ge "$MIN_PYTHON_MAJOR" ] && [ "$min" -ge "$MIN_PYTHON_MINOR" ]; then
-        echo "$cand"
-        return 0
+        # Verify pip is functional (Python 3.14 + Homebrew has a pyexpat/libexpat ABI
+        # mismatch on macOS that breaks pip at import time — skip such broken installs)
+        if "$cand" -m pip --version >/dev/null 2>&1; then
+          echo "$cand"
+          return 0
+        fi
       fi
     fi
   done
@@ -60,7 +64,7 @@ fi
 # --- Install path ---------------------------------------------------------
 head "Agent Babysitter installer"
 
-PY=$(pick_python) || die "no Python ≥${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} found. Install one (e.g., \`brew install python@3.12\` or your distro's package) and re-run."
+PY=$(pick_python) || die "no working Python ≥${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} found (Python 3.14 on macOS has a known pip/pyexpat bug). Install a stable version: \`brew install python@3.13\` then re-run."
 PY_VER=$("$PY" --version 2>&1)
 say "Using $PY ($PY_VER)"
 

@@ -8,8 +8,8 @@ detection:
     - "\\? \\[y/N\\]"
     - "Do you want to proceed\\?"
   approval_menu_patterns:
-    - "❯.*Yes"
-    - "1\\.\\s*Yes.*2\\.\\s*No"
+    - "Esc to cancel"             # always present at the bottom of every approval UI
+    - "❯\\s+1\\.\\s*Yes"          # cursor on first option (default state)
   text_input_patterns:
     - "^>\\s*$"
     - "Type your message"

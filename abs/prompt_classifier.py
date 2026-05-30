@@ -145,9 +145,20 @@ class PromptClassifier:
         r"\? for shortcuts",
     )
 
-    def __init__(self, detection_cfg: dict | None = None, tail_lines: int = 20):
+    def __init__(
+        self,
+        detection_cfg: dict | None = None,
+        tail_lines: int = 80,
+        detection_lines: int = 30,
+    ):
         cfg = detection_cfg or {}
         self.tail_lines = tail_lines
+        # Approval/running/completion patterns are matched against the last
+        # ``detection_lines`` only — keeps stale scrollback from re-firing.
+        # ``_extract_command`` still searches the full ``tail_lines`` window
+        # so the ``⏺ Bash(...)`` indicator is found even when it's well
+        # above the live menu.
+        self.detection_lines = detection_lines
         # Merge user patterns with the built-in fallbacks. Dedup so a user
         # who already listed our generic pattern doesn't compile it twice.
         user_completion = list(cfg.get("completion_patterns", []))
@@ -165,7 +176,15 @@ class PromptClassifier:
     # --- Public API ---------------------------------------------------------
 
     def classify(self, snapshot: str) -> ClassifiedPrompt:
+        # ``tail`` is the wide window — used for command extraction and
+        # context display so we can reach ``⏺ Bash(...)`` lines that sit
+        # well above the live menu.
+        # ``dtail`` is the narrow detection window — pattern matching runs
+        # here only, preventing stale ``❯ 1. Yes`` entries from previous
+        # (already answered) approvals that are still visible in scrollback
+        # from triggering false positives.
         tail = self._tail(snapshot, self.tail_lines)
+        dtail = self._tail(snapshot, self.detection_lines)
         context = tail
 
         # Order: ACTIVE PROMPTS > completion > running > idle.
@@ -177,7 +196,7 @@ class PromptClassifier:
         # we silently absorb the approval and the auto-approve never
         # fires. The live approval is the actionable state, so it must
         # take priority.
-        match = self._first_match(self.patterns.approval_menu, tail)
+        match = self._first_match(self.patterns.approval_menu, dtail)
         if match:
             from abs.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
@@ -186,11 +205,11 @@ class PromptClassifier:
                 extracted_command=self._extract_command(tail),
                 context=context,
                 matched_pattern=match.re.pattern,
-                menu_options=self._extract_menu_options(tail),
+                menu_options=self._extract_menu_options(dtail),
                 tool=_parse_tool(tail),
             )
 
-        match = self._first_match(self.patterns.approval_yn, tail)
+        match = self._first_match(self.patterns.approval_yn, dtail)
         if match:
             from abs.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
@@ -202,7 +221,7 @@ class PromptClassifier:
                 tool=_parse_tool(tail),
             )
 
-        match = self._first_match(self.patterns.text_input, tail)
+        match = self._first_match(self.patterns.text_input, dtail)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.TEXT_INPUT,
@@ -211,7 +230,7 @@ class PromptClassifier:
                 matched_pattern=match.re.pattern,
             )
 
-        match = self._first_match(self.patterns.completion, tail)
+        match = self._first_match(self.patterns.completion, dtail)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.COMPLETE,
@@ -220,7 +239,7 @@ class PromptClassifier:
                 matched_pattern=match.re.pattern,
             )
 
-        match = self._first_match(self.patterns.running, tail)
+        match = self._first_match(self.patterns.running, dtail)
         if match:
             return ClassifiedPrompt(
                 type=PromptType.RUNNING,

@@ -270,9 +270,9 @@ The babysitter adjusts its strictness based on what phase your project is in:
 
 ---
 
-## Features (v1.0.4 — Claude Code)
+## Features (v1.0.5 — Claude Code)
 
-> v1.0.4 is the foundation: a fully working Claude Code babysitter. The universal policy engine and multi-agent support are the next milestone.
+> v1.0.5 sharpens approval reliability: smarter pane classification, false-positive elimination, and full-response capture. v1.0.4 is the foundation: a fully working Claude Code babysitter.
 
 ### Auto-approval engine
 - Per-tool classification — `Read`/`Grep`/`Glob` safe; `Write`/`Edit` elevated; `Bash` risk-refined from command
@@ -280,6 +280,9 @@ The babysitter adjusts its strictness based on what phase your project is in:
 - Configurable wait-bar countdown before auto-fire
 - Yolo learning — remembers your y/n choices per pattern
 - Built-in safety floor — `rm -rf`, `dd`, `sudo`, `git push --force` bypass auto-approve regardless of profile
+- **Dual-window classifier** — 80-line context window finds the tool call; 30-line detection window prevents stale scrollback from re-firing false approvals
+- **Rock-solid approval anchor** — primary detection via `Esc to cancel` (always present in Claude Code's approval footer); eliminates false positives from numbered lists in replies
+- **Full result capture** — on task completion, deep-captures up to 2000 lines of scrollback so the green panel and Telegram message always contain Claude's complete response, not a truncated slice
 
 ### Telegram bridge
 - Structured approval / completion / escalation cards

@@ -20,6 +20,7 @@ from abs.cli import BridgeUI
 from abs.policy_engine import PolicyDecision, PolicyEngine
 from abs.prompt_classifier import PromptType
 from abs.session_picker import Pane
+from abs.tmux_monitor import TmuxMonitorError
 
 
 _APPROVAL_SNAPSHOT = (
@@ -63,6 +64,10 @@ def _make_bridge_ui(tmp_path: Path, monkeypatch) -> BridgeUI:
     ui.controller.send_enter = AsyncMock(return_value=None)
     ui.controller.send_escape = AsyncMock(return_value=None)
     ui.controller.send_text = AsyncMock(return_value=None)
+    # Stub deep_capture so tests never hit a real tmux session.
+    ui.monitor.deep_capture = AsyncMock(
+        side_effect=TmuxMonitorError("no tmux in tests")
+    )
     return ui
 
 

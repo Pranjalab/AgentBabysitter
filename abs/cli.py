@@ -596,6 +596,15 @@ class BridgeUI:
         self._completion_locked = True
         self.store.log_event("complete")
 
+        # Re-capture with a deep scrollback so the full ⏺...✻ block is
+        # available even when Claude's response spans hundreds of lines.
+        try:
+            from abs.tmux_monitor import TmuxMonitor as _TM
+            full_raw = await self.monitor.deep_capture(lines=2000)
+            snapshot = _TM.strip_ansi(full_raw)
+        except Exception:
+            pass  # fall back to the regular-capture snapshot passed in
+
         is_real_task = self._pane_has_tool_calls(snapshot)
 
         # Conversational reply (no tool calls) → small cyan card,

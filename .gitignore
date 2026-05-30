@@ -68,3 +68,6 @@ Thumbs.db
 .claude/
 start.md
 PLAN.md
+
+# --- Local example / scratch data ----------------------------------------
+data/

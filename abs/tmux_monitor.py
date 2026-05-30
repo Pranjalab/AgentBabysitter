@@ -91,6 +91,31 @@ class TmuxMonitor:
         # Pane scrolled or rewrote in place — fall back to the last few lines.
         return "\n".join(new.splitlines()[-10:])
 
+    async def deep_capture(self, lines: int = 2000) -> str:
+        """Capture a large scrollback for full-result extraction.
+
+        Same as ``capture()`` but with a bigger ``-S`` value.  Only called
+        once per task completion — never in the hot polling loop.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "capture-pane",
+            "-p",
+            "-t",
+            self.pane,
+            "-S",
+            f"-{lines}",
+            "-e",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise TmuxMonitorError(
+                f"tmux capture-pane failed: {stderr.decode().strip()}"
+            )
+        return stdout.decode(errors="replace")
+
     def stop(self) -> None:
         self._stopped.set()
 
