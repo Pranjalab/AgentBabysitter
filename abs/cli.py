@@ -135,6 +135,31 @@ def parse_cli_args() -> argparse.Namespace:
         ),
     )
 
+    feedback_p = sub.add_parser(
+        "feedback",
+        help="Review and label stored classifier feedback snapshots.",
+    )
+    feedback_p.add_argument(
+        "action", nargs="?", default="list",
+        choices=("list", "approved", "results", "missed", "misclassified", "summary"),
+        help=(
+            "list — show all recent entries (default); "
+            "approved — auto-approved only; "
+            "results — completions only; "
+            "missed — manual interventions only; "
+            "misclassified — already-labeled bad entries; "
+            "summary — counts per label."
+        ),
+    )
+    feedback_p.add_argument(
+        "--mark", type=int, metavar="N",
+        help="Label entry #N as misclassified.",
+    )
+    feedback_p.add_argument(
+        "--limit", type=int, default=30, metavar="N",
+        help="How many entries to show (default 30).",
+    )
+
     return p.parse_args()
 
 
@@ -294,6 +319,21 @@ class BridgeUI:
         # Tab to accept it.
         self._claude_suggestion: str = ""
 
+        # --- Feedback / classifier training tracking ----------------------
+        # Last snapshot we saw while the pane was in APPROVAL_MENU state.
+        # Saved to the feedback log whenever abs auto-approves or the user
+        # manually intervenes (we detect the latter by noticing the menu
+        # disappeared without abs having fired it).
+        self._last_approval_snapshot: str | None = None
+        # Pending-signature at the time of the last APPROVAL_MENU snapshot.
+        self._last_approval_sig: str | None = None
+        # Sigs that abs itself handled via _fire_auto (so we don't flag
+        # those as "manual intervention").
+        self._abs_handled_sigs: set[str] = set()
+        # Classification type from the PREVIOUS on_change / on_stable call.
+        # Used to detect APPROVAL_MENU → non-APPROVAL transitions.
+        self._prev_classified_type: "PromptType | None" = None
+
     # --- accessors (used by telegram_commands) ---
 
     @property
@@ -390,6 +430,7 @@ class BridgeUI:
             # we burn cycles on classification.
             self._check_session_limit(snapshot)
             prompt = self.classifier.classify(snapshot)
+            self._track_approval_transition(prompt, snapshot)
             if prompt.type not in self._EAGER_TYPES:
                 return
             await self._dispatch_classified(prompt, snapshot, source="change")
@@ -406,6 +447,7 @@ class BridgeUI:
         """
         async with self._action_lock:
             prompt = self.classifier.classify(snapshot)
+            self._track_approval_transition(prompt, snapshot)
 
             # Refresh Claude's bottom-pane suggestion so the framed input
             # shows the right placeholder text (Tab to accept).
@@ -453,6 +495,46 @@ class BridgeUI:
         re.compile(r"esc\s*to\s*(cancel|interrupt)"),
         re.compile(r"^\s*$"),
     )
+
+    def _track_approval_transition(
+        self, prompt: "ClassifiedPrompt", snapshot: str
+    ) -> None:
+        """Detect approval-menu state changes and record feedback entries.
+
+        Called on every classify() result (both on_change and on_stable).
+        Two events are captured:
+
+        * APPROVAL_MENU appears → save the snapshot so we have it when the
+          menu goes away (abs auto-fires or user acts manually).
+        * APPROVAL_MENU disappears and abs did NOT fire it → the user typed
+          directly in the Claude pane; save as ``manual_intervened``.
+        """
+        from abs import feedback_store as _fb
+
+        was_approval = self._prev_classified_type == PromptType.APPROVAL_MENU
+        is_approval = prompt.type == PromptType.APPROVAL_MENU
+
+        if was_approval and not is_approval:
+            sig = self._last_approval_sig
+            if (
+                sig is not None
+                and sig not in self._abs_handled_sigs
+                and self._last_approval_snapshot is not None
+            ):
+                _fb.save(
+                    self._last_approval_snapshot,
+                    _fb.MANUAL_INTERVENED,
+                    classification={
+                        "type": "approval_menu",
+                        "note": "abs did not fire — user acted manually in Claude pane",
+                    },
+                )
+
+        if is_approval:
+            self._last_approval_snapshot = snapshot
+            self._last_approval_sig = self.pending_signature
+
+        self._prev_classified_type = prompt.type
 
     @classmethod
     def _pane_has_tool_calls(cls, snapshot: str) -> bool:
@@ -605,6 +687,14 @@ class BridgeUI:
         except Exception:
             pass  # fall back to the regular-capture snapshot passed in
 
+        # Save the completion snapshot for feedback review. Done after the
+        # deep capture so we always store the most complete version.
+        try:
+            from abs import feedback_store as _fb
+            _fb.save(snapshot, _fb.RESULT, classification={"type": "result"})
+        except Exception:  # noqa: BLE001
+            pass
+
         is_real_task = self._pane_has_tool_calls(snapshot)
 
         # Conversational reply (no tool calls) → small cyan card,
@@ -680,18 +770,21 @@ class BridgeUI:
                 fallback_reason=result.fallback_reason,
             )
 
-        # ALWAYS green panel — the result is the result, regardless of
-        # whether the LLM produced a real summary or we fell back. The
-        # subtitle reveals which.
+        # Terminal panel ALWAYS shows the full ⏺...✻ block (visible_step),
+        # regardless of whether the LLM produced a summary. The LLM summary
+        # is shorter and goes to Telegram — but in the terminal the user
+        # wants to see everything Claude actually did.
         if result.summarized:
-            subtitle = f"[dim]summarised via {Agent.load().backend}[/dim]"
+            subtitle = f"[dim]summarised for Telegram via {Agent.load().backend}[/dim]"
         else:
             subtitle = (
                 f"[dim]raw pane (LLM unavailable: "
                 f"{result.fallback_reason})[/dim]"
             )
 
-        # Telegram status, surfaced as the LAST line inside the green panel.
+        # Telegram gets the LLM summary (concise for the phone); terminal
+        # gets the full structural slice.
+        telegram_text = result.text  # summary when available, visible_step otherwise
         telegram_line = ""
         telegram_send_succeeded = False
         if getattr(self.args, "no_telegram", False):
@@ -709,7 +802,7 @@ class BridgeUI:
             )
         else:
             try:
-                clean_body = clean_for_telegram(result.text)
+                clean_body = clean_for_telegram(telegram_text)
                 await self.telegram._send(
                     f"✅ *Task complete*\n{'━' * 20}\n{clean_body}"
                 )
@@ -718,7 +811,8 @@ class BridgeUI:
             except Exception as e:  # noqa: BLE001
                 telegram_line = f"\n\n[red]Telegram: ✗ send failed ({e})[/red]"
 
-        body = f"{result.text}\n\n{subtitle}{telegram_line}"
+        # Full ⏺...✻ content in the terminal panel.
+        body = f"{visible_step}\n\n{subtitle}{telegram_line}"
         self.print_rich(Panel(
             body,
             title="[bold green]✓ Task complete[/bold green]",
@@ -728,7 +822,7 @@ class BridgeUI:
 
         if telegram_send_succeeded:
             self.store.log_event(
-                "telegram_out", summary=result.text, mode="completion_summary",
+                "telegram_out", summary=telegram_text, mode="completion_summary",
             )
 
         # Clear pending state — next prompt starts fresh.
@@ -868,6 +962,13 @@ class BridgeUI:
             "[bold]Modes[/bold]\n"
             "  [cyan]/profile[/cyan]               show current policy profile\n"
             "  [cyan]/profile <name>[/cyan]        switch profile (e.g. /profile yolo)\n"
+            "\n"
+            "[bold]Feedback / classifier training[/bold]\n"
+            "  [cyan]/feedback[/cyan]              show recent auto-approved + result panes\n"
+            "  [cyan]/feedback mark <n>[/cyan]     label entry #n as misclassified\n"
+            "  [cyan]/feedback approved[/cyan]     show only auto-approved entries\n"
+            "  [cyan]/feedback results[/cyan]      show only task-completion entries\n"
+            "  [cyan]/feedback missed[/cyan]       show manual-intervention entries\n"
             "\n"
             "[bold]Raw / exit[/bold]\n"
             "  [cyan]/raw <keys>[/cyan]            send named tmux keys to the pane (e.g. /raw C-c)\n"
@@ -1365,6 +1466,26 @@ class BridgeUI:
             self.store.log_event("yolo_learn", pattern=pattern, approved=approve)
 
     async def _fire_auto(self, prompt: ClassifiedPrompt, action: str) -> None:
+        # Mark this signature as abs-handled BEFORE acting so that the
+        # concurrent on_change callback can see it and won't flag the
+        # resulting state transition as a "manual intervention".
+        if self.pending_signature:
+            self._abs_handled_sigs.add(self.pending_signature)
+
+        # Save approved snapshot for later review / misclassification marking.
+        if action == "yes" and self._last_approval_snapshot:
+            from abs import feedback_store as _fb
+            _fb.save(
+                self._last_approval_snapshot,
+                _fb.AUTO_APPROVED,
+                classification={
+                    "type": prompt.type.value,
+                    "command": prompt.extracted_command,
+                    "options": list(prompt.menu_options),
+                    "pattern": prompt.matched_pattern,
+                },
+            )
+
         cmd = prompt.extracted_command or prompt.type.value
         self.interaction_log.cldx_decision(f"auto-{action} {cmd}")
         if action == "yes":
@@ -1513,6 +1634,91 @@ class BridgeUI:
         self._completion_locked = False
         self._update_prompt_label()
 
+    async def _handle_feedback_cmd(self, rest: str) -> None:
+        """Implement /feedback [list|approved|results|missed|mark <n>]."""
+        from abs import feedback_store as _fb
+        from rich.table import Table as _Table
+
+        sub, _, arg = rest.partition(" ")
+        sub = sub.strip().lower()
+        arg = arg.strip()
+
+        # /feedback mark <n>
+        if sub == "mark":
+            if not arg.isdigit():
+                self.log("[yellow]usage: /feedback mark <number>  (see /feedback for list)[/yellow]")
+                return
+            idx = int(arg)
+            entries = _fb.load_recent(50)
+            if idx >= len(entries):
+                self.log(f"[yellow]no entry #{idx} — only {len(entries)} entries loaded[/yellow]")
+                return
+            _fb.mark_misclassified(entries[idx])
+            entry = entries[idx]
+            ts = entry.get("t", "?")
+            orig = entry.get("label", "?")
+            cmd_hint = (entry.get("classification") or {}).get("command", "")
+            self.log(
+                f"[green]✓ entry #{idx} ({ts} {orig}"
+                + (f" · {cmd_hint}" if cmd_hint else "")
+                + ") saved as misclassified[/green]"
+            )
+            return
+
+        # Label filter for list subcommands
+        label_filter: set[str] | None = None
+        if sub == "approved":
+            label_filter = {_fb.AUTO_APPROVED}
+        elif sub in ("results", "result"):
+            label_filter = {_fb.RESULT}
+        elif sub in ("missed", "manual"):
+            label_filter = {_fb.MANUAL_INTERVENED}
+        elif sub in ("misclassified", "bad"):
+            label_filter = {_fb.MISCLASSIFIED}
+        # else: no filter (show everything)
+
+        entries = _fb.load_recent(20, labels=label_filter)
+        if not entries:
+            self.log("[dim]no feedback entries yet[/dim]")
+            summary = _fb.feedback_summary()
+            if summary:
+                self.log(
+                    "[dim]total stored: "
+                    + ", ".join(f"{v} {k}" for k, v in sorted(summary.items()))
+                    + "[/dim]"
+                )
+            return
+
+        tbl = _Table(
+            show_header=True, header_style="bold", show_lines=False,
+            expand=False, title="[bold cyan]Feedback entries[/bold cyan]",
+        )
+        tbl.add_column("#", style="dim", width=3)
+        tbl.add_column("label", width=18)
+        tbl.add_column("time", width=19, style="dim")
+        tbl.add_column("command / excerpt", overflow="fold")
+
+        label_colors = {
+            _fb.AUTO_APPROVED: "green",
+            _fb.MANUAL_INTERVENED: "yellow",
+            _fb.RESULT: "cyan",
+            _fb.MISCLASSIFIED: "red",
+        }
+        for i, entry in enumerate(entries):
+            label = entry.get("label", "?")
+            color = label_colors.get(label, "white")
+            ts = entry.get("t", "?")
+            cls = entry.get("classification") or {}
+            cmd = cls.get("command") or cls.get("note") or ""
+            if not cmd:
+                # Use first non-empty line of snapshot as excerpt
+                snap_lines = (entry.get("snapshot") or "").splitlines()
+                cmd = next((l.strip() for l in snap_lines if l.strip()), "")[:60]
+            tbl.add_row(str(i), f"[{color}]{label}[/{color}]", ts, cmd)
+
+        self.print_rich(tbl)
+        self.log("[dim]/feedback mark <n> to label an entry as misclassified[/dim]")
+
     async def _handle_slash(self, cmd: str) -> None:
         if not cmd:
             return
@@ -1647,6 +1853,10 @@ class BridgeUI:
             self.log(f"→ sent digit {head}")
             self.pending = None
             self._update_prompt_label()
+            return
+
+        if head == "feedback":
+            await self._handle_feedback_cmd(rest)
             return
 
         self.log(f"[yellow]unknown command:[/yellow] /{cmd}  (try /help)")
@@ -1859,6 +2069,88 @@ def _run_test_subcommand(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_feedback_subcommand(args: argparse.Namespace) -> int:
+    """Dispatch `abs feedback [action] [--mark N] [--limit N]`."""
+    from abs import feedback_store as _fb
+    from rich.table import Table
+
+    # --mark takes priority over any list action
+    if args.mark is not None:
+        entries = _fb.load_recent(max(args.limit, args.mark + 1))
+        idx = args.mark
+        if idx >= len(entries):
+            console.print(f"[red]no entry #{idx} — only {len(entries)} entries found[/red]")
+            return 1
+        _fb.mark_misclassified(entries[idx])
+        entry = entries[idx]
+        cmd_hint = (entry.get("classification") or {}).get("command", "")
+        console.print(
+            f"[green]✓ entry #{idx} ({entry.get('t', '?')} {entry.get('label', '?')}"
+            + (f" · {cmd_hint}" if cmd_hint else "")
+            + ") saved as misclassified[/green]"
+        )
+        return 0
+
+    if args.action == "summary":
+        summary = _fb.feedback_summary()
+        if not summary:
+            console.print("[dim]no feedback data yet — run abs to start collecting[/dim]")
+            return 0
+        tbl = Table(title="Feedback summary", show_header=True, header_style="bold")
+        tbl.add_column("label")
+        tbl.add_column("count", justify="right")
+        for label, count in sorted(summary.items()):
+            tbl.add_row(label, str(count))
+        console.print(tbl)
+        return 0
+
+    label_filter: dict[str, set[str] | None] = {
+        "list": None,
+        "approved": {_fb.AUTO_APPROVED},
+        "results": {_fb.RESULT},
+        "missed": {_fb.MANUAL_INTERVENED},
+        "misclassified": {_fb.MISCLASSIFIED},
+    }
+    entries = _fb.load_recent(args.limit, labels=label_filter.get(args.action))
+    if not entries:
+        console.print("[dim]no feedback entries found[/dim]")
+        console.print(f"[dim]data stored at: {_fb.feedback_dir()}[/dim]")
+        return 0
+
+    tbl = Table(
+        show_header=True, header_style="bold", show_lines=False,
+        title=f"Feedback — {args.action} (last {len(entries)})",
+    )
+    tbl.add_column("#", style="dim", width=3)
+    tbl.add_column("label", width=18)
+    tbl.add_column("time", width=22, style="dim")
+    tbl.add_column("command / excerpt", overflow="fold")
+
+    label_colors = {
+        _fb.AUTO_APPROVED: "green",
+        _fb.MANUAL_INTERVENED: "yellow",
+        _fb.RESULT: "cyan",
+        _fb.MISCLASSIFIED: "red",
+    }
+    for i, entry in enumerate(entries):
+        label = entry.get("label", "?")
+        color = label_colors.get(label, "white")
+        ts = entry.get("t", "?")
+        cls_info = entry.get("classification") or {}
+        cmd = cls_info.get("command") or cls_info.get("note") or ""
+        if not cmd:
+            snap_lines = (entry.get("snapshot") or "").splitlines()
+            cmd = next((l.strip() for l in snap_lines if l.strip()), "")[:80]
+        tbl.add_row(str(i), f"[{color}]{label}[/{color}]", ts, cmd)
+
+    console.print(tbl)
+    console.print(
+        f"[dim]Use `abs feedback --mark <n>` to label an entry as misclassified. "
+        f"Stored at: {_fb.feedback_dir()}[/dim]"
+    )
+    return 0
+
+
 def main() -> None:
     # Load any saved secrets into the process environment before parsing
     # subcommands, so wizards / bridge / summarizer all see them.
@@ -1873,6 +2165,8 @@ def main() -> None:
         sys.exit(_run_config_subcommand(args))
     if args.cmd == "test":
         sys.exit(_run_test_subcommand(args))
+    if args.cmd == "feedback":
+        sys.exit(_run_feedback_subcommand(args))
 
     # Default: run the bridge.
     try:
