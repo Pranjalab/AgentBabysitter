@@ -1,7 +1,9 @@
 # Agent Babysitter
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Version](https://img.shields.io/badge/version-1.0.4-brightgreen.svg)](#release-104)
+[![Version](https://img.shields.io/badge/version-1.1.1--beta-orange.svg)](#release-111-beta)
+[![Channel](https://img.shields.io/badge/channel-beta-orange.svg)]()
+[![Stable](https://img.shields.io/badge/stable-1.0.5-brightgreen.svg)](#release-105)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-508%20passing-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-beta-yellow.svg)]()
@@ -127,7 +129,7 @@ Switch live: `abs /profile paranoid` or from Telegram.
 
 | Agent | Status |
 |---|---|
-| Claude Code | ✅ Shipped (v1.0.4) |
+| Claude Code | ✅ Stable (v1.0.5) · 🧪 Beta (v1.1.1-beta) |
 | Gemini CLI | 🔄 In roadmap |
 | OpenAI Codex terminal | 🔄 In roadmap |
 | Generic tmux pane | 🔄 In roadmap |
@@ -186,8 +188,16 @@ When the task finishes:
 
 ## Install
 
+**Stable (v1.0.5):**
 ```bash
 git clone https://github.com/Pranjalab/AgentBabysitter.git
+cd AgentBabysitter
+./install.sh
+```
+
+**Beta (v1.1.1-beta) — includes feedback loop + full results display:**
+```bash
+git clone -b beta https://github.com/Pranjalab/AgentBabysitter.git
 cd AgentBabysitter
 ./install.sh
 ```
@@ -270,9 +280,23 @@ The babysitter adjusts its strictness based on what phase your project is in:
 
 ---
 
-## Features (v1.0.5 — Claude Code)
+## Features (v1.1.1-beta — Claude Code)
 
-> v1.0.5 sharpens approval reliability: smarter pane classification, false-positive elimination, and full-response capture. v1.0.4 is the foundation: a fully working Claude Code babysitter.
+> **Beta channel.** v1.1.1-beta builds the feedback loop on top of the v1.0.x foundation. Install from the `beta` branch to get early access. Stable users should stay on `main` (v1.0.5).
+
+| Release | Channel | What it adds |
+|---|---|---|
+| **v1.1.1-beta** | 🧪 Beta | Classifier feedback loop · full terminal results display |
+| v1.0.5 | ✅ Stable | Dual-window classifier · Esc-to-cancel anchor · deep result capture |
+| v1.0.4 | ✅ Stable | Full Claude Code babysitter (first GA release) |
+
+### Classifier feedback loop _(new in v1.1.1-beta)_
+- **Auto-approved pane capture** — every auto-approved prompt is saved to `~/.abs/feedback/` for later review
+- **Manual-intervention detection** — when you type directly into Claude's pane (abs missed it), the snapshot is automatically saved as `manual_intervened`
+- **Result capture** — every task completion snapshot is stored so truncated results can be identified
+- **In-session review** — `/feedback [approved|results|missed]` lists saved entries; `/feedback mark <n>` labels any entry as `misclassified`
+- **CLI review** — `abs feedback [action] [--mark N]` for offline analysis without running abs
+- **Full terminal results** — the green completion panel now shows the complete ⏺…✻ block instead of the LLM summary; Telegram continues to receive the shorter summary
 
 ### Auto-approval engine
 - Per-tool classification — `Read`/`Grep`/`Glob` safe; `Write`/`Edit` elevated; `Bash` risk-refined from command
