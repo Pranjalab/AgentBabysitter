@@ -98,20 +98,69 @@ def test_signature_distinguishes_identical_menus_with_different_commands():
 
 def test_menu_options_ignore_unrelated_numbered_lines(classifier):
     """Numbered lines outside the prompt area shouldn't be captured."""
-    snap = """
-1. some preamble line
-2. another preamble
-3. final preamble
-
-⏺ Bash(echo hi)
- Do you want to proceed?
- ❯ 1. Yes
-   2. No
-"""
+    snap = (
+        "1. some preamble line\n"
+        "2. another preamble\n"
+        "3. final preamble\n"
+        "\n"
+        "⏺ Bash(echo hi)\n"
+        " Do you want to proceed?\n"
+        " ❯ 1. Yes\n"
+        "   2. No\n"
+        " Esc to cancel · Tab to amend\n"   # real approval boxes always have this
+    )
     p = classifier.classify(snap)
     assert p.type == PromptType.APPROVAL_MENU
-    # Only the post-anchor options should be picked up, not the preamble.
+    # Preamble numbered lines must NOT appear — only the bounded options.
     assert p.menu_options == ("1. Yes", "2. No")
+
+
+def test_task_list_below_footer_not_captured_as_options(snapshot, classifier):
+    """Task-plan items that Claude appends AFTER 'Esc to cancel' must not
+    appear in menu_options and must not prevent approval detection."""
+    p = classifier.classify(snapshot("big_task_menu"))
+    assert p.type == PromptType.APPROVAL_MENU
+    assert p.extracted_command == "Bash(git add -A && git status --short)"
+    # Exactly the three real options — task list (1. Setting up..., etc.) excluded.
+    assert len(p.menu_options) == 3
+    assert p.menu_options[0].startswith("1. Yes")
+    assert p.menu_options[1].startswith("2. Yes, and don't ask again")
+    assert p.menu_options[2].startswith("3. No")
+
+
+def test_no_approval_without_esc_to_cancel(classifier):
+    """A numbered list with a cursor but no 'Esc to cancel' footer must NOT
+    be classified as APPROVAL_MENU — it could be a list in Claude's reply."""
+    snap = (
+        "Here are three approaches:\n"
+        " ❯ 1. Use a database\n"
+        "   2. Use a file\n"
+        "   3. Use memory\n"
+    )
+    p = classifier.classify(snap)
+    assert p.type != PromptType.APPROVAL_MENU, (
+        "A menu-like list without 'Esc to cancel' must not trigger approval."
+    )
+
+
+def test_no_approval_without_cursor_on_option(classifier):
+    """'Esc to cancel' in scrollback without a live ❯ cursor must NOT trigger
+    APPROVAL_MENU — this is the stale-scrollback false-positive scenario.
+    The pane has since completed (✻ line); it should classify as COMPLETE."""
+    snap = (
+        "⏺ Bash(ls -la)\n"
+        "   1. Yes\n"          # no ❯ cursor — already answered, sitting in scrollback
+        "   2. No\n"
+        " Esc to cancel · Tab to amend\n"   # stale footer from answered approval
+        "✻ Cogitated for 2s\n"              # task already completed after that
+        "❯\n"
+        " ? for shortcuts\n"
+    )
+    p = classifier.classify(snap)
+    assert p.type == PromptType.COMPLETE, (
+        f"Stale 'Esc to cancel' after completion must classify as COMPLETE, got {p.type.value!r}. "
+        "The ❯ cursor is absent so Gate 1 must not fire."
+    )
 
 
 def test_classifier_returns_idle_for_empty_string(classifier):

@@ -7,9 +7,13 @@ detection:
     - "\\? \\[Y/n\\]"
     - "\\? \\[y/N\\]"
     - "Do you want to proceed\\?"
+  # NOTE: approval_menu detection is now structural (two-signal ordered check
+  # inside PromptClassifier._detect_approval_two_signal). These patterns are
+  # kept for reference and backward compatibility but are not used in the
+  # primary detection path.
   approval_menu_patterns:
-    - "Esc to cancel"             # always present at the bottom of every approval UI
-    - "❯\\s+1\\.\\s*Yes"          # cursor on first option (default state)
+    - "Esc to cancel"             # structural footer — always last line of the choices block
+    - "❯\\s+1\\.\\s*Yes"          # live cursor on first option
   text_input_patterns:
     - "^>\\s*$"
     - "Type your message"

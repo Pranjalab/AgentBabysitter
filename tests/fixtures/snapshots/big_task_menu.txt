@@ -1,0 +1,20 @@
+⏺ Bash(git add -A && git status --short)
+  ⎿  Waiting…
+
+────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   git add -A && git status --short
+   Stage all updates
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for: git add *
+   3. No
+
+ Esc to cancel · Tab to amend · ctrl+e to explain
+  1. Setting up the environment
+  2. Running pytest with verbose output
+  3. Checking for failures
+────────────────────────────────────────────────────────────────────────────
+>

@@ -91,9 +91,21 @@ _RUN_HINT_RE = re.compile(
 # Menu option lines like "❯ 1. Yes" or "   3. No".
 _MENU_OPTION_RE = re.compile(r"^\s*[❯>]?\s*(\d+)\.\s*(.+?)\s*$")
 
-# Anchor word that signals an interactive prompt block. Used to filter out
-# unrelated numbered lists that happen to live higher up in the snapshot.
-_MENU_ANCHOR_RE = re.compile(r"Do you want|Select an option|❯", re.IGNORECASE)
+# Claude Code approval UI — two structural anchors used for Gate 1 detection.
+#
+# Both must be present IN ORDER (cursor strictly before footer) for the pane
+# to be classified as APPROVAL_MENU.  A single anchor anywhere in the window
+# is NOT enough — stale scrollback can contain either one alone.
+#
+# _APPROVAL_CURSOR_LINE_RE: the ``❯`` selection cursor on option 1.
+#   Only present while a menu is live; never appears in prose or scrollback.
+#   Note: ``❯`` (U+276F) is distinct from ``>`` — we match both defensively.
+#
+# _APPROVAL_FOOTER_RE: the ``Esc to cancel`` footer.
+#   Always the LAST line of the approval choices block.  Task-list items
+#   that Claude shows as context appear AFTER this line (outside the block).
+_APPROVAL_CURSOR_LINE_RE = re.compile(r"^\s*[❯>]\s*\d+\.", re.MULTILINE)
+_APPROVAL_FOOTER_RE = re.compile(r"Esc to cancel", re.IGNORECASE)
 
 
 def _compile_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
@@ -149,7 +161,7 @@ class PromptClassifier:
         self,
         detection_cfg: dict | None = None,
         tail_lines: int = 80,
-        detection_lines: int = 30,
+        detection_lines: int = 40,
     ):
         cfg = detection_cfg or {}
         self.tail_lines = tail_lines
@@ -196,16 +208,30 @@ class PromptClassifier:
         # we silently absorb the approval and the auto-approve never
         # fires. The live approval is the actionable state, so it must
         # take priority.
-        match = self._first_match(self.patterns.approval_menu, dtail)
-        if match:
+
+        # Gate 1 — Approval menu (structural two-signal ordered check).
+        #
+        # BOTH signals must be present in order:
+        #   1. ``❯ <digit>.``    — live cursor on option 1 (never in prose/scrollback)
+        #   2. ``Esc to cancel`` — footer that closes the choices block
+        #
+        # Option extraction is BOUNDED between these two indices: anything
+        # that appears AFTER ``Esc to cancel`` (task-plan items Claude
+        # sometimes appends as context) is excluded automatically.
+        lines_dtail = dtail.splitlines()
+        approval_idxs = self._detect_approval_two_signal(lines_dtail)
+        if approval_idxs is not None:
+            cursor_idx, footer_idx = approval_idxs
             from abs.tool_call import parse_tool_call as _parse_tool
             return ClassifiedPrompt(
                 type=PromptType.APPROVAL_MENU,
-                raw_text=match.group(0),
+                raw_text="\n".join(lines_dtail[cursor_idx : footer_idx + 1]),
                 extracted_command=self._extract_command(tail),
                 context=context,
-                matched_pattern=match.re.pattern,
-                menu_options=self._extract_menu_options(dtail),
+                matched_pattern="structural:❯digit+Esc_to_cancel",
+                menu_options=self._extract_menu_options_bounded(
+                    lines_dtail, cursor_idx, footer_idx
+                ),
                 tool=_parse_tool(tail),
             )
 
@@ -292,29 +318,62 @@ class PromptClassifier:
         return None
 
     @staticmethod
-    def _extract_menu_options(tail: str) -> tuple[str, ...]:
-        """Pull "1. Yes" / "2. No" style lines that sit near the menu anchor."""
-        lines = tail.splitlines()
-        # Find the anchor (e.g. "Do you want to proceed?") then collect
-        # subsequent numbered lines until the run breaks.
-        anchor_idx = None
-        for i, line in enumerate(lines):
-            if _MENU_ANCHOR_RE.search(line):
-                anchor_idx = i
-                break
-        if anchor_idx is None:
-            # No anchor — fall back to any contiguous run of numbered lines.
-            start = 0
-        else:
-            start = anchor_idx
+    def _detect_approval_two_signal(
+        lines: list[str],
+    ) -> tuple[int, int] | None:
+        """Gate 1 for approval detection — ordered two-signal structural check.
 
+        Scans ``lines`` (the last ``detection_lines`` of a pane snapshot)
+        and returns ``(cursor_idx, footer_idx)`` when BOTH anchors are found
+        in the correct top-to-bottom order:
+
+          * cursor_idx  — last line matching ``❯ <digit>.`` (live menu cursor)
+          * footer_idx  — last line matching ``Esc to cancel`` (approval footer)
+          * cursor_idx < footer_idx  (cursor BEFORE footer)
+
+        Returns ``None`` when either signal is missing or they appear in the
+        wrong order (footer above cursor means stale scrollback, not live menu).
+
+        Why two signals?  Each one alone can appear in scrollback:
+          • ``Esc to cancel`` persists in scroll after an answered approval.
+          • ``❯ 1.`` style lines appear in Claude's prose numbered lists.
+        Together, in order, they uniquely identify a LIVE approval box.
+        """
+        n = len(lines)
+        # Bottom-up: find the last (most recent) footer.
+        footer_idx = next(
+            (i for i in range(n - 1, -1, -1)
+             if _APPROVAL_FOOTER_RE.search(lines[i])),
+            None,
+        )
+        if footer_idx is None:
+            return None
+        # Then find the last cursor line that sits ABOVE the footer.
+        cursor_idx = next(
+            (i for i in range(footer_idx - 1, -1, -1)
+             if _APPROVAL_CURSOR_LINE_RE.search(lines[i])),
+            None,
+        )
+        if cursor_idx is None:
+            return None
+        return cursor_idx, footer_idx
+
+    @staticmethod
+    def _extract_menu_options_bounded(
+        lines: list[str],
+        cursor_idx: int,
+        footer_idx: int,
+    ) -> tuple[str, ...]:
+        """Collect menu options strictly between cursor line and footer line.
+
+        Iterates lines[cursor_idx : footer_idx] — this hard upper bound means
+        task-plan items that Claude appends AFTER ``Esc to cancel`` are never
+        mistaken for options, regardless of how many there are.
+        """
         opts: list[str] = []
-        for line in lines[start:]:
-            cleaned = _BOX_PREFIX_RE.sub("", line)
+        for i in range(cursor_idx, footer_idx):
+            cleaned = _BOX_PREFIX_RE.sub("", lines[i])
             m = _MENU_OPTION_RE.match(cleaned)
             if m:
                 opts.append(f"{m.group(1)}. {m.group(2).strip()}")
-            elif opts:
-                # Stop at the first non-option line after we've started.
-                break
         return tuple(opts)
