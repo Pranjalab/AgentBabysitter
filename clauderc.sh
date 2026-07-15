@@ -107,6 +107,34 @@ tg_api() {
 # TG_ERR. curl's own failures are swallowed by tg_api, so an empty response
 # and a rejected one both have to land here as failures — otherwise a revoked
 # token produces a silent success and the report just never arrives.
+# sendVoice needs multipart, so it can't reuse tg_api's JSON body — but it keeps
+# the same property that matters: the token goes in via -K on stdin, never argv,
+# so it can't be read out of `ps` by anything else on the box.
+tg_send_voice() {
+  local chat="$1" file="$2" caption="${3:-}" resp
+  [ -f "$file" ] || { TG_ERR="no such file: $file"; return 1; }
+  resp="$(
+    {
+      printf 'url = "https://api.telegram.org/bot%s/sendVoice"\n' "$BOT_TOKEN"
+      printf 'form = "chat_id=%s"\n' "$chat"
+      printf 'form = "voice=@%s"\n' "$file"
+      # -K parses double-quoted values with backslash escapes, so a caption
+      # containing a quote would end the value early and mangle the rest.
+      [ -n "$caption" ] && printf 'form = "caption=%s"\n' \
+        "$(printf '%s' "$caption" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    } | curl -sS --max-time 120 -K - 2>/dev/null || true
+  )"
+  if [ -z "$resp" ]; then
+    TG_ERR="no response from api.telegram.org (network?)"
+    return 1
+  fi
+  if [ "$(jq -r '.ok // false' <<<"$resp" 2>/dev/null)" != "true" ]; then
+    TG_ERR="$(jq -r '.description // "unknown error"' <<<"$resp" 2>/dev/null)"
+    return 1
+  fi
+  TG_ERR=""
+}
+
 TG_ERR=""
 tg_send() {
   local chat="$1" text="$2" markup="${3:-}" body resp
@@ -524,6 +552,7 @@ Send \"rc quiet\" to mute reports, \"rc status\" to check state." \
 
 build_prompt() {
   local cid="$1"
+  local PROJECT_ROOT="${SCRIPT_PATH%/*}"
   cat <<EOF
 === CLAUDE RC IS ACTIVE (Telegram) ===
 
@@ -567,6 +596,31 @@ nothing else in the message — run:
 That script posts the report to Telegram itself. Do not summarize it or re-send
 it with \`reply\`: you would only duplicate what the script already delivered.
 Say nothing further unless the numbers deserve a comment.
+
+VOICE
+This project has a working voice pipeline in both directions. Use it. Do not go
+hunting for a TTS binary on PATH — there isn't one, and the engine you want is
+already installed here in its own venv.
+
+Inbound: a voice note arrives with attachment_file_id on the <channel> tag.
+Fetch it with the \`download_attachment\` tool, then transcribe it:
+
+    ${PROJECT_ROOT}/.venv/bin/python ${PROJECT_ROOT}/transcribe.py <file.oga>
+
+Then act on the transcript as if they had typed it. No need to read it back to
+them unless a word looks garbled enough to change the meaning.
+
+Outbound, only when they ask for a voice answer:
+
+    bash "${SCRIPT_PATH}" --profile ${PROFILE} say "the text to speak"
+
+That synthesizes and sends the voice bubble itself, so do not also \`reply\` with
+the same words. Never attach audio with \`reply\` — it lands as a document, not a
+playable voice note. Synthesis takes ~30s and holds the GPU.
+
+You cannot hear what you generated. If it matters, run the output back through
+transcribe.py and confirm the words survived — that catches truncation and
+garbling. On tone you are guessing; say so rather than claiming it sounds good.
 
 QUIET MODE
 Before any proactive send, check state:
@@ -889,6 +943,52 @@ cmd_menu() {
     "$(clear_keyboard)" || warn "Menu registered, but the chat notice didn't send: $TG_ERR"
 }
 
+# --- voice out ---------------------------------------------------------------
+#
+# Why this exists rather than "just call speak.py": the plugin's own `reply`
+# tool attaches any non-image as a *document*, so a generated .ogg arrives as a
+# file to download rather than a voice bubble you can tap. Only sendVoice gives
+# the bubble and waveform. That's a Bot API call, so it belongs here next to the
+# token — not in a Python script that would need its own copy.
+cmd_say() {
+  require_setup
+  load_token || die "No bot token at $TG_ENV. Run: crc setup"
+  local cid; cid="$(state_get '.chat_id')"
+  [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $RC_STATE."
+
+  local venv="${SCRIPT_PATH%/*}/.venv-tts/bin/python"
+  [ -x "$venv" ] || die "No TTS venv at $venv — voice is an optional add-on. See README (Voice)."
+  command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found — speak.py needs it to make Opus."
+
+  local keep="" text=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --keep) keep="$2"; shift 2 ;;
+      --) shift; text="$*"; break ;;
+      -*) die "Usage: crc say [--keep FILE] \"text\"   (text of \"-\" reads stdin)" ;;
+      *)  text="$1"; shift ;;
+    esac
+  done
+  [ -n "$text" ] || die "Nothing to say. Usage: crc say \"text\""
+  [ "$text" = "-" ] && text="$(cat)"
+
+  local out; out="${keep:-$(mktemp --suffix=.ogg)}"
+  # speak.py chatters progress to stderr; only its last line is the summary.
+  "$venv" "${SCRIPT_PATH%/*}/speak.py" "$text" "$out" >/dev/null || {
+    [ -n "$keep" ] || rm -f "$out"
+    die "Synthesis failed."
+  }
+
+  if tg_send_voice "$cid" "$out"; then
+    ok "Voice note sent to @$(state_get '.bot')."
+  else
+    [ -n "$keep" ] || rm -f "$out"
+    die "Generated, but Telegram rejected it: $TG_ERR"
+  fi
+  [ -n "$keep" ] && info "${c_dim}kept: $out${c_reset}" || rm -f "$out"
+  return 0
+}
+
 # --- run ---------------------------------------------------------------------
 
 cmd_run() {
@@ -949,6 +1049,7 @@ ${c_bold}Claude RC${c_reset} — remote control for Claude Code, over Telegram
   ${c_bold}crc${c_reset} usage [--print|--send]
                           Report subscription limits (sends to Telegram by default)
   ${c_bold}crc${c_reset} menu               Re-register the Telegram "/" command menu
+  ${c_bold}crc${c_reset} say "text"         Speak it and send as a voice note (needs .venv-tts)
 
   ${c_bold}crc${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
   ${c_bold}crc${c_reset} off                 Hard off: drop ALL inbound Telegram
@@ -1016,6 +1117,7 @@ main() {
     profiles)  cmd_profiles ;;
     usage)     shift; cmd_usage "${1:-}" ;;
     menu)      shift; cmd_menu ;;
+    say)       shift; cmd_say "$@" ;;
     quiet)     shift; cmd_quiet "${1:-}" ;;
     is-quiet)  cmd_is_quiet ;;
     off)       cmd_off ;;

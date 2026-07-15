@@ -70,6 +70,7 @@ Every run after that just starts the session. Setup is once per bot, not per pro
 | `crc profiles` | List every bot and which ones are in use |
 | `crc usage` | Subscription limits — to terminal and Telegram |
 | `crc menu` | Re-register the `/` command menu |
+| `crc say "text"` | Speak it and send as a voice note (needs `.venv-tts`) |
 | `crc quiet on` | Mute reports — **inbound still works** |
 | `crc quiet off` | Resume reports |
 | `crc off` | Hard off — drop *all* inbound Telegram |
@@ -194,11 +195,26 @@ Not theoretical — measured, by running both against a live poller:
 Send a voice note and Claude transcribes it. Ask for a reply in voice and it speaks back. Both run locally — no audio leaves the machine for transcription or synthesis.
 
 ```sh
+crc say "text"                                         # speak it AND send it (the usual way)
 .venv/bin/python transcribe.py <file.oga>              # speech → text (faster-whisper)
-.venv-tts/bin/python speak.py "text" out.ogg           # text → speech (chatterbox)
+.venv-tts/bin/python speak.py "text" out.ogg           # text → speech (chatterbox), file only
+```
+
+**Inbound.** A voice note arrives with `attachment_file_id` on the `<channel>` tag. Claude fetches it with the plugin's `download_attachment` tool and runs `transcribe.py` on it, then treats the transcript as if you'd typed it. The injected prompt tells it to do this, so "send a voice note" needs no ceremony at your end.
+
+**Outbound.** `crc say` is the one to reach for: it synthesizes *and* delivers the voice bubble. `speak.py` only writes a file.
+
+That split exists for a reason worth knowing. The plugin's `reply` tool attaches any non-image as a **document** — so a generated `.ogg` shows up as a file to download rather than a bubble with a waveform. Only the Bot API's `sendVoice` gives you the real thing, and that needs the token, so it lives in `clauderc.sh` next to it rather than in a Python script that would need its own copy.
+
+```sh
+crc say "the text to speak"
+crc say --keep out.ogg "text"     # also keep the file
+crc say - < story.txt             # read stdin
 ```
 
 `speak.py --exag` is an emotion dial: `0.3` flat, `0.5` natural, `0.8+` animated. Lower `--cfg` slows the delivery, which pairs well with a high `--exag`.
+
+**Long text is chunked, and that's load-bearing.** One `generate()` call stops at chatterbox's token cap — roughly 40 seconds of speech — and returns the short clip with *no error and no flag*. A story hands back its opening and silently loses its ending, and nothing downstream can distinguish that from a genuinely short line. It's the worst shape of bug: the failure looks like success. `speak.py` splits at sentence boundaries under `--max-chars` (default 220), generates each, and stitches with `--gap` between paragraphs, so every seam lands where a reader would breathe.
 
 Voice is optional — everything above works without it. Setting it up needs [`uv`](https://docs.astral.sh/uv/) and `ffmpeg` (`speak.py` shells out to it to produce Opus; without it you get a `FileNotFoundError` at the very last step, after the model has already run).
 
@@ -213,7 +229,9 @@ That `setuptools<81` is not optional and the failure it prevents is nasty: chatt
 
 **Transcription runs on CPU, synthesis on GPU.** Whisper on 8 threads clears a voice note in about half the time it took to record, and leaves the GPU alone — usually it's busy serving Ollama. Chatterbox wants CUDA and about 3GB of VRAM, which fits alongside a 7B model on a 16GB card. `speak.py --cpu` forces it off the GPU if you'd rather not contend at all.
 
-**Claude cannot hear its own output.** Worth knowing, because it shapes what you can trust: if it tells you a generated clip sounds a certain way, it's guessing. The honest check is to run the output back through `transcribe.py` and confirm the words survived — that catches garbled synthesis, but not tone. For tone, you're the only ear.
+**Claude cannot hear its own output.** Worth knowing, because it shapes what you can trust: if it tells you a generated clip sounds a certain way, it's guessing. The honest check is to run the output back through `transcribe.py` and confirm the words survived — that catches garbled synthesis and truncation, but not tone. For tone, you're the only ear.
+
+That check isn't hypothetical. It's what caught the truncation bug above: a story came back 30.5s instead of 37s, and the transcript ended mid-sentence with the closing line gone. Nothing else would have noticed.
 
 ## Security model
 
