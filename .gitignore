@@ -1,0 +1,61 @@
+# Symlinks into $HOME — added for convenience, not for sharing.
+# They leak the local home layout, and memory/ is personal working state.
+/memory
+/GLOBAL-CLAUDE.md
+
+# Claude Code per-machine state
+.claude/settings.local.json
+.claude/settings.json.bak-*
+
+# Secrets. The bot token actually lives in ~/.claude/channels/telegram/.env,
+# outside this repo — these patterns are belt-and-braces so a stray copy or a
+# future .env here can never be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+id_rsa*
+credentials.json
+.credentials.json
+
+# RC + plugin state, in case TELEGRAM_STATE_DIR or CLAUDE_RC_DIR is ever pointed
+# at this repo instead of ~/.claude. rc.json holds your chat_id; access.json
+# holds your numeric Telegram user ID. Both identify you personally.
+rc.json
+access.json
+inbox/
+
+# Voice pipeline venvs. Two, not one: chatterbox-tts pulls a numba pin that only
+# builds on Python <3.10, so TTS lives in its own 3.11 env. See README.
+.venv/
+.venv-tts/
+__pycache__/
+*.py[cod]
+
+# Generated and received audio. speak.py writes ./voice.ogg by default and
+# transcribe.py is usually pointed at a note downloaded from Telegram — so
+# anything matching here is someone's actual voice, not a build artifact.
+*.ogg
+*.oga
+*.wav
+*.mp3
+*.m4a
+*.webm
+!samples/*.wav
+
+# Runtime / logs
+*.log
+*.pid
+tmp/
+scratch/
+
+# OS + editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
