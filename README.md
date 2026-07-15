@@ -24,7 +24,7 @@ This is **glue, not a new system**. Anthropic ships an official Telegram plugin 
 - Pairs your Telegram account to the machine with a PIN, without you typing anything into Claude.
 - Injects the "report when done, ask for feedback" behavior per-session, so your projects' `CLAUDE.md` stays untouched.
 - Manages **profiles**, so you can run several sessions at once on different bots.
-- Puts a **button panel** and a proper command menu in the chat.
+- Puts a proper **command menu** in the chat.
 - Reports your **subscription limits** to the phone.
 - Gives you a real on/off switch.
 
@@ -55,7 +55,7 @@ First run walks you through it:
 
 - Paste the token (input is hidden). It's verified against Telegram immediately, so a typo fails now rather than three steps later.
 - The script prints a 6-character PIN. Send that PIN to your bot on Telegram.
-- Once it arrives, you're paired. The bot confirms in-chat, sends the button panel, and Claude Code starts.
+- Once it arrives, you're paired. The bot confirms in-chat, registers the command menu, and Claude Code starts.
 
 Every run after that just starts the session. Setup is once per bot, not per project.
 
@@ -69,7 +69,7 @@ Every run after that just starts the session. Setup is once per bot, not per pro
 | `crc status` | Pairing, inbound state, mute state, whether the poller is live |
 | `crc profiles` | List every bot and which ones are in use |
 | `crc usage` | Subscription limits — to terminal and Telegram |
-| `crc panel` | (Re-)send the button bar and command menu |
+| `crc menu` | Re-register the `/` command menu |
 | `crc quiet on` | Mute reports — **inbound still works** |
 | `crc quiet off` | Resume reports |
 | `crc off` | Hard off — drop *all* inbound Telegram |
@@ -112,22 +112,6 @@ Running `crc` with no arguments and more than one profile gives you a picker, wi
 
 ## From the phone
 
-### The button panel
-
-Setup sends a persistent button bar that sits above the keyboard:
-
-```
-[/model opus]  [/model sonnet]  [/model haiku]
-[rc usage]     [/stop]          [/compact]
-[/resume]      [/sessions]
-```
-
-Tapping a button sends its label as a message. `crc panel` re-sends it, `crc panel --off` hides it. Telegram stores the keyboard client-side per chat, so it survives session restarts without being re-sent.
-
-**Why the labels look like commands rather than nice words:** a Telegram `KeyboardButton` sends its label *verbatim* — there's no separate payload field. A prettier `[🧠 Opus]` would send the literal text `🧠 Opus`, which doesn't start with `/`, so Claude Code would never parse it as a command. The labels have to *be* the commands.
-
-**Why not inline buttons** (the tidier kind, attached under a message): they deliver taps as `callback_query` updates, and only the plugin polls this bot. The plugin's `reply` tool has no `reply_markup` parameter, and its callback handler ignores any data that isn't its own permission prompt — so inline buttons would be silently tap-dead, with no error to explain why. Reply-keyboard taps arrive as ordinary text, which the plugin already forwards. That's the seam this uses.
-
 ### The command menu
 
 The `/` button lists what Claude Code itself understands:
@@ -143,13 +127,22 @@ The `/` button lists what Claude Code itself understands:
 
 `/model` and `/effort` are the two worth remembering. Kicking a long task down to `haiku`, or up to `opus` for something hairy, works from bed.
 
-`crc panel` registers this menu **at chat scope**, and that detail is load-bearing. The plugin re-registers its own three commands (`/start`, `/help`, `/status`) at `all_private_chats` scope every time it starts, and that scope outranks the default one — so without this you'd see three commands in your DM instead of ten. Chat scope outranks `all_private_chats`, so ours wins and survives every restart. The list is *read* from whatever Claude Code registers rather than hardcoded, so it tracks new commands automatically.
+Setup registers this menu **at chat scope** (`crc menu` re-registers it), and that detail is load-bearing. The plugin re-registers its own three commands (`/start`, `/help`, `/status`) at `all_private_chats` scope every time it starts, and that scope outranks the default one — so without this you'd see three commands in your DM instead of ten. Chat scope outranks `all_private_chats`, so ours wins and survives every restart. The list is *read* from whatever Claude Code registers rather than hardcoded, so it tracks new commands automatically.
 
 `/start`, `/help` and `/status` are reserved — the plugin answers them itself and they never reach Claude.
 
 `/usage` is the odd one out: Claude Code doesn't know it, so it arrives as plain text and the injected prompt tells Claude to run `crc usage --send`. That's an instruction, not a wired handler. If it ever no-ops, say "run crc usage" instead.
 
 Plain English works for anything without a command: "switch to opus", "stop", "how much context is left".
+
+### Why there's no button bar
+
+There was one — a reply keyboard pinned above the input, with `[/model opus]`, `[/stop]` and friends. It worked, and it's gone anyway: it ate a third of a phone screen to duplicate what the `/` menu already does in one tap. If you're tempted to add it back, two findings from that build are worth keeping:
+
+- **Inline buttons cannot work here** (the tidier kind, attached under a message). They deliver taps as `callback_query` updates, and only the plugin polls this bot. Its `reply` tool has no `reply_markup` parameter, and its callback handler ignores any data that isn't its own permission prompt — so they'd be silently tap-dead, with no error to explain why. Reply-keyboard taps arrive as ordinary text, which the plugin already forwards. That was the seam.
+- **Reply-keyboard labels *are* the payload.** A `KeyboardButton` sends its label verbatim; there's no separate data field. A prettier `[🧠 Opus]` sends the literal text `🧠 Opus`, which doesn't start with `/`, so Claude Code never parses it as a command. The labels have to be the commands, which is exactly why the bar looked like a wall of slash-commands.
+
+Telegram stores a reply keyboard client-side per chat, so deleting the code doesn't clear it. `crc menu` sends a `remove_keyboard` to sweep up any bar left over from an older version.
 
 ### Two kinds of off, and why
 
@@ -294,7 +287,7 @@ What's in the repo:
 
 | File | What | Needed? |
 | --- | --- | --- |
-| `clauderc.sh` | The whole thing — setup, pairing, profiles, panel, usage, session launch | yes |
+| `clauderc.sh` | The whole thing — setup, pairing, profiles, menu, usage, session launch | yes |
 | `install.sh` | Links `crc` into `~/.local/bin` | yes, once |
 | `transcribe.py` | Voice note → text (faster-whisper, CPU) | optional |
 | `speak.py` | Text → Telegram voice note (chatterbox, GPU) | optional |

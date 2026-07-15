@@ -510,9 +510,9 @@ cmd_setup() {
 This chat is now linked to your Claude Code terminal. You'll get a short report when a task finishes, and you can reply here to give instructions.
 
 Send \"rc quiet\" to mute reports, \"rc status\" to check state." \
+    "$(clear_keyboard)" \
     || warn "Paired, but the confirmation message didn't send: $TG_ERR"
 
-  send_panel "$cid" || warn "Paired, but the button panel didn't send: $TG_ERR"
   register_commands "$cid" || warn "Paired, but the command menu didn't register."
 
   step "Setup complete"
@@ -553,14 +553,14 @@ HOW TO WRITE IT
 - Under ~800 characters. They are reading on a phone.
 - Lead with the outcome, not the process.
 
-BUTTON PANEL
-The chat has a button bar above the input, and a "/" command menu. Most "/"
-commands (/model, /stop, /compact, /resume, /sessions, /effort, /new, /use,
-/link) are handled by Claude Code itself and never reach you — ignore them.
+COMMAND MENU
+The chat has a "/" command menu next to the input. Most "/" commands (/model,
+/stop, /compact, /resume, /sessions, /effort, /new, /use, /link) are handled by
+Claude Code itself and never reach you — ignore them.
 
 One command is yours, and it arrives as ordinary text because Claude Code does
-not know it. If the operator sends "rc usage" (the button) or "/usage" (the
-menu entry) — nothing else in the message — run:
+not know it. If the operator sends "/usage" (the menu entry) or "rc usage" —
+nothing else in the message — run:
 
     bash "${SCRIPT_PATH}" --profile ${PROFILE} usage --send
 
@@ -829,41 +829,27 @@ cmd_usage() {
   fi
 }
 
-# --- button panel ------------------------------------------------------------
+# --- command menu ------------------------------------------------------------
 #
-# Why a reply keyboard and not inline buttons:
+# There used to be a reply keyboard here — a button bar pinned above the input.
+# It worked, but it ate a third of the screen on a phone to duplicate what the
+# "/" menu already offers, so it's gone. Two things are worth keeping from that
+# experiment, in case anyone is tempted to add buttons back:
 #
-# Inline buttons deliver taps as callback_query updates. Only the plugin polls
-# this token (Telegram allows one getUpdates consumer per bot), its `reply` tool
-# has no reply_markup parameter, and its callback handler silently ignores any
-# data that isn't its own permission prompts. Our inline buttons would be
-# tap-dead, with no error anywhere to explain why.
+#   Inline buttons cannot work here. Taps arrive as callback_query updates, only
+#   the plugin polls this token (Telegram allows one getUpdates consumer per
+#   bot), and its handler silently drops any callback that isn't its own
+#   permission prompt. The buttons would be tap-dead with no error to explain it.
 #
-# Reply-keyboard taps arrive as ordinary text messages instead, which the plugin
-# already forwards to Claude Code. And sendMessage is not exclusive the way
-# getUpdates is, so we can attach the keyboard ourselves without touching the
-# plugin at all.
+#   Reply-keyboard buttons send their label VERBATIM — there is no payload
+#   field. A prettier "🧠 Opus" sends the literal text "🧠 Opus", which doesn't
+#   start with "/", so Claude Code would never parse it as a command.
 #
-# The consequence to know: a KeyboardButton sends its label VERBATIM — there is
-# no separate payload field. So the labels below have to BE the commands. A
-# prettier "🧠 Opus" would send the literal text "🧠 Opus", which doesn't start
-# with "/", so Claude Code would never parse it as a command.
-panel_markup() {
-  jq -n '{
-    keyboard: [
-      [{text:"/model opus"}, {text:"/model sonnet"}, {text:"/model haiku"}],
-      [{text:"rc usage"},    {text:"/stop"},         {text:"/compact"}],
-      [{text:"/resume"},     {text:"/sessions"}]
-    ],
-    is_persistent: true,
-    resize_keyboard: true,
-    input_field_placeholder: "Message Claude…"
-  }'
-}
-
-send_panel() {
-  local cid="$1"
-  tg_send "$cid" "Claude RC panel — tap a button, or just type." "$(panel_markup)"
+# Telegram stores a reply keyboard client-side, per chat, until something clears
+# it — deleting this code does not. Hence clear_keyboard(), which rides along on
+# messages we were already sending.
+clear_keyboard() {
+  jq -n '{remove_keyboard:true}'
 }
 
 # Mirror Claude Code's own command list into this chat's scope.
@@ -888,26 +874,19 @@ register_commands() {
   jq -e '.ok' >/dev/null 2>&1 <<<"$(tg_api setMyCommands "$body")"
 }
 
-cmd_panel() {
+cmd_menu() {
   require_setup
   load_token || die "No bot token at $TG_ENV. Run: crc setup"
   local cid; cid="$(state_get '.chat_id')"
   [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $RC_STATE."
 
-  if [ "${1:-}" = "--off" ]; then
-    tg_send "$cid" "Panel hidden. Run 'crc panel' to bring it back." \
-      "$(jq -n '{remove_keyboard:true}')" || die "Could not reach Telegram: $TG_ERR"
-    ok "Panel removed."
-    return 0
-  fi
+  register_commands "$cid" || die "Could not register the command menu."
+  ok "Command menu registered for @$(state_get '.bot')."
 
-  send_panel "$cid" || die "Could not send the panel: $TG_ERR"
-  ok "Panel sent to @$(state_get '.bot')."
-  if register_commands "$cid"; then
-    ok "Command menu registered for this chat."
-  else
-    warn "Could not register the command menu (the panel itself still works)."
-  fi
+  # setMyCommands changes the "/" menu but sends nothing to the chat, so this is
+  # also the only chance to clear a keyboard left over from an older version.
+  tg_send "$cid" "Command menu updated — tap / next to the input to see it." \
+    "$(clear_keyboard)" || warn "Menu registered, but the chat notice didn't send: $TG_ERR"
 }
 
 # --- run ---------------------------------------------------------------------
@@ -969,7 +948,7 @@ ${c_bold}Claude RC${c_reset} — remote control for Claude Code, over Telegram
 
   ${c_bold}crc${c_reset} usage [--print|--send]
                           Report subscription limits (sends to Telegram by default)
-  ${c_bold}crc${c_reset} panel [--off]       Send (or remove) the Telegram button bar
+  ${c_bold}crc${c_reset} menu               Re-register the Telegram "/" command menu
 
   ${c_bold}crc${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
   ${c_bold}crc${c_reset} off                 Hard off: drop ALL inbound Telegram
@@ -1036,7 +1015,7 @@ main() {
     status)    cmd_status ;;
     profiles)  cmd_profiles ;;
     usage)     shift; cmd_usage "${1:-}" ;;
-    panel)     shift; cmd_panel "${1:-}" ;;
+    menu)      shift; cmd_menu ;;
     quiet)     shift; cmd_quiet "${1:-}" ;;
     is-quiet)  cmd_is_quiet ;;
     off)       cmd_off ;;
