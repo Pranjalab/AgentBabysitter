@@ -41,17 +41,26 @@ Telegram plugin. No daemon, no webhook, no second copy of your session.
 Install it, then run `abs` instead of `claude`:
 
 ```sh
-pipx install agent-babysitter     # or: pip install agent-babysitter
+curl -fsSL https://agentbabysitter.com/install.sh | bash
 abs
 ```
 
-Prefer to run from source, or want to contribute?
+It installs a single script to `~/.local/bin/abs` and touches nothing else. Piping
+to `bash` is your call to make — [read it first](https://agentbabysitter.com/install.sh)
+if you'd rather.
+
+Prefer Python packaging?
+
+```sh
+pipx install agent-babysitter     # or: pip install agent-babysitter
+```
+
+From source, or to contribute:
 
 ```sh
 git clone https://github.com/Pranjalab/AgentBabysitter
 cd AgentBabysitter
 ./install.sh
-abs
 ```
 
 **About two minutes, once per bot:**
