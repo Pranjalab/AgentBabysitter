@@ -252,8 +252,10 @@ Not yet. Messages are read between turns, so you can steer the next step but not
 interrupt the current one.
 
 **Which platforms are supported?**
-Built and tested on Linux. It should run anywhere with `bash`; macOS may need GNU
-coreutils (`readlink -f` and `date -d` are used). Contributions welcome.
+Linux and macOS, both tested — including macOS's ancient bash 3.2, with no
+Homebrew or GNU coreutils needed. On macOS, reset times show as clock times
+(`resets Jul 17 at 2:40am`) rather than countdowns, since that needs GNU `date`.
+Windows via WSL should work but is untested; reports welcome.
 
 ## 🙏 Acknowledgements
 
