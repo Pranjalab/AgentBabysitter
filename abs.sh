@@ -237,12 +237,21 @@ migrate_legacy() {
 # Is this profile's bot already being polled? bot.pid is written by the plugin's
 # MCP server (it kills stale holders on boot to enforce the one-poller rule), so
 # a live pid means the token is genuinely taken.
+# Prints the live poller's pid, or nothing. Always succeeds: "nobody is polling"
+# is an answer to this question, not a failure.
+#
+# It used to `return 1` for that case and callers wrote `if pid="$(...)"`. That
+# reads fine and works on bash 5, but `$( )` is a subshell and `set -E`
+# propagates the ERR trap into it — and the subshell has no idea it's a
+# condition, so on bash 3.2 (which is what macOS ships) every `abs`, `abs
+# status` and `abs profiles` printed "Unexpected failure at line N" whenever no
+# poller was running, i.e. the normal case.
 profile_live_pid() {
   local pid_file="$TG_DIR/bot.pid" pid
-  [ -f "$pid_file" ] || return 1
-  pid="$(cat "$pid_file" 2>/dev/null)" || return 1
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
+  [ -f "$pid_file" ] || return 0
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
   printf '%s' "$pid"
 }
 
@@ -267,7 +276,8 @@ pick_profile() {
     use_profile "$n"
     local bot live tag=""
     bot="$(jq -r '.bot // "?"' "$ABS_STATE" 2>/dev/null || echo '?')"
-    if live="$(profile_live_pid)"; then tag=" ${c_yellow}(in use, pid $live)${c_reset}"; fi
+    live="$(profile_live_pid)"
+    if [ -n "$live" ]; then tag=" ${c_yellow}(in use, pid $live)${c_reset}"; fi
     info "  $i) ${c_bold}$n${c_reset} — @${bot}${tag}"
     i=$((i + 1))
   done
@@ -327,7 +337,8 @@ ensure_plugin() {
 # (HTTP 409) and updates would land in whichever poller won the race.
 assert_no_live_session() {
   local pid
-  if pid="$(profile_live_pid)"; then
+  pid="$(profile_live_pid)"
+  if [ -n "$pid" ]; then
     die "Profile '$PROFILE' already has a live poller (pid $pid).
   Telegram permits only one poller per bot, so pairing would collide with it.
   Quit that session, then run setup again."
@@ -789,7 +800,8 @@ cmd_status() {
   info "  chat id      $(state_get '.chat_id')"
   info "  inbound      $([ "$policy" = "disabled" ] && printf '%sOFF%s (%s)' "$c_red" "$c_reset" "$policy" || printf '%son%s (%s)' "$c_green" "$c_reset" "$policy")"
   info "  reports      $([ "$quiet" = "quiet" ] && printf '%smuted%s' "$c_yellow" "$c_reset" || printf '%son%s' "$c_green" "$c_reset")"
-  if pid="$(profile_live_pid)"; then
+  pid="$(profile_live_pid)"
+  if [ -n "$pid" ]; then
     info "  poller       ${c_green}live${c_reset} (pid $pid)"
   else
     info "  poller       ${c_dim}not running${c_reset} — start one with: abs --profile $PROFILE"
@@ -808,7 +820,8 @@ cmd_profiles() {
     use_profile "$n"
     local bot pid tag="${c_dim}idle${c_reset}"
     bot="$(jq -r '.bot // "?"' "$ABS_STATE" 2>/dev/null || echo '?')"
-    if pid="$(profile_live_pid)"; then tag="${c_green}live${c_reset} (pid $pid)"; fi
+    pid="$(profile_live_pid)"
+    if [ -n "$pid" ]; then tag="${c_green}live${c_reset} (pid $pid)"; fi
     info "  ${c_bold}$n${c_reset}  @${bot}  $tag"
   done
 }
@@ -1119,7 +1132,8 @@ cmd_run() {
   fi
 
   local pid
-  if pid="$(profile_live_pid)"; then
+  pid="$(profile_live_pid)"
+  if [ -n "$pid" ]; then
     die "Profile '$PROFILE' is already being polled (pid $pid).
   Telegram permits one poller per bot. Quit that session first, or use a
   different bot:  abs --profile <name>    (see: abs profiles)"
@@ -1138,10 +1152,14 @@ cmd_run() {
   export TELEGRAM_STATE_DIR="$TG_DIR"
 
   info "${c_dim}Starting Claude Code — profile '$PROFILE' → @$(state_get '.bot')${c_reset}"
+  # ${a[@]+"${a[@]}"}, not "${a[@]}": expanding an empty array under `set -u` is
+  # an error on bash 3.2, which is what macOS ships and will keep shipping. This
+  # line is the last thing abs does, so getting it wrong means setup completes
+  # and then the launch dies.
   exec claude \
     --channels "plugin:${PLUGIN_ID}" \
     --append-system-prompt "$(build_prompt "$cid")" \
-    "${perm_args[@]}" \
+    ${perm_args[@]+"${perm_args[@]}"} \
     "$@"
 }
 
