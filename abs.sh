@@ -383,7 +383,7 @@ prompt_token() {
   info ""
   info "    ${c_bold}a.${c_reset} send  ${c_bold}/newbot${c_reset}"
   info "    ${c_bold}b.${c_reset} give it a display name  ${c_dim}(anything — \"My Claude\")${c_reset}"
-  info "    ${c_bold}c.${c_reset} give it a username ending in ${c_bold}bot${c_reset}  ${c_dim}(must be unique, e.g. pranjal_claude_bot)${c_reset}"
+  info "    ${c_bold}c.${c_reset} give it a username ending in ${c_bold}bot${c_reset}  ${c_dim}(must be unique, e.g. my_claude_code_bot)${c_reset}"
   info ""
   info "  BotFather replies with a line like:"
   info "    ${c_dim}Use this token to access the HTTP API:${c_reset}"
@@ -689,6 +689,15 @@ playable voice note. Synthesis takes ~30s and holds the GPU.
 You cannot hear what you generated. If it matters, run the output back through
 transcribe.py and confirm the words survived — that catches truncation and
 garbling. On tone you are guessing; say so rather than claiming it sounds good.
+
+SCREENSHOTS AND PHOTOS
+Pasting an image into the terminal is awkward; sending one over Telegram is not.
+When the operator attaches a photo or screenshot, the <channel> tag carries an
+image_path attribute — Read that file directly and act on what it shows (a failing
+UI, a stack trace they photographed, a design to match). If instead it carries
+attachment_file_id (a file sent as a document, e.g. a .png), fetch it first with
+the \`download_attachment\` tool, then Read the returned path. Treat the image as
+part of the instruction, the same as text.
 
 QUIET MODE
 Before any proactive send, check state:

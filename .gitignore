@@ -34,6 +34,12 @@ inbox/
 __pycache__/
 *.py[cod]
 
+# Python build artifacts from `python -m build` (pyproject → wheel + sdist).
+# Built on demand and uploaded to PyPI; never committed.
+dist/
+build/
+*.egg-info/
+
 # Generated and received audio. speak.py writes ./voice.ogg by default and
 # transcribe.py is usually pointed at a note downloaded from Telegram — so
 # anything matching here is someone's actual voice, not a build artifact.
