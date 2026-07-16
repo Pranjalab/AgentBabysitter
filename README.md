@@ -253,8 +253,9 @@ Agent Babysitter stands on two things it doesn't reinvent:
 ## 🤝 Contributing
 
 Issues, ideas, and pull requests are all welcome — bug reports and "it broke on my
-setup" notes especially. Open one at
-[github.com/Pranjalab/AgentBabysitter/issues](https://github.com/Pranjalab/AgentBabysitter/issues).
+setup" notes especially. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to test a
+change, and [our Code of Conduct](CODE_OF_CONDUCT.md) for the ground rules.
+Version history lives in [CHANGELOG.md](CHANGELOG.md).
 
 If Agent Babysitter saves you from waiting around for Claude Code, a ⭐ genuinely
 helps other developers find it.
