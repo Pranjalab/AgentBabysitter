@@ -929,15 +929,25 @@ field() {
   printf '%s\t%s' "$pct" "$reset"
 }
 
+# Claude does not spell this stamp the same way twice across versions: 2.1.211
+# emits "Jul 16, 5:29pm", other builds emit "Jul 16 at 5:29pm". No date(1)
+# understands the word "at" — GNU calls it an invalid date — so a version bump
+# silently costs you every relative time. Normalise both spellings to
+# "Jul 16 5:29pm", which GNU and BSD both parse, before going near date(1).
+norm_stamp() {
+  printf '%s' "$1" | sed -E 's/,//g; s/ +at +/ /g; s/  +/ /g; s/^ +//; s/ +$//'
+}
+
 # "Jul 16, 5:29pm" -> "in 16h 26m". Falls back to the raw stamp if date(1)
 # can't parse it, so a format change degrades instead of breaking.
 until_reset() {
-  local stamp="$1" target now delta h m
-  target="$(date -d "$(tr -d ',' <<<"$stamp")" +%s 2>/dev/null || true)"
+  local stamp="$1" norm target now delta h m
+  norm="$(norm_stamp "$stamp")"
+  target="$(date -d "$norm" +%s 2>/dev/null || true)"
   [ -n "$target" ] || { printf '%s' "$stamp"; return; }
   now="$(date +%s)"
   # A reset that parses as past means we rolled the year; add one.
-  [ "$target" -lt "$now" ] && target=$(date -d "$(tr -d ',' <<<"$stamp") +1 year" +%s 2>/dev/null || echo "$target")
+  [ "$target" -lt "$now" ] && target=$(date -d "$norm +1 year" +%s 2>/dev/null || echo "$target")
   delta=$(( target - now ))
   [ "$delta" -lt 0 ] && { printf 'now'; return; }
   h=$(( delta / 3600 )); m=$(( (delta % 3600) / 60 ))
