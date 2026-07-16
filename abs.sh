@@ -858,11 +858,51 @@ cmd_reset() {
 # Print mode currently skips MCP init anyway, but that is a server-side flag
 # (tengu_mcp_stateless_skip_init) which can flip back at any time. This flag is
 # the half we control.
+# timeout(1) is GNU coreutils. macOS ships no equivalent and no BSD spelling of
+# it, so this died at exit 127 before claude was ever invoked — /usage from
+# Telegram had never once worked on a Mac. Prefer the real thing, then
+# Homebrew's gtimeout, then run a watchdog ourselves.
+with_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+
+  local cmd_pid killer_pid rc=0
+  # `set -m` gives the child its own process group, so the watchdog can signal
+  # the whole tree. Without it we TERM only the direct child: its grandchildren
+  # live on, keep the inherited capture pipe open, and $( ) blocks until the
+  # command would have finished anyway — a timeout that times nothing out. This
+  # is what GNU timeout does for you.
+  set -m
+  "$@" &
+  cmd_pid=$!
+  set +m
+  # `exec >/dev/null` in the watchdog is load-bearing, not hygiene. This runs
+  # inside $( ), so every child inherits the capture pipe — and $( ) does not
+  # return until the last writer closes it. Without this, a watchdog sleeping out
+  # its deadline holds the pipe open long after the command exited, and the
+  # caller blocks for the full timeout on every success.
+  (
+    exec >/dev/null 2>&1
+    sleep "$secs"
+    kill -TERM "-$cmd_pid" 2>/dev/null || kill -TERM "$cmd_pid" 2>/dev/null || true
+  ) &
+  killer_pid=$!
+  wait "$cmd_pid" 2>/dev/null || rc=$?
+  kill "$killer_pid" 2>/dev/null || true
+  wait "$killer_pid" 2>/dev/null || true
+  return "$rc"
+}
+
+# Prints the raw usage text, or nothing. Always succeeds — same contract as
+# profile_live_pid, and for the same reason: this is called as "$(fetch_usage)",
+# and on bash 3.2 a `return 1` inside a command substitution fires the ERR trap
+# even though the caller tests the result. Callers judge by the output.
 fetch_usage() {
   local out
-  out="$(cd /tmp && timeout 90 claude --strict-mcp-config -p "/usage" 2>&1)" || return 1
-  [ -n "$out" ] || return 1
-  grep -q '% used' <<<"$out" || return 1
+  out="$(cd /tmp && with_timeout 90 claude --strict-mcp-config -p "/usage" 2>&1 || true)"
+  [ -n "$out" ] || return 0
+  grep -q '% used' <<<"$out" || return 0
   printf '%s\n' "$out"
 }
 
@@ -950,7 +990,10 @@ Week (all models)|Current week \(all models\)
 Week (Fable)|Current week \(Fable\)
 SPECS
 
-  [ "${#rows[@]}" -gt 0 ] || return 1
+  # Print-or-nothing, like fetch_usage: this runs inside "$(build_report ...)",
+  # and a `return 1` there fires the ERR trap on bash 3.2 despite the caller
+  # testing it.
+  [ "${#rows[@]}" -gt 0 ] || return 0
 
   case "$(severity "$max")" in
     crit) out="🔴 Claude usage — ${max}% on your tightest limit"$'\n\n' ;;
@@ -958,14 +1001,22 @@ SPECS
     *)    out="🟢 Claude usage — ${max}% on your tightest limit"$'\n\n' ;;
   esac
 
-  local r
+  local r rel
   for r in "${rows[@]}"; do
     label="${r%%|*}"; r="${r#*|}"; pct="${r%%|*}"; reset="${r#*|}"
-    if [ -n "$reset" ]; then
-      out+="$(printf '%s\n  %s %s%%  · resets %s (%s)' \
-        "$label" "$(bar "$pct")" "$pct" "$(until_reset "$reset")" "$reset")"$'\n\n'
-    else
+    rel="$(until_reset "$reset")"
+    if [ -z "$reset" ]; then
       out+="$(printf '%s\n  %s %s%%' "$label" "$(bar "$pct")" "$pct")"$'\n\n'
+    elif [ "$rel" = "$reset" ]; then
+      # until_reset echoes the stamp back when date(1) can't parse it — which is
+      # every macOS without GNU coreutils, since it needs `date -d`. Printing
+      # "resets Jul 18, 5:29pm (Jul 18, 5:29pm)" reads like the tool is broken.
+      # Say it once.
+      out+="$(printf '%s\n  %s %s%%  · resets %s' \
+        "$label" "$(bar "$pct")" "$pct" "$reset")"$'\n\n'
+    else
+      out+="$(printf '%s\n  %s %s%%  · resets %s (%s)' \
+        "$label" "$(bar "$pct")" "$pct" "$rel" "$reset")"$'\n\n'
     fi
   done
 
@@ -982,8 +1033,10 @@ cmd_usage() {
   esac
 
   local raw report
-  raw="$(fetch_usage)" || die "Could not read usage from 'claude -p /usage'."
-  report="$(build_report "$raw")" || die "Usage output did not match the expected format. Raw:"$'\n'"$raw"
+  raw="$(fetch_usage)"
+  [ -n "$raw" ] || die "Could not read usage from 'claude -p /usage'."
+  report="$(build_report "$raw")"
+  [ -n "$report" ] || die "Usage output did not match the expected format. Raw:"$'\n'"$raw"
 
   [ "$mode" = "send" ] || printf '%s\n' "$report"
 
