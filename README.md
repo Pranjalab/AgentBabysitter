@@ -31,7 +31,7 @@ Agent Babysitter fixes both. Start Claude with `abs` instead of `claude`. When a
 
 The terminal keeps working exactly as normal. Telegram and the terminal are the **same session**, not two conversations — so you can walk out mid-task, steer from your phone, come back, and keep typing where you left off. One bot per project, so a session each for the things you've got running at once.
 
-<img src="assets/bridge.png" alt="Diagram: a terminal running abs on the left, a Telegram conversation on the right, joined by a single line labelled one session, not a copy.">
+<img src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/bridge.png" alt="Diagram: a terminal running abs on the left, a Telegram conversation on the right, joined by a single line labelled one session, not a copy.">
 
 <sup>*Diagram, not a screenshot — it's the shape of the thing. Real screenshots are below.*</sup>
 
@@ -237,7 +237,7 @@ Week (all models)
 ```
 
 <div align="center">
-<img src="assets/usage-telegram.jpg" alt="The /usage report as it arrives in Telegram: a green headline, one bar per limit, and the time until each resets." width="620">
+<img src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/usage-telegram.jpg" alt="The /usage report as it arrives in Telegram: a green headline, one bar per limit, and the time until each resets." width="620">
 </div>
 
 **Where the numbers come from, and why that matters.** There is no `claude usage` subcommand and no public REST endpoint for this. The only non-interactive source is `claude -p "/usage"` — the same client-side slash command the TUI runs — so `abs` drives that and parses the text. That means **it is parsing a human-readable format that Anthropic can change without warning.** It's written to degrade rather than lie: an unparseable reset stamp falls back to printing the raw stamp, and output that doesn't match at all exits with an error and dumps what it saw. If it ever breaks, that's the first place to look.
