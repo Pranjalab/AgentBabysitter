@@ -1,13 +1,8 @@
 <div align="center">
 
-# Agent Babysitter
+<img src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/banner.jpg" alt="Agent Babysitter — remote-control and monitor Claude Code from Telegram. Leave your desk; Claude Code keeps working and messages your phone when it's done." width="100%">
 
 ### Remote-control and monitor Claude Code from Telegram
-
-Start a task, close the laptop, and let Claude keep coding. Agent Babysitter
-messages your phone when work finishes, takes your reply straight back into the
-**same live session**, and lets you send screenshots, use voice, and check your
-usage — all from Telegram.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-3da639.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/Pranjalab/AgentBabysitter?style=flat&color=d97757)](https://github.com/Pranjalab/AgentBabysitter/stargazers)
@@ -17,13 +12,16 @@ usage — all from Telegram.
 
 </div>
 
-<!-- Demo GIF goes here — the full loop: Claude working → Telegram "task done" → reply → Claude continues. -->
+Start a task, close the laptop, and let Claude keep coding. **Agent Babysitter**
+messages your phone when work finishes, takes your reply straight back into the
+**same live session**, and lets you send screenshots, use voice, and check your
+usage — all from Telegram.
 
-<img src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/bridge.png" alt="A terminal running abs on the left and a Telegram conversation on the right, joined by one line labelled 'one session, not a copy'.">
-
-Claude Code already does the work. **Agent Babysitter is the piece that lets you
-walk away from it** — a thin bash script wrapped around Anthropic's official
+Claude Code already does the work. Agent Babysitter is the piece that lets you
+walk away from it — a thin bash script wrapped around Anthropic's official
 Telegram plugin. No daemon, no webhook, no second copy of your session.
+
+<!-- Demo GIF goes here — the full loop: Claude working → Telegram "task done" → reply → Claude continues. -->
 
 ---
 
