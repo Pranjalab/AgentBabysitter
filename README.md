@@ -38,13 +38,19 @@ Telegram plugin. No daemon, no webhook, no second copy of your session.
 
 ## 🚀 Quick start
 
+Install it, then run `abs` instead of `claude`:
+
 ```sh
-# 1. Install
+pipx install agent-babysitter     # or: pip install agent-babysitter
+abs
+```
+
+Prefer to run from source, or want to contribute?
+
+```sh
 git clone https://github.com/Pranjalab/AgentBabysitter
 cd AgentBabysitter
 ./install.sh
-
-# 2. Launch Claude Code with Telegram wired in
 abs
 ```
 
