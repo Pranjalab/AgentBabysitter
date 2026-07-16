@@ -49,8 +49,18 @@ fi
 # Prefer the checkout we're sitting in: someone who cloned the repo means to
 # install *that* copy, not whatever main happens to be right now.
 
+#
+# Piped in (`curl … | bash`) there is no script file at all: BASH_SOURCE is an
+# empty array, which under `set -u` aborts the expansion — and the wreckage
+# collapses to `cd ""`, which succeeds and quietly leaves us in the *caller's*
+# directory. A stray abs.sh there would then get installed instead of the real
+# one. Only trust BASH_SOURCE when it actually names a file.
+
 src=""
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+here=""
+if [ -f "${BASH_SOURCE[0]:-}" ]; then
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+fi
 if [ -n "$here" ] && [ -f "$here/abs.sh" ]; then
   src="$here/abs.sh"
   info "${c_dim}Installing from this checkout.${c_reset}"
