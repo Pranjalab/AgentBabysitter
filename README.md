@@ -115,26 +115,30 @@ Running `crc` with no arguments and more than one profile gives you a picker, wi
 
 ### The command menu
 
-The `/` button lists what Claude Code itself understands:
+The `/` menu has exactly one entry:
 
 | Command | What it does |
 | --- | --- |
-| `/model` | Switch model (`sonnet` / `opus` / `haiku`) mid-session |
-| `/effort` | Set thinking effort (`low` / `medium` / `high`) |
-| `/stop` | Interrupt whatever is running right now |
-| `/compact` | Compact the context without going to the terminal |
-| `/new`, `/resume`, `/sessions`, `/use` | Start, resume, list sessions; set the default workspace |
 | `/usage` | Subscription limits and reset times |
 
-`/model` and `/effort` are the two worth remembering. Kicking a long task down to `haiku`, or up to `opus` for something hairy, works from bed.
+That's not an oversight, and this section used to promise nine more.
 
-Setup registers this menu **at chat scope** (`crc menu` re-registers it), and that detail is load-bearing. The plugin re-registers its own three commands (`/start`, `/help`, `/status`) at `all_private_chats` scope every time it starts, and that scope outranks the default one — so without this you'd see three commands in your DM instead of ten. Chat scope outranks `all_private_chats`, so ours wins and survives every restart. The list is *read* from whatever Claude Code registers rather than hardcoded, so it tracks new commands automatically.
+**Slash commands don't work from Telegram.** The plugin handles `/start`, `/help` and `/status` itself, and answers them without Claude ever seeing them. It has no handler for anything else, so `/model`, `/stop`, `/compact`, `/effort` and friends fall through to `bot.on('message:text')` and arrive at Claude as ordinary text that nothing executes. They aren't commands over this bridge; they're just words.
 
-`/start`, `/help` and `/status` are reserved — the plugin answers them itself and they never reach Claude.
+`/usage` is the exception, and only because the injected prompt tells Claude to run `crc usage --send` when it sees it. That's an instruction to a model, not a wired handler.
 
-`/usage` is the odd one out: Claude Code doesn't know it, so it arrives as plain text and the injected prompt tells Claude to run `crc usage --send`. That's an instruction, not a wired handler. If it ever no-ops, say "run crc usage" instead.
+Earlier versions advertised the full list because `register_commands` mirrored Telegram's *default* scope, believing it tracked "whatever Claude Code registers." Claude Code registers nothing — those entries had been written by an earlier version of this same script, so the mirror was reading its own output back and trusting it. Tapping one looked precisely like a broken bridge. **A menu that lies is worse than a menu with one honest entry**, so now it registers that one entry explicitly, at chat scope (which outranks the `all_private_chats` scope the plugin rewrites on every start).
 
-Plain English works for anything without a command: "switch to opus", "stop", "how much context is left".
+**Use plain English instead** — it's what actually works: "switch to opus", "stop", "how much context is left". Claude reads those and acts.
+
+For the things that genuinely can't change mid-session — model, effort, permission mode — there's no tool, so no amount of asking helps. Relaunch instead:
+
+```sh
+crc --model sonnet              # or opus, haiku
+crc --permission-mode plan      # or auto, manual, acceptEdits
+```
+
+Extra arguments pass straight through to `claude`, so anything the CLI accepts works here.
 
 ### Why there's no button bar
 

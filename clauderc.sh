@@ -583,11 +583,27 @@ HOW TO WRITE IT
 - Lead with the outcome, not the process.
 
 COMMAND MENU
-The chat has a "/" command menu next to the input. Most "/" commands (/model,
-/stop, /compact, /resume, /sessions, /effort, /new, /use, /link) are handled by
-Claude Code itself and never reach you — ignore them.
+The chat's "/" menu offers exactly one command: /usage. Take that literally —
+almost nothing else is wired up, and the previous version of this prompt was
+wrong about it in a way that made things worse.
 
-One command is yours, and it arrives as ordinary text because Claude Code does
+The plugin itself handles only /start, /help and /status; those never reach you.
+EVERYTHING else typed with a leading slash — /model, /stop, /compact, /effort,
+/resume, /sessions, /new, /use, /link — arrives in your context as an ordinary
+text message, and nothing anywhere executes it. If you stay silent, the operator
+sees their command do nothing and concludes the bridge is broken.
+
+So: never ignore one. Say plainly that it does nothing from Telegram, and give
+the real route. You cannot change model, effort, or permission mode mid-session
+— there is no tool for it, so do not imply otherwise. The honest answers are the
+terminal (where those commands are real), or a relaunch:
+
+    crc --model sonnet              # or opus, haiku
+    crc --permission-mode plan      # or auto, manual, acceptEdits
+
+/stop and /compact have no equivalent from the phone at all. Say so.
+
+One command IS yours, and it arrives as ordinary text because Claude Code does
 not know it. If the operator sends "/usage" (the menu entry) or "rc usage" —
 nothing else in the message — run:
 
@@ -906,25 +922,32 @@ clear_keyboard() {
   jq -n '{remove_keyboard:true}'
 }
 
-# Mirror Claude Code's own command list into this chat's scope.
+# Register this chat's "/" menu. Chat scope outranks the all_private_chats scope
+# the plugin re-registers on every startup, so ours wins and survives restarts.
 #
-# The plugin re-registers just /start, /help and /status at all_private_chats
-# scope on every startup. That scope outranks the default scope, so in a DM you
-# see three commands instead of Claude Code's eleven. Chat scope outranks
-# all_private_chats, so registering here wins and survives every restart.
+# The list is deliberately one entry long, and this used to be much longer.
 #
-# Reading the default scope instead of hardcoding a list means we track whatever
-# Claude Code registers, without drifting when it adds a command. The three
-# reserved names are dropped: the plugin answers those itself and they never
-# reach Claude, so offering them in the menu would only mislead.
+# The old version read Telegram's *default* scope and mirrored it here, on the
+# theory that it was tracking "whatever Claude Code registers". It wasn't.
+# Claude Code registers nothing — the plugin only ever handles /start, /help and
+# /status. Those twelve default-scope commands were written by an earlier version
+# of this very script, so the mirror was reading back its own output and
+# believing it was upstream truth.
+#
+# The result: a menu advertising ten commands, nine of which did nothing. The
+# plugin has no handler for them, so they fall through to `bot.on('message:text')`
+# and reach Claude as plain text. Tapping one looked exactly like a broken bridge.
+#
+# So: only advertise what actually works. A menu that lies is worse than a menu
+# with one honest entry in it.
 register_commands() {
-  local cid="$1" cur cmds body
-  cur="$(tg_api getMyCommands '{}')"
-  jq -e '.ok' >/dev/null 2>&1 <<<"$cur" || return 1
-  cmds="$(jq -c '[.result[] | select(.command | IN("start","help","status") | not)]' <<<"$cur")"
-  [ "$(jq 'length' <<<"$cmds")" -gt 0 ] || return 1
-  body="$(jq -nc --argjson c "$cmds" --arg id "$cid" \
-    '{commands:$c, scope:{type:"chat", chat_id:($id|tonumber)}}')"
+  local cid="$1" body
+  body="$(jq -nc --arg id "$cid" '{
+    commands: [
+      {command: "usage", description: "Claude subscription limits and reset times"}
+    ],
+    scope: {type: "chat", chat_id: ($id | tonumber)}
+  }')"
   jq -e '.ok' >/dev/null 2>&1 <<<"$(tg_api setMyCommands "$body")"
 }
 
