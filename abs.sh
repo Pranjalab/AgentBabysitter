@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# clauderc.sh — Claude RC: remote control for Claude Code, over Telegram.
+# abs.sh — Agent Babysitter: remote control for Claude Code, over Telegram.
 #
 # Pairs a private Telegram bot with a Claude Code session so you can read task
 # reports and send instructions from your phone, while the terminal keeps working
 # exactly as normal.
 #
-# Usage:  crc [--profile NAME] [command] [-- <extra claude args>]
-# Run     crc help   for the full command list.
+# Usage:  abs [--profile NAME] [command] [-- <extra claude args>]
+# Run     abs help   for the full command list.
 #
 # See README.md for the security model. Nothing here is magic: it configures the
 # official `telegram@claude-plugins-official` plugin and launches Claude Code
@@ -29,7 +29,7 @@ trap 'rc=$?; printf "\n\033[31m✗\033[0m Unexpected failure (exit %s) at line %
 umask 077
 
 # readlink -f, not `cd $(dirname)`: the installer puts a *symlink* at
-# ~/.local/bin/crc, and dirname would resolve to the link's directory rather
+# ~/.local/bin/abs, and dirname would resolve to the link's directory rather
 # than the real script. This path is baked into the injected prompt, so getting
 # it wrong silently breaks every callback.
 readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -38,10 +38,13 @@ readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
 
 # Our own state. Profiles live under here; each holds one bot's pairing.
-readonly CLAUDERC_HOME="${CLAUDERC_HOME:-$HOME/.claude/clauderc}"
-readonly PROFILES_DIR="$CLAUDERC_HOME/profiles"
+readonly ABS_HOME="${ABS_HOME:-$HOME/.abs}"
+readonly PROFILES_DIR="$ABS_HOME/profiles"
 
-# Pre-profiles state, migrated on first run and then left alone.
+# Two older layouts, both migrated on first run and then left where they are.
+# This tool was called Claude RC until v2 and kept profiles under ~/.claude/clauderc.
+readonly LEGACY_CLAUDERC_PROFILES="${CLAUDERC_HOME:-$HOME/.claude/clauderc}/profiles"
+# Older still: one pairing, from before profiles existed.
 readonly LEGACY_RC_STATE="${CLAUDE_RC_DIR:-$HOME/.claude/telegram-rc}/rc.json"
 
 # Percent-used thresholds at which the usage headline flips.
@@ -51,8 +54,8 @@ readonly CRIT_AT=90
 # Resolved by use_profile(). Not readonly — they depend on which profile is
 # selected, which isn't known until after argument parsing.
 PROFILE=""
-RC_DIR=""
-RC_STATE=""
+ABS_DIR=""
+ABS_STATE=""
 TG_DIR=""
 TG_ENV=""
 TG_ACCESS=""
@@ -178,14 +181,14 @@ use_profile() {
   local name="$1"
   [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || die "Bad profile name: '$name' (letters, digits, - and _ only)"
   PROFILE="$name"
-  RC_DIR="$PROFILES_DIR/$name"
-  RC_STATE="$RC_DIR/rc.json"
+  ABS_DIR="$PROFILES_DIR/$name"
+  ABS_STATE="$ABS_DIR/rc.json"
 
   # An explicit TELEGRAM_STATE_DIR still wins, for anyone already using the
   # documented two-bot trick from before profiles existed.
   if [ -n "${TELEGRAM_STATE_DIR:-}" ]; then
     TG_DIR="$TELEGRAM_STATE_DIR"
-  elif [ -f "$RC_STATE" ] && TG_DIR="$(jq -r '.tg_dir // empty' "$RC_STATE" 2>/dev/null)" && [ -n "$TG_DIR" ]; then
+  elif [ -f "$ABS_STATE" ] && TG_DIR="$(jq -r '.tg_dir // empty' "$ABS_STATE" 2>/dev/null)" && [ -n "$TG_DIR" ]; then
     : # took it from the profile
   else
     TG_DIR="$(default_tg_dir "$name")"
@@ -203,13 +206,28 @@ list_profiles() {
   done
 }
 
+# v1 shipped as "Claude RC" and kept its profiles under ~/.claude/clauderc. Copy
+# the whole tree across on first run so an upgrade doesn't silently lose a
+# pairing and send you back through BotFather. Non-destructive by the same rule
+# as migrate_legacy: the old tree stays, so undoing this is `rm -r ~/.abs`.
+migrate_clauderc_home() {
+  [ -d "$LEGACY_CLAUDERC_PROFILES" ] || return 0
+  [ ! -d "$PROFILES_DIR" ] || return 0
+  mkdir -p "$ABS_HOME"
+  chmod 700 "$ABS_HOME"
+  # -a keeps the 600s on rc.json; these hold a chat id, not a token, but the
+  # umask that created them was deliberate.
+  cp -a "$LEGACY_CLAUDERC_PROFILES" "$PROFILES_DIR"
+  info "${c_dim}Moved your Claude RC profiles to ~/.abs (the old copy is untouched).${c_reset}"
+}
+
 # Copy the pre-profiles rc.json into the default profile. Non-destructive: the
 # legacy file stays where it is, so undoing this is just deleting the new one.
 migrate_legacy() {
   local new="$PROFILES_DIR/default/rc.json"
   [ -f "$LEGACY_RC_STATE" ] && [ ! -f "$new" ] || return 0
   mkdir -p "$PROFILES_DIR/default"
-  chmod 700 "$CLAUDERC_HOME" "$PROFILES_DIR" "$PROFILES_DIR/default"
+  chmod 700 "$ABS_HOME" "$PROFILES_DIR" "$PROFILES_DIR/default"
   local tmp; tmp="$(mktemp "$PROFILES_DIR/default/rc.XXXXXX")"
   jq --arg d "$(default_tg_dir default)" '. + {tg_dir:$d}' "$LEGACY_RC_STATE" > "$tmp"
   chmod 600 "$tmp"; mv -f "$tmp" "$new"
@@ -248,7 +266,7 @@ pick_profile() {
   for n in "${names[@]}"; do
     use_profile "$n"
     local bot live tag=""
-    bot="$(jq -r '.bot // "?"' "$RC_STATE" 2>/dev/null || echo '?')"
+    bot="$(jq -r '.bot // "?"' "$ABS_STATE" 2>/dev/null || echo '?')"
     if live="$(profile_live_pid)"; then tag=" ${c_yellow}(in use, pid $live)${c_reset}"; fi
     info "  $i) ${c_bold}$n${c_reset} — @${bot}${tag}"
     i=$((i + 1))
@@ -341,10 +359,37 @@ verify_token() {
 
 # --- setup -------------------------------------------------------------------
 
+# Shown once, at the top of a fresh setup. Not on re-pair — a returning user
+# doesn't need the pitch, and reprinting it every time would wear thin fast.
+print_welcome() {
+  info ""
+  info "  ${c_bold}${c_cyan}Agent Babysitter${c_reset}"
+  info "  ${c_dim}Leave your desk. Claude Code keeps working, and tells you how it went.${c_reset}"
+  info ""
+  info "  It watches this Claude Code session and messages your phone over Telegram"
+  info "  when a task finishes — and your reply comes straight back into the session."
+  info ""
+  info "  Two quick things and you're set:"
+  info "    ${c_bold}1.${c_reset} make a private Telegram bot ${c_dim}(one minute, walked through below)${c_reset}"
+  info "    ${c_bold}2.${c_reset} prove it's yours with a one-time PIN"
+  info ""
+  info "  ${c_dim}Nothing leaves this machine but Telegram messages. The bot answers only you.${c_reset}"
+  info ""
+}
+
 prompt_token() {
-  step "Step 1 — Bot token"
-  info "Open Telegram, message ${c_cyan}@BotFather${c_reset}, send ${c_bold}/newbot${c_reset}, and follow the prompts."
-  info "It replies with a token like ${c_dim}123456789:AAHfiqksKZ8...${c_reset} — paste the whole thing."
+  step "Step 1 of 2 — Create your Telegram bot"
+  info "In Telegram, open a chat with ${c_cyan}@BotFather${c_reset} ${c_dim}(the official bot-maker — the blue tick)${c_reset}:"
+  info ""
+  info "    ${c_bold}a.${c_reset} send  ${c_bold}/newbot${c_reset}"
+  info "    ${c_bold}b.${c_reset} give it a display name  ${c_dim}(anything — \"My Claude\")${c_reset}"
+  info "    ${c_bold}c.${c_reset} give it a username ending in ${c_bold}bot${c_reset}  ${c_dim}(must be unique, e.g. pranjal_claude_bot)${c_reset}"
+  info ""
+  info "  BotFather replies with a line like:"
+  info "    ${c_dim}Use this token to access the HTTP API:${c_reset}"
+  info "    ${c_dim}123456789:AAHfiqksKZ8...${c_reset}"
+  info ""
+  info "  Copy the whole token and paste it here ${c_dim}(it stays hidden as you paste, and never leaves this machine)${c_reset}."
   info ""
 
   local token=""
@@ -402,7 +447,7 @@ gen_pin() {
 do_pairing() {
   local username="$1"
 
-  step "Step 2 — Pair your account"
+  step "Step 2 of 2 — Prove the phone is yours"
 
   local pin
   pin="$(gen_pin)"
@@ -415,9 +460,13 @@ do_pairing() {
   [ -n "$last" ] && offset=$((last + 1))
 
   info ""
-  info "  Open Telegram → ${c_cyan}t.me/${username}${c_reset} and send this PIN as a message:"
+  info "  Open your new bot in Telegram → ${c_cyan}t.me/${username}${c_reset}"
+  info "  Tap ${c_bold}Start${c_reset}, then send it this PIN as a normal message:"
   info ""
   info "        ${c_bold}${c_green}${pin}${c_reset}"
+  info ""
+  info "  ${c_dim}This is how the bot learns which account is yours — after this, messages${c_reset}"
+  info "  ${c_dim}from anyone else are ignored. Send it from a private chat, not a group.${c_reset}"
   info ""
   info "  ${c_dim}Waiting up to 5 minutes… (Ctrl-C to cancel)${c_reset}"
 
@@ -429,7 +478,7 @@ do_pairing() {
     if [ "$(printf '%s' "$resp" | jq -r '.ok // false')" != "true" ]; then
       local desc; desc="$(printf '%s' "$resp" | jq -r '.description // ""')"
       case "$desc" in
-        *"terminated by other getUpdates"*) die "Another process is polling this bot. Quit any running Claude RC session and retry." ;;
+        *"terminated by other getUpdates"*) die "Another process is polling this bot. Quit any running Agent Babysitter session and retry." ;;
       esac
       continue
     fi
@@ -458,7 +507,7 @@ do_pairing() {
     fi
   done
 
-  [ -n "$uid" ] || die "Timed out waiting for the PIN. Run: crc setup"
+  [ -n "$uid" ] || die "Timed out waiting for the PIN. Run: abs setup"
 
   PAIR_UID="$uid"; PAIR_CID="$cid"
   ok "Paired with Telegram user $uid"
@@ -498,12 +547,12 @@ write_access() {
 
 write_state() {
   local uid="$1" cid="$2" username="$3" tmp
-  mkdir -p "$RC_DIR"
-  chmod 700 "$CLAUDERC_HOME" "$PROFILES_DIR" "$RC_DIR"
-  tmp="$(mktemp "$RC_DIR/rc.XXXXXX")"
+  mkdir -p "$ABS_DIR"
+  chmod 700 "$ABS_HOME" "$PROFILES_DIR" "$ABS_DIR"
+  tmp="$(mktemp "$ABS_DIR/rc.XXXXXX")"
   jq -n --arg u "$uid" --arg c "$cid" --arg b "$username" --arg d "$TG_DIR" \
     '{user_id:$u, chat_id:$c, bot:$b, quiet:false, tg_dir:$d}' > "$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$RC_STATE"
+  chmod 600 "$tmp"; mv -f "$tmp" "$ABS_STATE"
 }
 
 cmd_setup() {
@@ -518,9 +567,12 @@ cmd_setup() {
   # an interrupted pairing goes straight back to the PIN.
   if load_token && verify_token; then
     ok "Using the saved token for @${BOT_USERNAME}"
-    info "${c_dim}(run 'crc --profile $PROFILE reset' first if you want a different one)${c_reset}"
+    info "${c_dim}(run 'abs --profile $PROFILE reset' first if you want a different one)${c_reset}"
   else
     BOT_TOKEN=""
+    # Greet only a genuinely new user: no token on disk means first run for this
+    # profile. A re-pair after a revoked token skips straight to the steps.
+    [ -f "$TG_ENV" ] || print_welcome
     prompt_token
   fi
 
@@ -533,11 +585,11 @@ cmd_setup() {
 
   # The pairing is already on disk by now, so a failed send is a bad confirmation
   # message, not a failed setup. Warn and carry on rather than unwinding it.
-  tg_send "$cid" "Claude RC paired ✅
+  tg_send "$cid" "Agent Babysitter paired ✅
 
 This chat is now linked to your Claude Code terminal. You'll get a short report when a task finishes, and you can reply here to give instructions.
 
-Send \"rc quiet\" to mute reports, \"rc status\" to check state." \
+Send \"abs quiet\" to mute reports, \"abs status\" to check state." \
     "$(clear_keyboard)" \
     || warn "Paired, but the confirmation message didn't send: $TG_ERR"
 
@@ -545,7 +597,7 @@ Send \"rc quiet\" to mute reports, \"rc status\" to check state." \
 
   step "Setup complete"
   ok "Bot @${BOT_USERNAME} is linked to this machine as profile '${PROFILE}'."
-  info "Start a session with: ${c_bold}crc${c_reset}"
+  info "Start a session with: ${c_bold}abs${c_reset}"
 }
 
 # --- system prompt -----------------------------------------------------------
@@ -554,7 +606,7 @@ build_prompt() {
   local cid="$1"
   local PROJECT_ROOT="${SCRIPT_PATH%/*}"
   cat <<EOF
-=== CLAUDE RC IS ACTIVE (Telegram) ===
+=== AGENT BABYSITTER IS ACTIVE (Telegram) ===
 
 This session is bridged to the operator's Telegram. They may be away from the
 terminal and reading on their phone. The terminal and Telegram are the SAME
@@ -598,13 +650,13 @@ the real route. You cannot change model, effort, or permission mode mid-session
 — there is no tool for it, so do not imply otherwise. The honest answers are the
 terminal (where those commands are real), or a relaunch:
 
-    crc --model sonnet              # or opus, haiku
-    crc --permission-mode plan      # or auto, manual, acceptEdits
+    abs --model sonnet              # or opus, haiku
+    abs --permission-mode plan      # or auto, manual, acceptEdits
 
 /stop and /compact have no equivalent from the phone at all. Say so.
 
 One command IS yours, and it arrives as ordinary text because Claude Code does
-not know it. If the operator sends "/usage" (the menu entry) or "rc usage" —
+not know it. If the operator sends "/usage" (the menu entry) or "abs usage" —
 nothing else in the message — run:
 
     bash "${SCRIPT_PATH}" --profile ${PROFILE} usage --send
@@ -648,10 +700,10 @@ To change it (on their request, from terminal or Telegram):
     bash "${SCRIPT_PATH}" --profile ${PROFILE} quiet off  -> resume reports
 
 HARD OFF
-If they say "rc off" / "remote control off", run:
+If they say "abs off" / "remote control off", run:
     bash "${SCRIPT_PATH}" --profile ${PROFILE} off
 This drops ALL inbound Telegram immediately. Tell them plainly that it can only
-be turned back on from the terminal (\`crc --profile ${PROFILE} on\`), because
+be turned back on from the terminal (\`abs --profile ${PROFILE} on\`), because
 inbound is dead once it is off. If they only want to stop the notifications,
 quiet mode is what they actually want — say so before running this.
 
@@ -670,14 +722,14 @@ EOF
 # --- state commands ----------------------------------------------------------
 
 require_setup() {
-  [ -f "$RC_STATE" ] || die "Profile '$PROFILE' is not set up. Run: crc --profile $PROFILE setup"
+  [ -f "$ABS_STATE" ] || die "Profile '$PROFILE' is not set up. Run: abs --profile $PROFILE setup"
 }
 
-state_get() { jq -r "$1" "$RC_STATE" 2>/dev/null; }
+state_get() { jq -r "$1" "$ABS_STATE" 2>/dev/null; }
 
 set_policy() {
   local policy="$1" tmp
-  [ -f "$TG_ACCESS" ] || die "No access.json. Run: crc --profile $PROFILE setup"
+  [ -f "$TG_ACCESS" ] || die "No access.json. Run: abs --profile $PROFILE setup"
   tmp="$(mktemp "$TG_DIR/access.XXXXXX")"
   jq --arg p "$policy" '.dmPolicy = $p' "$TG_ACCESS" > "$tmp"
   chmod 600 "$tmp"; mv -f "$tmp" "$TG_ACCESS"
@@ -687,7 +739,7 @@ cmd_off() {
   require_setup
   set_policy "disabled"
   ok "Inbound Telegram DISABLED for '$PROFILE'. The plugin picks this up on the next message — no restart needed."
-  warn "Re-enable from the terminal only: crc --profile $PROFILE on"
+  warn "Re-enable from the terminal only: abs --profile $PROFILE on"
 }
 
 cmd_on() {
@@ -702,17 +754,17 @@ cmd_quiet() {
   case "$val" in
     on|true)   val=true ;;
     off|false) val=false ;;
-    *) die "Usage: crc quiet on|off" ;;
+    *) die "Usage: abs quiet on|off" ;;
   esac
-  tmp="$(mktemp "$RC_DIR/rc.XXXXXX")"
-  jq --argjson q "$val" '.quiet = $q' "$RC_STATE" > "$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$RC_STATE"
+  tmp="$(mktemp "$ABS_DIR/rc.XXXXXX")"
+  jq --argjson q "$val" '.quiet = $q' "$ABS_STATE" > "$tmp"
+  chmod 600 "$tmp"; mv -f "$tmp" "$ABS_STATE"
   [ "$val" = true ] && ok "Quiet mode ON — proactive reports muted, inbound still works." \
                     || ok "Quiet mode OFF — reports resume."
 }
 
 cmd_is_quiet() {
-  [ -f "$RC_STATE" ] || { echo "active"; return 0; }
+  [ -f "$ABS_STATE" ] || { echo "active"; return 0; }
   [ "$(state_get '.quiet')" = "true" ] && echo "quiet" || echo "active"
 }
 
@@ -721,7 +773,7 @@ cmd_status() {
   local policy quiet pid
   policy="$(jq -r '.dmPolicy // "pairing"' "$TG_ACCESS" 2>/dev/null || echo "?")"
   quiet="$(cmd_is_quiet)"
-  info "${c_bold}Claude RC status${c_reset}"
+  info "${c_bold}Agent Babysitter status${c_reset}"
   info "  profile      $PROFILE"
   info "  bot          @$(state_get '.bot')"
   info "  paired user  $(state_get '.user_id')"
@@ -731,22 +783,22 @@ cmd_status() {
   if pid="$(profile_live_pid)"; then
     info "  poller       ${c_green}live${c_reset} (pid $pid)"
   else
-    info "  poller       ${c_dim}not running${c_reset} — start one with: crc --profile $PROFILE"
+    info "  poller       ${c_dim}not running${c_reset} — start one with: abs --profile $PROFILE"
   fi
   info "  token        $TG_ENV"
   info "  allowlist    $TG_ACCESS"
-  info "  state        $RC_STATE"
+  info "  state        $ABS_STATE"
 }
 
 cmd_profiles() {
   local names=() n
   while IFS= read -r n; do names+=("$n"); done < <(list_profiles)
-  [ "${#names[@]}" -gt 0 ] || { info "No profiles yet. Run: crc setup"; return 0; }
-  info "${c_bold}Claude RC profiles${c_reset}"
+  [ "${#names[@]}" -gt 0 ] || { info "No profiles yet. Run: abs setup"; return 0; }
+  info "${c_bold}Agent Babysitter profiles${c_reset}"
   for n in "${names[@]}"; do
     use_profile "$n"
     local bot pid tag="${c_dim}idle${c_reset}"
-    bot="$(jq -r '.bot // "?"' "$RC_STATE" 2>/dev/null || echo '?')"
+    bot="$(jq -r '.bot // "?"' "$ABS_STATE" 2>/dev/null || echo '?')"
     if pid="$(profile_live_pid)"; then tag="${c_green}live${c_reset} (pid $pid)"; fi
     info "  ${c_bold}$n${c_reset}  @${bot}  $tag"
   done
@@ -756,11 +808,11 @@ cmd_reset() {
   info "This deletes the bot token, the allowlist, and the RC state for profile '$PROFILE':"
   info "  $TG_ENV"
   info "  $TG_ACCESS"
-  info "  $RC_STATE"
+  info "  $ABS_STATE"
   local yn=""
   read -rp "Delete them? [y/N] " yn < /dev/tty
   case "$yn" in
-    y|Y) rm -f "$TG_ENV" "$TG_ACCESS" "$RC_STATE"; ok "Removed. Run 'crc setup' to start over." ;;
+    y|Y) rm -f "$TG_ENV" "$TG_ACCESS" "$ABS_STATE"; ok "Removed. Run 'abs setup' to start over." ;;
     *)   info "Cancelled." ;;
   esac
 }
@@ -805,7 +857,13 @@ field() {
   line="$(grep -m1 -E "^${label}:" <<<"$raw" || true)"
   [ -n "$line" ] || return 0
   pct="$(sed -E 's/.*: *([0-9]+)% used.*/\1/' <<<"$line")"
-  reset="$(sed -E 's/.*resets ([^(]*).*/\1/' <<<"$line" | sed -E 's/ +$//')"
+  # A limit you haven't touched has no reset window: "Current week (Fable): 0% used"
+  # and nothing more. sed returns the subject unchanged when it can't match, so
+  # guard rather than let the whole line through as a "stamp".
+  reset=""
+  if grep -q ' resets ' <<<"$line"; then
+    reset="$(sed -E 's/.*resets ([^(]*).*/\1/' <<<"$line" | sed -E 's/ +$//')"
+  fi
   printf '%s\t%s' "$pct" "$reset"
 }
 
@@ -826,9 +884,13 @@ until_reset() {
 
 bar() {
   local pct="$1" width=10 filled i out=""
+  # ░ is a hatched cell, not a flat one — at phone size it reads as a row of
+  # broken glyphs rather than an empty track. Circles carry no interior pattern
+  # and land in every font Telegram falls back to. Override to taste.
+  local full="${ABS_BAR_FULL:-●}" empty="${ABS_BAR_EMPTY:-○}"
   filled=$(( pct * width / 100 ))
   for ((i=0; i<width; i++)); do
-    if [ "$i" -lt "$filled" ]; then out+="█"; else out+="░"; fi
+    if [ "$i" -lt "$filled" ]; then out+="$full"; else out+="$empty"; fi
   done
   printf '%s' "$out"
 }
@@ -842,12 +904,22 @@ severity() {  # highest percent across all limits decides the headline
 
 build_report() {  # <raw> -> plain text, Telegram-safe (no markdown)
   local raw="$1" out="" max=0
-  local rows=() label pct reset f
+  local rows=() label pct reset f week_reset
+
+  # The weekly limits share one window: whenever a per-model line carries a stamp
+  # it is the same stamp as all-models (both "resets Jul 16, 5:29pm"). A limit at
+  # 0% arrives with no stamp at all, so a per-model week borrows the all-models
+  # one. That value is inherited, not reported — if Anthropic ever gives a model
+  # its own weekly window, this is the line that starts lying.
+  week_reset="$(field "$raw" 'Current week \(all models\)' | cut -f2)"
 
   while IFS= read -r spec; do
     label="${spec%%|*}"; f="$(field "$raw" "${spec#*|}")"
     [ -n "$f" ] || continue
     pct="${f%%$'\t'*}"; reset="${f#*$'\t'}"
+    if [ -z "$reset" ]; then
+      case "$label" in Week*) reset="$week_reset" ;; esac
+    fi
     rows+=("$label|$pct|$reset")
     [ "$pct" -gt "$max" ] && max="$pct"
   done <<'SPECS'
@@ -867,8 +939,12 @@ SPECS
   local r
   for r in "${rows[@]}"; do
     label="${r%%|*}"; r="${r#*|}"; pct="${r%%|*}"; reset="${r#*|}"
-    out+="$(printf '%s\n  %s %s%%  · resets %s (%s)' \
-      "$label" "$(bar "$pct")" "$pct" "$(until_reset "$reset")" "$reset")"$'\n\n'
+    if [ -n "$reset" ]; then
+      out+="$(printf '%s\n  %s %s%%  · resets %s (%s)' \
+        "$label" "$(bar "$pct")" "$pct" "$(until_reset "$reset")" "$reset")"$'\n\n'
+    else
+      out+="$(printf '%s\n  %s %s%%' "$label" "$(bar "$pct")" "$pct")"$'\n\n'
+    fi
   done
 
   printf '%s' "${out%$'\n\n'}"
@@ -880,7 +956,7 @@ cmd_usage() {
     --print|-p) mode="print" ;;
     --send|-s)  mode="send" ;;
     "")         ;;
-    *)          die "Usage: crc usage [--print|--send]" ;;
+    *)          die "Usage: abs usage [--print|--send]" ;;
   esac
 
   local raw report
@@ -893,7 +969,7 @@ cmd_usage() {
     require_setup
     load_token || die "No bot token at $TG_ENV."
     local chat; chat="$(state_get '.chat_id')"
-    [ -n "$chat" ] && [ "$chat" != "null" ] || die "No chat_id in $RC_STATE. Run: crc setup"
+    [ -n "$chat" ] && [ "$chat" != "null" ] || die "No chat_id in $ABS_STATE. Run: abs setup"
     tg_send "$chat" "$report" || die "Could not send to Telegram: $TG_ERR"
     [ "$mode" = "send" ] || printf '%s→ sent to Telegram%s\n' "$c_dim" "$c_reset" >&2
   fi
@@ -953,9 +1029,9 @@ register_commands() {
 
 cmd_menu() {
   require_setup
-  load_token || die "No bot token at $TG_ENV. Run: crc setup"
+  load_token || die "No bot token at $TG_ENV. Run: abs setup"
   local cid; cid="$(state_get '.chat_id')"
-  [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $RC_STATE."
+  [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $ABS_STATE."
 
   register_commands "$cid" || die "Could not register the command menu."
   ok "Command menu registered for @$(state_get '.bot')."
@@ -975,9 +1051,9 @@ cmd_menu() {
 # token — not in a Python script that would need its own copy.
 cmd_say() {
   require_setup
-  load_token || die "No bot token at $TG_ENV. Run: crc setup"
+  load_token || die "No bot token at $TG_ENV. Run: abs setup"
   local cid; cid="$(state_get '.chat_id')"
-  [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $RC_STATE."
+  [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $ABS_STATE."
 
   local venv="${SCRIPT_PATH%/*}/.venv-tts/bin/python"
   [ -x "$venv" ] || die "No TTS venv at $venv — voice is an optional add-on. See README (Voice)."
@@ -988,11 +1064,11 @@ cmd_say() {
     case "$1" in
       --keep) keep="$2"; shift 2 ;;
       --) shift; text="$*"; break ;;
-      -*) die "Usage: crc say [--keep FILE] \"text\"   (text of \"-\" reads stdin)" ;;
+      -*) die "Usage: abs say [--keep FILE] \"text\"   (text of \"-\" reads stdin)" ;;
       *)  text="$1"; shift ;;
     esac
   done
-  [ -n "$text" ] || die "Nothing to say. Usage: crc say \"text\""
+  [ -n "$text" ] || die "Nothing to say. Usage: abs say \"text\""
   [ "$text" = "-" ] && text="$(cat)"
 
   local out; out="${keep:-$(mktemp --suffix=.ogg)}"
@@ -1018,7 +1094,7 @@ cmd_run() {
   need_deps
   ensure_plugin
 
-  if ! load_token || [ ! -f "$RC_STATE" ]; then
+  if ! load_token || [ ! -f "$ABS_STATE" ]; then
     info "${c_dim}No pairing for profile '$PROFILE' — running setup.${c_reset}"
     cmd_setup
     load_token || die "Setup did not complete."
@@ -1026,22 +1102,22 @@ cmd_run() {
 
   local cid policy
   cid="$(state_get '.chat_id')"
-  [ -n "$cid" ] && [ "$cid" != "null" ] || die "State file is corrupt. Run: crc --profile $PROFILE setup"
+  [ -n "$cid" ] && [ "$cid" != "null" ] || die "State file is corrupt. Run: abs --profile $PROFILE setup"
 
   policy="$(jq -r '.dmPolicy // "pairing"' "$TG_ACCESS" 2>/dev/null || echo "?")"
   if [ "$policy" = "disabled" ]; then
-    warn "Inbound Telegram is currently OFF. Turn it on with: crc --profile $PROFILE on"
+    warn "Inbound Telegram is currently OFF. Turn it on with: abs --profile $PROFILE on"
   fi
 
   local pid
   if pid="$(profile_live_pid)"; then
     die "Profile '$PROFILE' is already being polled (pid $pid).
   Telegram permits one poller per bot. Quit that session first, or use a
-  different bot:  crc --profile <name>    (see: crc profiles)"
+  different bot:  abs --profile <name>    (see: abs profiles)"
   fi
 
   local perm_args=()
-  if [ "${RC_AWAY:-0}" = "1" ]; then
+  if [ "${ABS_AWAY:-0}" = "1" ]; then
     # Away mode trades a real safety net for not blocking while you're out:
     # file edits stop prompting. Bash and other tools still ask.
     perm_args=(--permission-mode acceptEdits)
@@ -1062,34 +1138,34 @@ cmd_run() {
 
 cmd_help() {
   cat <<EOF
-${c_bold}Claude RC${c_reset} — remote control for Claude Code, over Telegram
+${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Telegram
 
-  ${c_bold}crc${c_reset}                     Start a session (runs setup on first use)
-  ${c_bold}crc${c_reset} setup               Re-run token entry + PIN pairing
-  ${c_bold}crc${c_reset} status              Show pairing, inbound state, mute, poller
-  ${c_bold}crc${c_reset} profiles            List every bot and whether it's live
+  ${c_bold}abs${c_reset}                     Start a session (runs setup on first use)
+  ${c_bold}abs${c_reset} setup               Re-run token entry + PIN pairing
+  ${c_bold}abs${c_reset} status              Show pairing, inbound state, mute, poller
+  ${c_bold}abs${c_reset} profiles            List every bot and whether it's live
 
-  ${c_bold}crc${c_reset} usage [--print|--send]
+  ${c_bold}abs${c_reset} usage [--print|--send]
                           Report subscription limits (sends to Telegram by default)
-  ${c_bold}crc${c_reset} menu               Re-register the Telegram "/" command menu
-  ${c_bold}crc${c_reset} say "text"         Speak it and send as a voice note (needs .venv-tts)
+  ${c_bold}abs${c_reset} menu               Re-register the Telegram "/" command menu
+  ${c_bold}abs${c_reset} say "text"         Speak it and send as a voice note (needs .venv-tts)
 
-  ${c_bold}crc${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
-  ${c_bold}crc${c_reset} off                 Hard off: drop ALL inbound Telegram
-  ${c_bold}crc${c_reset} on                  Re-enable inbound Telegram
+  ${c_bold}abs${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
+  ${c_bold}abs${c_reset} off                 Hard off: drop ALL inbound Telegram
+  ${c_bold}abs${c_reset} on                  Re-enable inbound Telegram
 
-  ${c_bold}crc${c_reset} reset               Delete this profile's token, allowlist and state
-  ${c_bold}crc${c_reset} help                This message
+  ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
+  ${c_bold}abs${c_reset} help                This message
 
 ${c_bold}Profiles${c_reset} — one bot per concurrent session. Telegram allows a single poller
 per bot token, so two sessions at once need two bots.
 
-  crc --profile work            Use (or create) the 'work' bot
-  CLAUDERC_PROFILE=work crc     Same, from the environment
+  abs --profile work            Use (or create) the 'work' bot
+  ABS_PROFILE=work abs     Same, from the environment
 
 Extra arguments are passed through to claude:
-  crc --model opus
-  RC_AWAY=1 crc                 # don't prompt for file edits while you're out
+  abs --model opus
+  ABS_AWAY=1 abs                 # don't prompt for file edits while you're out
 
 Run it from whatever project directory you want Claude to work in.
 EOF
@@ -1099,7 +1175,7 @@ EOF
 
 main() {
   # --profile is a global flag, so it's parsed here rather than by each verb.
-  local want_profile="${CLAUDERC_PROFILE:-}"
+  local want_profile="${ABS_PROFILE:-}"
   local args=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1120,6 +1196,9 @@ main() {
 
   command -v jq >/dev/null 2>&1 || die "jq is required."
 
+  # Newest layout first: clauderc's profiles land in ~/.abs, and only if there
+  # were none does the pre-profiles single pairing get pulled in.
+  migrate_clauderc_home
   migrate_legacy
   if [ -n "$want_profile" ]; then
     use_profile "$want_profile"
@@ -1146,9 +1225,9 @@ main() {
     off)       cmd_off ;;
     on)        cmd_on ;;
     reset)     cmd_reset ;;
-    # Anything else is a flag for claude itself: `crc --model opus`
+    # Anything else is a flag for claude itself: `abs --model opus`
     -*)        cmd_run "$@" ;;
-    *)         die "Unknown command: $cmd  (try: crc help)" ;;
+    *)         die "Unknown command: $cmd  (try: abs help)" ;;
   esac
 }
 
