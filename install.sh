@@ -24,21 +24,77 @@ die()  { printf '%s✗%s %s\n' "$c_red" "$c_reset" "$*" >&2; exit 1; }
 
 # --- dependencies ------------------------------------------------------------
 #
-# Checked but not installed. Installing bun or a package manager's jq on
-# someone's behalf is a bigger decision than they agreed to by running this.
+# curl is the only thing this installer itself needs. The rest is what `abs`
+# needs at runtime, and abs.sh re-checks every one of them on each start — so
+# nothing here can fail silently later.
+#
+# Bun gets special treatment because it's the one that stops people. Anthropic's
+# Telegram plugin hardcodes `"command": "bun"` in its .mcp.json and runs
+# server.ts directly, so there's no node fallback to fall back to. It's also the
+# only dep that installs cleanly into $HOME with no sudo. Offer it; don't run
+# someone else's installer unannounced just because they piped this to bash.
 
+command -v curl >/dev/null 2>&1 || die "This installer needs curl. (sudo apt install curl)"
+
+bun_fresh=0
+
+# Piped in, stdin is the script — reading from it would swallow the rest of this
+# file. /dev/tty is the human, when there is one. No tty (CI, nohup) means no
+# consent to be had, so callers get instructions instead of a surprise.
+# `[ -e /dev/tty ]` is not the test: the node exists under nohup/CI/cron and
+# still fails to open for want of a controlling terminal. Try the open, and do
+# it before printing — a prompt nobody can answer is worse than no prompt.
+ask_yes() {
+  local reply=""
+  # Braces matter: `exec 3<>/dev/tty 2>/dev/null` applies redirections left to
+  # right, so the failed open still prints before 2>/dev/null exists. Grouping
+  # redirects the group's stderr first, which swallows it.
+  { exec 3<>/dev/tty; } 2>/dev/null || return 1
+  printf '  %s ' "$1" >&2
+  # Close fd 3 inside a group. Bare `exec 3<&- 2>/dev/null` would make the
+  # 2>/dev/null permanent — exec's redirections outlive the statement — and
+  # every info/ok/warn after this point writes to >&2, so the whole install
+  # would run to completion in total silence.
+  if ! read -r reply <&3; then { exec 3<&-; } 2>/dev/null; return 1; fi
+  { exec 3<&-; } 2>/dev/null
+  case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+
+if ! command -v bun >/dev/null 2>&1; then
+  info "${c_bold}Agent Babysitter needs Bun${c_reset} — the Telegram plugin's server runs on it."
+  info "${c_dim}Installs to ~/.bun. No sudo, nothing outside your home directory.${c_reset}"
+  if ask_yes "Install Bun now? [y/N]"; then
+    info "  ${c_dim}Installing Bun…${c_reset}"
+    curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 \
+      || die "Bun's installer failed. Install it yourself: https://bun.sh"
+    # Its installer edits your shell rc for the *next* login. This shell needs
+    # bun on PATH now, or the abs.sh runtime check fails on first run.
+    export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+    export PATH="$BUN_INSTALL/bin:$PATH"
+    command -v bun >/dev/null 2>&1 || die "Bun installed but isn't on PATH — open a new shell and re-run this."
+    bun_fresh=1
+    ok "Bun installed."
+  else
+    info ""
+    info "  No problem — install it yourself with:"
+    info "    ${c_bold}curl -fsSL https://bun.sh/install | bash${c_reset}"
+    die "Then re-run this installer."
+  fi
+fi
+
+# These two can't be auto-installed: claude ships its own installer, and jq
+# wants a package manager and a sudo password this script has no business asking
+# for. Name them and stop — abs would only stop later.
 missing=()
-for c in claude curl jq bun; do
+for c in claude jq; do
   command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
 if [ ${#missing[@]} -gt 0 ]; then
   info "${c_bold}Agent Babysitter needs these first:${c_reset}"
   for m in "${missing[@]}"; do
     case "$m" in
-      bun)    info "  bun    → curl -fsSL https://bun.sh/install | bash   ${c_dim}(the Telegram plugin's server runs on Bun)${c_reset}" ;;
       claude) info "  claude → https://claude.com/claude-code" ;;
       jq)     info "  jq     → sudo apt install jq   (or: brew install jq)" ;;
-      curl)   info "  curl   → sudo apt install curl" ;;
     esac
   done
   die "Install those, then run this again."
@@ -147,5 +203,14 @@ info ""
 info "  ${c_bold}abs${c_reset}            start a session (walks you through bot setup on first run)"
 info "  ${c_bold}abs help${c_reset}       everything else"
 info ""
+
+# We put bun on PATH for this script's own shell, but the caller's shell won't
+# see it until its rc is re-read. Saying nothing here means their very first
+# `abs` dies on a missing bun we just installed for them.
+if [ "$bun_fresh" = "1" ]; then
+  warn "Bun is new here — open a new shell before your first ${c_bold}abs${c_reset}, or run:"
+  info "    ${c_bold}export PATH=\"\$HOME/.bun/bin:\$PATH\"${c_reset}"
+  info ""
+fi
 info "${c_dim}First run asks for a Telegram bot token from @BotFather, then pairs your${c_reset}"
 info "${c_dim}account with a PIN. Nothing leaves your machine except Telegram API calls.${c_reset}"
