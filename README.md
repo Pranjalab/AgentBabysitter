@@ -151,8 +151,8 @@ crc profiles               # who's who, and what's live
 
 ```
 Claude RC profiles
-  default  @claudepranbot  live (pid 245324)
-  work     @pranwork_bot   idle
+  default  @yourbot        live (pid 245324)
+  work     @yourwork_bot   idle
 ```
 
 Running `crc` with no arguments and more than one profile gives you a picker, with in-use profiles marked. Choose `n` to add a new bot — that's the "same token, or a new one?" decision, made per session rather than baked into config.
