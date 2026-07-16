@@ -1,10 +1,16 @@
 # Claude RC
 
-Remote-control a Claude Code session from Telegram.
+**Leave your desk. Claude Code keeps working, and tells you how it went.**
 
-Start Claude with `crc` instead of `claude`. When a task finishes, you get a short report on your phone. Reply to it and Claude picks up the instruction. The terminal keeps working exactly as normal — Telegram and the terminal are the *same* session, not two conversations.
+Two things kept me chained to the laptop while Claude did the work. Both are ordinary, both are daily, and neither has anything to do with the code being hard.
 
-Built for the case where you kick off some work, walk away, and want to know how it went without going back to the desk.
+**You can't walk away.** You kick off a ten-minute task and then sit there. Not because the work needs you — it doesn't — but because you won't know when it lands, and if it goes the wrong way at minute two you can't say "no, do it the other way" from the kitchen. So no walk. No gym. You wait, watching a spinner do something you already understand.
+
+**You keep checking your limits.** Open the browser, or the app, again, just to see how much usage is left before committing to something big. It's ten seconds and it breaks your focus every time.
+
+Claude RC fixes both. Start Claude with `crc` instead of `claude`. When a task finishes you get a short report on your phone; reply in plain English and Claude picks the instruction straight up. Tap `/usage` and your limits arrive in the chat — no browser, no app.
+
+The terminal keeps working exactly as normal. Telegram and the terminal are the **same session**, not two conversations — so you can walk out mid-task, steer from your phone, come back, and keep typing where you left off.
 
 ```
 ┌──────────┐   task done → short report    ┌──────────┐
@@ -16,6 +22,48 @@ Built for the case where you kick off some work, walk away, and want to know how
       └── you can still type here at the same time
 ```
 
+## Quick start
+
+```sh
+git clone https://github.com/pranjalab/claude-rc
+cd claude-rc
+./install.sh
+crc
+```
+
+First run wants a bot token from [@BotFather](https://t.me/BotFather) (`/newbot`, about a minute), then prints a PIN for you to send to your bot. That's the pairing. Claude starts, and you're done — details in [Install](#install).
+
+After that it's just `crc`, from whatever project you want Claude to work in. Setup is once per bot, not once per project.
+
+```sh
+crc                         # start a session, RC active
+crc --model haiku           # any claude flag passes through
+crc usage                   # limits, in the terminal and on your phone
+crc status                  # what's paired, what's live
+```
+
+## Features
+
+| | |
+| --- | --- |
+| **Reports when done** | A short summary on your phone when a task finishes — what happened, what needs deciding. |
+| **Reply to steer** | Answer in plain English. It lands in the live session as if you'd typed it. |
+| **`/usage` from the phone** | Subscription limits and reset times, without opening a browser. |
+| **Voice notes, both ways** | Send one and it's transcribed; ask for a voice answer and it speaks back. Runs locally — no audio leaves your machine. |
+| **Profiles** | Several sessions at once, one bot each. `crc --profile work` |
+| **Quiet mode** | Mute the reports, keep the inbound. For when you want to send but not receive. |
+| **A real off switch** | `crc off` drops *all* inbound Telegram, and can only be undone from the terminal. |
+| **Away mode** | `RC_AWAY=1 crc` stops file edits blocking on approval while you're out. |
+
+### What it doesn't do
+
+Worth knowing up front, because the gap between promise and behaviour is what makes a tool feel broken:
+
+- **Slash commands don't work from Telegram** (except `/usage`). Claude Code's `/model`, `/stop`, `/compact` are terminal commands — over this bridge they arrive as plain text and nothing runs them. See [The command menu](#the-command-menu).
+- **Model and effort are set at launch, not from the phone** — `crc --model haiku`. There's no mid-session switch, in any language, plain or otherwise.
+- **You can't interrupt a running task from Telegram.** Messages are read between turns.
+- **It's not a sandbox.** Anyone who can message the bot can instruct a session that runs commands on your machine. The allowlist is the whole security model — see [Security model](#security-model).
+
 ## What this actually is
 
 This is **glue, not a new system**. Anthropic ships an official Telegram plugin (`telegram@claude-plugins-official`) and Claude Code has a `--channels` flag that pushes Telegram messages into a live session. The plugin owns all the inbound polling. Claude RC does the parts it doesn't:
@@ -24,8 +72,8 @@ This is **glue, not a new system**. Anthropic ships an official Telegram plugin 
 - Pairs your Telegram account to the machine with a PIN, without you typing anything into Claude.
 - Injects the "report when done, ask for feedback" behavior per-session, so your projects' `CLAUDE.md` stays untouched.
 - Manages **profiles**, so you can run several sessions at once on different bots.
-- Puts a proper **command menu** in the chat.
 - Reports your **subscription limits** to the phone.
+- Speaks and listens, if you want it to.
 - Gives you a real on/off switch.
 
 The whole thing is one bash script with no dependencies of its own. Voice (`speak.py`, `transcribe.py`) is an optional add-on — skip it and RC still works.
@@ -129,9 +177,9 @@ That's not an oversight, and this section used to promise nine more.
 
 Earlier versions advertised the full list because `register_commands` mirrored Telegram's *default* scope, believing it tracked "whatever Claude Code registers." Claude Code registers nothing — those entries had been written by an earlier version of this same script, so the mirror was reading its own output back and trusting it. Tapping one looked precisely like a broken bridge. **A menu that lies is worse than a menu with one honest entry**, so now it registers that one entry explicitly, at chat scope (which outranks the `all_private_chats` scope the plugin rewrites on every start).
 
-**Use plain English instead** — it's what actually works: "switch to opus", "stop", "how much context is left". Claude reads those and acts.
+**Plain English is what works** — but for *instructions*, not controls. "Fix the failing test and rerun it", "explain what you just changed", "stop after this file and report" all land as real work, because they're things Claude does with tools it has.
 
-For the things that genuinely can't change mid-session — model, effort, permission mode — there's no tool, so no amount of asking helps. Relaunch instead:
+What plain English can't do is conjure a tool that doesn't exist. "Switch to opus" fails exactly like `/model` fails, and for the same reason: there's no mid-session model switch to call. Asking politely doesn't help. Neither does asking twice. Relaunch instead:
 
 ```sh
 crc --model sonnet              # or opus, haiku
