@@ -17,11 +17,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Status-bar indicator** — a small dot in Claude Code's bottom bar shows the
   live state: green = reports flowing, gray = silent/auto-silent, hollow = inbound
   off. `abs config statusline off` opts out (e.g. if you run your own statusLine).
-- **Usage glance** — your 5-hour, weekly, and per-model (Fable) limits show in
-  the terminal status bar (`● abs:default · 5h 5% · wk 7% · Fable 0%`) and as a
-  footer on Telegram reports. The numbers are cached from `/usage` (token-free)
-  and refreshed lazily; tune the interval with `abs config usage-refresh
-  <minutes>` (default 5).
+- **Usage glance** — your 5-hour, weekly, and per-model (Fable) limits, plus the
+  next reset, show in the terminal status bar (`● abs:default · 5h 5% · week 7% ·
+  Fable 0% · resets in 3h`) and as a footer on Telegram reports. The numbers are
+  cached from `/usage` (token-free) and refreshed lazily; tune the interval with
+  `abs config usage-refresh <minutes>` (default 5).
 - **Startup flood control** — on start, `abs` drains any Telegram backlog older
   than the launch and asks at the terminal what to do (default: discard), so a
   new session no longer opens buried under old messages.

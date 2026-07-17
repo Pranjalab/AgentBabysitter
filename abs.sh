@@ -1272,9 +1272,13 @@ usage_cache_file() { printf '%s/usage.json' "$ABS_DIR"; }
 # `field` helper already extracts "<pct>\t<reset>" per limit; we keep just the
 # two percents plus a fetch timestamp.
 usage_cache_write() {
-  local raw="$1" spct wpct fpct now tmp
+  local raw="$1" sfield spct sreset wpct fpct now tmp
   [ -n "$raw" ] && [ -d "$ABS_DIR" ] || return 0
-  spct="$(field "$raw" 'Current session' | cut -f1)"
+  # The session field carries "<pct>\t<reset-stamp>"; keep both — the 5-hour
+  # window is the soonest reset, so that stamp is the "next reset" we show.
+  sfield="$(field "$raw" 'Current session')"
+  spct="${sfield%%$'\t'*}"
+  sreset=""; case "$sfield" in *$'\t'*) sreset="${sfield#*$'\t'}" ;; esac
   wpct="$(field "$raw" 'Current week \(all models\)' | cut -f1)"
   # The per-model weekly line ("Current week (Fable)") only exists once that
   # model has been used this week; null when absent so the glance can omit it.
@@ -1284,8 +1288,9 @@ usage_cache_write() {
   case "$fpct" in ''|*[!0-9]*) fpct=null ;; esac
   now="$(date +%s)"
   tmp="$(mktemp "$ABS_DIR/usage.XXXXXX" 2>/dev/null)" || return 0
-  if jq -n --argjson s "$spct" --argjson w "$wpct" --argjson f "$fpct" --argjson t "$now" \
-       '{session_pct:$s, week_pct:$w, fable_pct:$f, fetched_at:$t}' > "$tmp" 2>/dev/null; then
+  if jq -n --argjson s "$spct" --argjson w "$wpct" --argjson f "$fpct" \
+       --arg sr "$sreset" --argjson t "$now" \
+       '{session_pct:$s, week_pct:$w, fable_pct:$f, session_reset:$sr, fetched_at:$t}' > "$tmp" 2>/dev/null; then
     chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$(usage_cache_file)" 2>/dev/null
   fi
   rm -f "$tmp" 2>/dev/null || true
@@ -1309,14 +1314,15 @@ cmd_usage_cache() {
 # Read the cache -> "5h 3% · wk 7%" (empty until warm). Side effect: kicks a
 # lazy background refresh when the cache is older than the configured interval.
 usage_glance_str() {
-  local f s="" w="" fb="" stamp=0 interval line
+  local f s="" w="" fb="" sr="" stamp=0 interval line
   f="$(usage_cache_file)"
   if [ -f "$f" ]; then
-    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.fetched_at//0)]|@tsv' "$f" 2>/dev/null)"
+    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.session_reset//""),(.fetched_at//0)]|@tsv' "$f" 2>/dev/null)"
     s="$(printf '%s' "$line" | cut -f1)"
     w="$(printf '%s' "$line" | cut -f2)"
     fb="$(printf '%s' "$line" | cut -f3)"
-    stamp="$(printf '%s' "$line" | cut -f4)"
+    sr="$(printf '%s' "$line" | cut -f4)"
+    stamp="$(printf '%s' "$line" | cut -f5)"
   fi
   interval="$(state_get '.usage_refresh')"
   case "$interval" in ''|null|*[!0-9]*) interval="$USAGE_REFRESH_DEFAULT" ;; esac
@@ -1330,9 +1336,15 @@ usage_glance_str() {
   case "$fb" in ''|*[!0-9]*) fb="" ;; esac
   local out=""
   [ -n "$s" ]  && out="5h ${s}%"
-  [ -n "$w" ]  && { [ -n "$out" ] && out="${out} · wk ${w}%" || out="wk ${w}%"; }
+  [ -n "$w" ]  && { [ -n "$out" ] && out="${out} · week ${w}%" || out="week ${w}%"; }
   # Fable weekly only when the line exists (model touched this week).
   [ -n "$fb" ] && { [ -n "$out" ] && out="${out} · Fable ${fb}%" || out="Fable ${fb}%"; }
+  # Next reset = the 5-hour window (soonest). until_reset -> "in 3h 53m", or the
+  # raw stamp on a macOS without GNU date.
+  if [ -n "$sr" ]; then
+    local rel; rel="$(until_reset "$sr")"
+    [ -n "$rel" ] && { [ -n "$out" ] && out="${out} · resets ${rel}" || out="resets ${rel}"; }
+  fi
   printf '%s' "$out"
 }
 
