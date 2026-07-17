@@ -33,7 +33,7 @@ Telegram plugin. No daemon, no webhook, no second copy of your session.
 - 🎤 **Voice both ways** — send a voice note, or ask for the answer spoken back.
 - 📊 **Check usage remotely** — your Claude limits, one tap away, no browser.
 - 🔒 **Your own private bot** — PIN-paired, so only you can reach it.
-- 🟢 **See the state at a glance** — a dot in Claude's status bar shows whether reports are flowing or muted, and why.
+- 🟢 **See the state at a glance** — a dot in Claude's status bar shows whether reports are flowing or muted, plus your 5-hour and weekly usage.
 - 🖥 **Runs anywhere** — laptop, SSH, `tmux`, a headless Linux server.
 - 🗂 **Multiple projects** — one bot per project, babysat side by side.
 
@@ -187,7 +187,8 @@ abs --model opus        # any claude flag is passed straight through
 | 🗂 `abs profiles` | List your bots and which are in use |
 | ⚙️ `abs config model <name>` | Default model for new sessions (`--clear` to unset) |
 | ⚙️ `abs config silent on` / `off` | Whether new sessions start muted |
-| ⚙️ `abs config statusline on` / `off` | Bottom-bar mute/active dot (default on) |
+| ⚙️ `abs config statusline on` / `off` | Bottom-bar mute/active dot + usage (default on) |
+| ⚙️ `abs config usage-refresh <min>` | How often the usage glance refreshes (default 5) |
 | 🔕 `abs quiet on` / `off` | Mute / unmute reports (inbound still works) |
 | 🛑 `abs off` / `on` | Drop / re-enable all inbound Telegram |
 | 🎤 `abs say "text"` | Speak it and send as a voice note |

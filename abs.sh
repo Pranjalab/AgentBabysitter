@@ -662,6 +662,18 @@ HOW TO WRITE IT
 - Under ~800 characters. They are reading on a phone.
 - Lead with the outcome, not the process.
 
+USAGE FOOTER
+When you send a proactive task-done report (not on every message, just the
+completion pings), end it with a thin usage line on its own line. Get it by
+running:
+
+    bash "${SCRIPT_PATH}" --profile ${PROFILE} usage-glance
+
+It reads a local cache and returns instantly (no tokens), e.g. "📊 5h 3% · wk 7%"
+— append that verbatim. If it prints nothing (cache not warm yet), just skip the
+footer. Don't run it for replies or mid-task messages, only for the report that
+hands control back.
+
 COMMAND MENU
 The chat's "/" menu offers exactly one command: /usage. Take that literally —
 almost nothing else is wired up, and the previous version of this prompt was
@@ -837,20 +849,20 @@ cmd_statusline() {
   local label="abs:$PROFILE"
   local green='\033[32m' gray='\033[90m' off='\033[0m'
   [ -f "$ABS_STATE" ] || { printf '%s' "$label"; return 0; }
+  local dot="${green}●${off}" state=""
   # `abs off` lives in access.json (dmPolicy), not rc.json — check it first.
   if [ -f "$TG_ACCESS" ] \
      && [ "$(jq -r '.dmPolicy // ""' "$TG_ACCESS" 2>/dev/null)" = "disabled" ]; then
-    printf "${gray}○${off} %s · off" "$label"; return 0
+    dot="${gray}○${off}"; state=" · off"
+  elif [ "$(cmd_is_quiet)" = "quiet" ]; then
+    dot="${gray}●${off}"
+    if [ "$(state_get '.quiet')" = "true" ]; then state=" · silent"; else state=" · auto-silent"; fi
   fi
-  if [ "$(cmd_is_quiet)" = "quiet" ]; then
-    if [ "$(state_get '.quiet')" = "true" ]; then
-      printf "${gray}●${off} %s · silent" "$label"
-    else
-      printf "${gray}●${off} %s · auto-silent" "$label"
-    fi
-  else
-    printf "${green}●${off} %s" "$label"
-  fi
+  # Usage glance from the cache (empty until warm); this call also kicks a lazy
+  # background refresh when the cache is stale.
+  local g; g="$(usage_glance_str)"
+  [ -n "$g" ] && g=" · $g"
+  printf '%b' "${dot} ${label}${state}${g}"
   return 0
 }
 
@@ -943,13 +955,20 @@ cmd_config() {
         "")        info "Status-bar indicator: $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)" ;;
         *)         die "Usage: abs config statusline on|off" ;;
       esac ;;
+    usage-refresh)
+      case "$val" in
+        "")       info "Usage refresh: $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min" ;;
+        0|*[!0-9]*) die "Usage: abs config usage-refresh <minutes> (a positive whole number)" ;;
+        *)        state_set --argjson m "$val" '.usage_refresh = $m'; ok "Usage cache refreshes every ${val} min." ;;
+      esac ;;
     ""|show)
       info "${c_bold}Config for profile '$PROFILE'${c_reset}"
       info "  model          $(state_get '.model' | sed 's/^null$/(Claude Code default)/')"
       info "  default silent $(state_get '.default_quiet' | sed 's/^null$/false/')"
-      info "  statusline     $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)" ;;
+      info "  statusline     $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)"
+      info "  usage refresh  $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>" ;;
   esac
 }
 
@@ -1221,6 +1240,10 @@ cmd_usage() {
   report="$(build_report "$raw")"
   [ -n "$report" ] || die "Usage output did not match the expected format. Raw:"$'\n'"$raw"
 
+  # Running /usage is exactly a cache refresh — write it so the status bar and
+  # the Telegram footer pick up the fresh numbers with no extra fetch.
+  usage_cache_write "$raw"
+
   [ "$mode" = "send" ] || printf '%s\n' "$report"
 
   if [ "$mode" != "print" ]; then
@@ -1231,6 +1254,93 @@ cmd_usage() {
     tg_send "$chat" "$report" || die "Could not send to Telegram: $TG_ERR"
     [ "$mode" = "send" ] || printf '%s→ sent to Telegram%s\n' "$c_dim" "$c_reset" >&2
   fi
+}
+
+# --- usage glance cache (fast readout for the status bar + Telegram footer) ---
+#
+# /usage is ~2.4s (it boots the CLI) but token-free. Too slow to run per-render,
+# so we cache the two headline percents in usage.json and read that instantly.
+# Refresh is lazy and activity-gated — no daemon: a reader past the interval
+# kicks ONE backgrounded refresh, guarded by an mkdir lock so a burst of renders
+# doesn't spawn a swarm. Everything here prints-or-nothing and never errors: it
+# runs inside the statusLine, which must stay fast and silent on failure.
+readonly USAGE_REFRESH_DEFAULT=5   # minutes; overridable via `abs config usage-refresh`
+
+usage_cache_file() { printf '%s/usage.json' "$ABS_DIR"; }
+
+# Parse a raw /usage blob (as fetch_usage returns) and write the cache. The
+# `field` helper already extracts "<pct>\t<reset>" per limit; we keep just the
+# two percents plus a fetch timestamp.
+usage_cache_write() {
+  local raw="$1" spct wpct fpct now tmp
+  [ -n "$raw" ] && [ -d "$ABS_DIR" ] || return 0
+  spct="$(field "$raw" 'Current session' | cut -f1)"
+  wpct="$(field "$raw" 'Current week \(all models\)' | cut -f1)"
+  # The per-model weekly line ("Current week (Fable)") only exists once that
+  # model has been used this week; null when absent so the glance can omit it.
+  fpct="$(field "$raw" 'Current week \(Fable\)' | cut -f1)"
+  case "$spct" in ''|*[!0-9]*) spct=null ;; esac
+  case "$wpct" in ''|*[!0-9]*) wpct=null ;; esac
+  case "$fpct" in ''|*[!0-9]*) fpct=null ;; esac
+  now="$(date +%s)"
+  tmp="$(mktemp "$ABS_DIR/usage.XXXXXX" 2>/dev/null)" || return 0
+  if jq -n --argjson s "$spct" --argjson w "$wpct" --argjson f "$fpct" --argjson t "$now" \
+       '{session_pct:$s, week_pct:$w, fable_pct:$f, fetched_at:$t}' > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$(usage_cache_file)" 2>/dev/null
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  return 0
+}
+
+# The slow half: fetch, then write. Lock-guarded and safe to background.
+cmd_usage_cache() {
+  [ -d "$ABS_DIR" ] || return 0
+  local lock="$ABS_DIR/usage.lock"
+  # Break a lock left by a refresh that died mid-flight (older than 2 minutes).
+  if [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+    rmdir "$lock" 2>/dev/null || true
+  fi
+  mkdir "$lock" 2>/dev/null || return 0   # another refresh is already running
+  usage_cache_write "$(fetch_usage)"
+  rmdir "$lock" 2>/dev/null || true
+  return 0
+}
+
+# Read the cache -> "5h 3% · wk 7%" (empty until warm). Side effect: kicks a
+# lazy background refresh when the cache is older than the configured interval.
+usage_glance_str() {
+  local f s="" w="" fb="" stamp=0 interval line
+  f="$(usage_cache_file)"
+  if [ -f "$f" ]; then
+    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.fetched_at//0)]|@tsv' "$f" 2>/dev/null)"
+    s="$(printf '%s' "$line" | cut -f1)"
+    w="$(printf '%s' "$line" | cut -f2)"
+    fb="$(printf '%s' "$line" | cut -f3)"
+    stamp="$(printf '%s' "$line" | cut -f4)"
+  fi
+  interval="$(state_get '.usage_refresh')"
+  case "$interval" in ''|null|*[!0-9]*) interval="$USAGE_REFRESH_DEFAULT" ;; esac
+  case "$stamp" in ''|null|*[!0-9]*) stamp=0 ;; esac
+  # Stale or missing -> one detached refresh (the mkdir lock dedups a burst).
+  if [ "$(( $(date +%s) - stamp ))" -ge "$(( interval * 60 ))" ]; then
+    ( cmd_usage_cache >/dev/null 2>&1 & ) 2>/dev/null || true
+  fi
+  case "$s" in ''|*[!0-9]*) s="" ;; esac
+  case "$w" in ''|*[!0-9]*) w="" ;; esac
+  case "$fb" in ''|*[!0-9]*) fb="" ;; esac
+  local out=""
+  [ -n "$s" ]  && out="5h ${s}%"
+  [ -n "$w" ]  && { [ -n "$out" ] && out="${out} · wk ${w}%" || out="wk ${w}%"; }
+  # Fable weekly only when the line exists (model touched this week).
+  [ -n "$fb" ] && { [ -n "$out" ] && out="${out} · Fable ${fb}%" || out="Fable ${fb}%"; }
+  printf '%s' "$out"
+}
+
+# Telegram footer form: "📊 5h 3% · wk 7%", or nothing if the cache isn't warm.
+cmd_usage_glance() {
+  local g; g="$(usage_glance_str)"
+  [ -n "$g" ] && printf '📊 %s' "$g"
+  return 0
 }
 
 # --- command menu ------------------------------------------------------------
@@ -1496,6 +1606,11 @@ cmd_run() {
   # what makes profiles work — without it every profile would drive one bot.
   export TELEGRAM_STATE_DIR="$TG_DIR"
 
+  # Warm the usage-glance cache in the background so the first status-bar reading
+  # isn't blank. Detached; it forks before exec and outlives it, so the launch is
+  # never delayed by the ~2.4s /usage fetch.
+  ( cmd_usage_cache >/dev/null 2>&1 & ) 2>/dev/null || true
+
   info "${c_dim}Starting Claude Code — profile '$PROFILE' → @$(state_get '.bot')${c_reset}"
   # ${a[@]+"${a[@]}"}, not "${a[@]}": expanding an empty array under `set -u` is
   # an error on bash 3.2, which is what macOS ships and will keep shipping. This
@@ -1533,7 +1648,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
 
   ${c_bold}abs${c_reset} config model <name>  Default model for new sessions (--clear to unset)
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
-  ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot (default on)
+  ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot + usage (default on)
+  ${c_bold}abs${c_reset} config usage-refresh <min>  How often the usage glance refreshes (default 5)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
@@ -1596,9 +1712,10 @@ main() {
   else
     case "$cmd" in
       # is-quiet is called by Claude before every proactive send and must never
-      # block on a prompt; statusline runs on every render — same rule. profiles
-      # iterates them all, so its starting point is arbitrary.
-      is-quiet|statusline|profiles) use_profile default ;;
+      # block on a prompt; statusline runs on every render, usage-glance/-cache
+      # ride along with it — same rule. profiles iterates them all, so its
+      # starting point is arbitrary.
+      is-quiet|statusline|usage-glance|usage-cache|profiles) use_profile default ;;
       *)                 pick_profile ;;
     esac
   fi
@@ -1614,6 +1731,8 @@ main() {
     quiet)     shift; cmd_quiet "${1:-}" ;;
     is-quiet)  cmd_is_quiet ;;
     statusline) cmd_statusline ;;
+    usage-glance) cmd_usage_glance ;;
+    usage-cache)  cmd_usage_cache ;;
     config)    shift; cmd_config "$@" ;;
     off)       cmd_off ;;
     on)        cmd_on ;;
