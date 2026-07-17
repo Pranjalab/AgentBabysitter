@@ -34,6 +34,11 @@ umask 077
 # it wrong silently breaks every callback.
 readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 
+# The single source of truth for the version. The repo-root VERSION file and
+# pyproject.toml mirror this; the daily update check compares it against the
+# VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
+readonly ABS_VERSION="2.1.0"
+
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
 
@@ -961,14 +966,22 @@ cmd_config() {
         0|*[!0-9]*) die "Usage: abs config usage-refresh <minutes> (a positive whole number)" ;;
         *)        state_set --argjson m "$val" '.usage_refresh = $m'; ok "Usage cache refreshes every ${val} min." ;;
       esac ;;
+    update-check)
+      case "$val" in
+        on|true)   state_set 'del(.no_update_check)'; ok "Update check ON — abs tells you when a newer version ships." ;;
+        off|false) state_set '.no_update_check = true'; ok "Update check OFF — no version pings, no daily GitHub call." ;;
+        "")        info "Update check: $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)" ;;
+        *)         die "Usage: abs config update-check on|off" ;;
+      esac ;;
     ""|show)
-      info "${c_bold}Config for profile '$PROFILE'${c_reset}"
+      info "${c_bold}Config for profile '$PROFILE'${c_reset}  ${c_dim}(abs $ABS_VERSION)${c_reset}"
       info "  model          $(state_get '.model' | sed 's/^null$/(Claude Code default)/')"
       info "  default silent $(state_get '.default_quiet' | sed 's/^null$/false/')"
       info "  statusline     $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)"
-      info "  usage refresh  $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min" ;;
+      info "  usage refresh  $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min"
+      info "  update check   $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>  |  update-check on|off" ;;
   esac
 }
 
@@ -1355,6 +1368,76 @@ cmd_usage_glance() {
   return 0
 }
 
+# --- update check ------------------------------------------------------------
+#
+# Serverless: once a day, background-fetch a tiny VERSION file from main and
+# cache it in update.json (its own file, not rc.json, to stay clear of the hot
+# silent-hook writes). At startup we show a banner from the LAST known result,
+# so the check never blocks the launch. Opt out with `abs config update-check`.
+
+# version_gt A B -> success iff A is a strictly newer SemVer than B. Pure bash so
+# it works on macOS, whose `sort` has no -V. Numeric compare of major.minor.patch;
+# any pre-release suffix on a component is dropped (2.1.0-rc1 -> 2 1 0).
+version_gt() {
+  local a="$1" b="$2" i ai bi
+  local -a A B
+  local IFS=.
+  read -ra A <<<"$a"; read -ra B <<<"$b"
+  for i in 0 1 2; do
+    ai="${A[i]:-0}"; bi="${B[i]:-0}"
+    ai="${ai%%[!0-9]*}"; bi="${bi%%[!0-9]*}"
+    ai=$((10#${ai:-0})); bi=$((10#${bi:-0}))
+    [ "$ai" -gt "$bi" ] && return 0
+    [ "$ai" -lt "$bi" ] && return 1
+  done
+  return 1   # equal is not greater
+}
+
+update_cache_file() { printf '%s/update.json' "$ABS_DIR"; }
+
+# The slow half: fetch main's VERSION and cache it. Safe to background; never errors.
+_update_fetch() {
+  [ -d "$ABS_DIR" ] || return 0
+  local url v tmp
+  url="${ABS_VERSION_URL:-https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/VERSION}"
+  v="$(curl -fsSL --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
+  case "$v" in ''|*[!0-9.]*) return 0 ;; esac   # digits and dots only, or bail
+  tmp="$(mktemp "$ABS_DIR/update.XXXXXX" 2>/dev/null)" || return 0
+  jq -n --arg v "$v" --argjson t "$(date +%s)" '{latest:$v, checked_at:$t}' > "$tmp" 2>/dev/null \
+    && chmod 600 "$tmp" && mv -f "$tmp" "$(update_cache_file)" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+  return 0
+}
+
+# Called at launch: refresh lazily (once/day, backgrounded) and print a one-line
+# banner if the cached latest is newer than us. Never blocks, never errors.
+update_check() {
+  [ "$(state_get '.no_update_check')" = "true" ] && return 0
+  local f latest="" checked=0 now
+  f="$(update_cache_file)"; now="$(date +%s)"
+  if [ -f "$f" ]; then
+    latest="$(jq -r '.latest // ""' "$f" 2>/dev/null)"
+    checked="$(jq -r '.checked_at // 0' "$f" 2>/dev/null)"
+  fi
+  case "$checked" in ''|null|*[!0-9]*) checked=0 ;; esac
+  # Stale (older than a day) or never checked -> one detached refresh.
+  if [ "$(( now - checked ))" -ge 86400 ]; then
+    ( _update_fetch >/dev/null 2>&1 & ) 2>/dev/null || true
+  fi
+  [ -n "$latest" ] && [ "$latest" != "null" ] || return 0
+  if version_gt "$latest" "$ABS_VERSION"; then
+    local cmd
+    if git -C "$(dirname "$SCRIPT_PATH")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      cmd="git pull  (in $(dirname "$SCRIPT_PATH"))"
+    else
+      cmd="curl -fsSL https://agentbabysitter.com/install.sh | bash"
+    fi
+    warn "Update available: $ABS_VERSION → $latest"
+    info "  ${c_dim}update with:${c_reset} $cmd"
+  fi
+  return 0
+}
+
 # --- command menu ------------------------------------------------------------
 #
 # There used to be a reply keyboard here — a button bar pinned above the input.
@@ -1623,6 +1706,10 @@ cmd_run() {
   # never delayed by the ~2.4s /usage fetch.
   ( cmd_usage_cache >/dev/null 2>&1 & ) 2>/dev/null || true
 
+  # Show an update banner (from the last daily check) and refresh it in the
+  # background. Never blocks the launch.
+  update_check
+
   info "${c_dim}Starting Claude Code — profile '$PROFILE' → @$(state_get '.bot')${c_reset}"
   # ${a[@]+"${a[@]}"}, not "${a[@]}": expanding an empty array under `set -u` is
   # an error on bash 3.2, which is what macOS ships and will keep shipping. This
@@ -1662,9 +1749,11 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
   ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot + usage (default on)
   ${c_bold}abs${c_reset} config usage-refresh <min>  How often the usage glance refreshes (default 5)
+  ${c_bold}abs${c_reset} config update-check on|off  Daily "new version available" check (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
+  ${c_bold}abs${c_reset} version             Print the installed version
   ${c_bold}abs${c_reset} help                This message
 
 ${c_bold}Profiles${c_reset} — one bot per concurrent session. Telegram allows a single poller
@@ -1702,6 +1791,7 @@ main() {
   # confusing error for someone trying to read the docs.
   case "$cmd" in
     help|-h|--help) cmd_help; return 0 ;;
+    version|--version|-V) printf 'Agent Babysitter %s\n' "$ABS_VERSION"; return 0 ;;
   esac
 
   command -v jq >/dev/null 2>&1 || die "jq is required."

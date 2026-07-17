@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-07-18
+
 ### Added
 - **Launch defaults per profile** — `abs config model <name>` (`--clear` to unset)
   and `abs config silent on|off`, stored in `rc.json` and applied at launch. An
@@ -25,6 +27,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Startup flood control** — on start, `abs` drains any Telegram backlog older
   than the launch and asks at the terminal what to do (default: discard), so a
   new session no longer opens buried under old messages.
+- **Version + update check** — `abs version` prints the installed version, and
+  the installer reports what it installed. Once a day (backgrounded, no tokens)
+  abs checks the `VERSION` file on `main`; if a newer release exists it shows a
+  one-line banner at launch with the right update command for your install (`git
+  pull` vs the curl one-liner). Opt out with `abs config update-check off`.
 
 ### Changed
 - Inbound Telegram messages are now always replied to, even while reports are

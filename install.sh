@@ -198,7 +198,12 @@ if ! command -v abs >/dev/null 2>&1; then
 fi
 
 info ""
-ok "Agent Babysitter installed."
+ver="$(grep -m1 '^readonly ABS_VERSION=' "$src" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')"
+if [ -n "$ver" ]; then
+  ok "Agent Babysitter $ver installed."
+else
+  ok "Agent Babysitter installed."
+fi
 info ""
 info "  ${c_bold}abs${c_reset}            start a session (walks you through bot setup on first run)"
 info "  ${c_bold}abs help${c_reset}       everything else"
