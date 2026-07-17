@@ -51,6 +51,14 @@ readonly LEGACY_RC_STATE="${CLAUDE_RC_DIR:-$HOME/.claude/telegram-rc}/rc.json"
 readonly WARN_AT=75
 readonly CRIT_AT=90
 
+# Smart auto-silent: while you're actively driving from the terminal, hold
+# proactive pings. SILENT_STREAK consecutive terminal prompts trigger it; it
+# lifts ONLY when you reach for your phone — a Telegram message clears it. It
+# deliberately does not lift on idle: sitting at the desk reading Claude's output
+# for a minute should never start buzzing your phone. To resume without your
+# phone, `abs quiet off` clears it from the terminal.
+readonly SILENT_STREAK=3
+
 # Resolved by use_profile(). Not readonly — they depend on which profile is
 # selected, which isn't known until after argument parsing.
 PROFILE=""
@@ -562,7 +570,7 @@ write_state() {
   chmod 700 "$ABS_HOME" "$PROFILES_DIR" "$ABS_DIR"
   tmp="$(mktemp "$ABS_DIR/rc.XXXXXX")"
   jq -n --arg u "$uid" --arg c "$cid" --arg b "$username" --arg d "$TG_DIR" \
-    '{user_id:$u, chat_id:$c, bot:$b, quiet:false, tg_dir:$d}' > "$tmp"
+    '{user_id:$u, chat_id:$c, bot:$b, quiet:false, default_quiet:false, tg_dir:$d}' > "$tmp"
   chmod 600 "$tmp"; mv -f "$tmp" "$ABS_STATE"
 }
 
@@ -627,7 +635,16 @@ Their Telegram chat_id is: ${cid}
 Send to them with the \`reply\` tool using that chat_id. You may send proactively;
 you do not need an inbound message first.
 
-WHEN TO SEND
+ALWAYS REPLY TO TELEGRAM
+Every message that arrives from Telegram (any turn wrapped in a
+<channel source="..."> tag) gets a reply sent back with the \`reply\` tool — no
+exception. The sender is on their phone and never sees your terminal output, so
+answering only in the terminal leaves them staring at silence. This is the one
+send you never skip, quiet mode or not: quiet mode mutes *proactive* reports, it
+never mutes a reply to something they just asked. If a full answer needs work,
+send a one-line "on it" first so they know it landed.
+
+WHEN TO SEND (proactively, unprompted)
 - Send ONE short message when you finish a task the operator asked for, or when
   you stop and are handing control back.
 - Include: what you did (1-3 lines, plain language), then anything that needs
@@ -747,6 +764,13 @@ require_setup() {
 
 state_get() { jq -r "$1" "$ABS_STATE" 2>/dev/null; }
 
+# state_set <jq options...> <filter> — atomic rewrite of rc.json, owner-only.
+state_set() {
+  local tmp
+  tmp="$(mktemp "$ABS_DIR/rc.XXXXXX")"
+  jq "$@" "$ABS_STATE" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$ABS_STATE"
+}
+
 set_policy() {
   local policy="$1" tmp
   [ -f "$TG_ACCESS" ] || die "No access.json. Run: abs --profile $PROFILE setup"
@@ -770,22 +794,163 @@ cmd_on() {
 
 cmd_quiet() {
   require_setup
-  local val="${1:-}" tmp
+  local val="${1:-}"
   case "$val" in
     on|true)   val=true ;;
     off|false) val=false ;;
     *) die "Usage: abs quiet on|off" ;;
   esac
-  tmp="$(mktemp "$ABS_DIR/rc.XXXXXX")"
-  jq --argjson q "$val" '.quiet = $q' "$ABS_STATE" > "$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$ABS_STATE"
-  [ "$val" = true ] && ok "Quiet mode ON — proactive reports muted, inbound still works." \
-                    || ok "Quiet mode OFF — reports resume."
+  if [ "$val" = true ]; then
+    state_set '.quiet = true'
+    ok "Quiet mode ON — proactive reports muted, inbound still works."
+  else
+    # Unmuting is an explicit "I want reports now", so it also lifts any
+    # terminal-driven auto-silent — the escape hatch that doesn't need your phone.
+    state_set '.quiet = false | .auto_silent = false | .terminal_streak = 0'
+    ok "Quiet mode OFF — reports resume."
+  fi
 }
 
 cmd_is_quiet() {
   [ -f "$ABS_STATE" ] || { echo "active"; return 0; }
-  [ "$(state_get '.quiet')" = "true" ] && echo "quiet" || echo "active"
+  # Manual mute (abs quiet on, or the default_quiet seed) is absolute.
+  if [ "$(state_get '.quiet')" = "true" ]; then echo "quiet"; return 0; fi
+  # Auto-silent, tripped by sustained terminal activity, holds until you reach
+  # for your phone: a Telegram message clears it (or `abs quiet off`). It does
+  # NOT lift on idle — reading at the desk should not start a buzz.
+  if [ "$(state_get '.auto_silent')" = "true" ]; then echo "quiet"; return 0; fi
+  echo "active"
+}
+
+# Bottom-bar indicator, wired into the session via the settings file's statusLine
+# key (see cmd_run). Claude Code re-runs this on every render, so it MUST be fast
+# and MUST never error, hang, or exit non-zero — always print one short line. It
+# reads the exact state cmd_is_quiet gates on, so the dot always matches whether a
+# proactive report would really go out. Small text-height ANSI dots (not emoji):
+#   ● green  abs:default              active — reports flowing
+#   ● gray   abs:default · silent      you ran `abs quiet on` (or the default_quiet seed)
+#   ● gray   abs:default · auto-silent  3 terminal commands tripped it; a Telegram msg clears
+#   ○ gray   abs:default · off          inbound disabled (`abs off`)
+# Raw ANSI is used (not the c_* vars, which blank out when stdout isn't a TTY) so
+# the colour survives to Claude Code, which renders the statusLine's escapes.
+cmd_statusline() {
+  local label="abs:$PROFILE"
+  local green='\033[32m' gray='\033[90m' off='\033[0m'
+  [ -f "$ABS_STATE" ] || { printf '%s' "$label"; return 0; }
+  # `abs off` lives in access.json (dmPolicy), not rc.json — check it first.
+  if [ -f "$TG_ACCESS" ] \
+     && [ "$(jq -r '.dmPolicy // ""' "$TG_ACCESS" 2>/dev/null)" = "disabled" ]; then
+    printf "${gray}○${off} %s · off" "$label"; return 0
+  fi
+  if [ "$(cmd_is_quiet)" = "quiet" ]; then
+    if [ "$(state_get '.quiet')" = "true" ]; then
+      printf "${gray}●${off} %s · silent" "$label"
+    else
+      printf "${gray}●${off} %s · auto-silent" "$label"
+    fi
+  else
+    printf "${green}●${off} %s" "$label"
+  fi
+  return 0
+}
+
+# --- smart auto-silent hook --------------------------------------------------
+#
+# Wired by cmd_run into the session as a UserPromptSubmit + PostToolUse hook (see
+# the settings file it writes). Fires per prompt and on the Telegram reply tool.
+# Constraints: fast, NO stdout (UserPromptSubmit stdout is injected into the
+# model's context), and never exit 2 (that would block the prompt). The `|| true`
+# at the dispatch site swallows every failure, -e and ERR included.
+_silent_reset() {   # a Telegram message arrived / was answered → resume pinging
+  state_set --argjson t "$1" \
+    '.terminal_streak = 0 | .auto_silent = false | .last_telegram_ts = $t' 2>/dev/null || true
+}
+
+_silent_terminal() {   # a terminal command → count toward auto-silence
+  local now="$1" streak
+  streak="$(state_get '.terminal_streak')"
+  case "$streak" in ''|null|*[!0-9]*) streak=0 ;; esac
+  streak=$((streak + 1))
+  if [ "$streak" -ge "$SILENT_STREAK" ]; then
+    state_set --argjson s "$streak" --argjson t "$now" \
+      '.terminal_streak = $s | .last_terminal_ts = $t | .auto_silent = true' 2>/dev/null || true
+  else
+    state_set --argjson s "$streak" --argjson t "$now" \
+      '.terminal_streak = $s | .last_terminal_ts = $t' 2>/dev/null || true
+  fi
+}
+
+cmd_silent_hook() {
+  [ -f "${ABS_STATE:-/nonexistent}" ] || return 0
+  local input event now
+  input="$(cat)"
+  now="$(date +%s)"
+  event="$(printf '%s' "$input" | jq -r '.hook_event_name // ""' 2>/dev/null)"
+
+  case "$event" in
+    UserPromptSubmit)
+      local prompt
+      prompt="$(printf '%s' "$input" | jq -r '.prompt // ""' 2>/dev/null)"
+      # The plugin wraps every inbound Telegram turn in this exact tag (verified).
+      if printf '%s' "$prompt" | grep -qF 'source="plugin:telegram'; then
+        _silent_reset "$now"
+      else
+        _silent_terminal "$now"
+      fi ;;
+    PostToolUse)
+      # The matcher already limits this to the reply tool; re-check defensively.
+      local tool
+      tool="$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)"
+      case "$tool" in *telegram*reply*) _silent_reset "$now" ;; esac ;;
+  esac
+  return 0
+}
+
+# Per-profile launch defaults, stored in rc.json and applied by cmd_run:
+#   model          — passed as --model at launch (an explicit CLI --model wins)
+#   default_quiet  — the mute state each new session opens in
+cmd_config() {
+  require_setup
+  local key="${1:-}" val="${2:-}"
+  case "$key" in
+    model)
+      case "$val" in
+        --clear|clear)
+          state_set 'del(.model)'
+          ok "Default model cleared — using Claude Code's own default." ;;
+        "")
+          local cur; cur="$(state_get '.model')"
+          [ -n "$cur" ] && [ "$cur" != "null" ] \
+            && info "Default model: $cur" \
+            || info "Default model: (Claude Code default)" ;;
+        *)
+          state_set --arg m "$val" '.model = $m'
+          ok "Default model set to '$val'." ;;
+      esac ;;
+    silent)
+      case "$val" in
+        on|true)   state_set '.default_quiet = true';  ok "Default silent ON — new sessions start muted." ;;
+        off|false) state_set '.default_quiet = false'; ok "Default silent OFF — new sessions start reporting." ;;
+        "")        info "Default silent: $(state_get '.default_quiet' | sed 's/^null$/false/')" ;;
+        *)         die "Usage: abs config silent on|off" ;;
+      esac ;;
+    statusline)
+      case "$val" in
+        # Stored as the ABSENCE of a disable flag, so it's on by default even for
+        # profiles created before this setting existed (null → on).
+        on|true)   state_set 'del(.no_statusline)'; ok "Status-bar indicator ON — new sessions show the abs dot." ;;
+        off|false) state_set '.no_statusline = true'; ok "Status-bar indicator OFF — leaves your own statusLine untouched." ;;
+        "")        info "Status-bar indicator: $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)" ;;
+        *)         die "Usage: abs config statusline on|off" ;;
+      esac ;;
+    ""|show)
+      info "${c_bold}Config for profile '$PROFILE'${c_reset}"
+      info "  model          $(state_get '.model' | sed 's/^null$/(Claude Code default)/')"
+      info "  default silent $(state_get '.default_quiet' | sed 's/^null$/false/')"
+      info "  statusline     $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)" ;;
+    *)
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off" ;;
+  esac
 }
 
 cmd_status() {
@@ -799,7 +964,15 @@ cmd_status() {
   info "  paired user  $(state_get '.user_id')"
   info "  chat id      $(state_get '.chat_id')"
   info "  inbound      $([ "$policy" = "disabled" ] && printf '%sOFF%s (%s)' "$c_red" "$c_reset" "$policy" || printf '%son%s (%s)' "$c_green" "$c_reset" "$policy")"
-  info "  reports      $([ "$quiet" = "quiet" ] && printf '%smuted%s' "$c_yellow" "$c_reset" || printf '%son%s' "$c_green" "$c_reset")"
+  local reports_line
+  if [ "$quiet" != "quiet" ]; then
+    reports_line="$(printf '%son%s' "$c_green" "$c_reset")"
+  elif [ "$(state_get '.quiet')" = "true" ]; then
+    reports_line="$(printf '%smuted%s (abs quiet — abs quiet off to resume)' "$c_yellow" "$c_reset")"
+  else
+    reports_line="$(printf '%smuted%s (auto-silent from terminal — a Telegram message or abs quiet off resumes)' "$c_yellow" "$c_reset")"
+  fi
+  info "  reports      $reports_line"
   pid="$(profile_live_pid)"
   if [ -n "$pid" ]; then
     info "  poller       ${c_green}live${c_reset} (pid $pid)"
@@ -1175,14 +1348,76 @@ cmd_say() {
 
 # --- run ---------------------------------------------------------------------
 
+# --- startup flood control ---------------------------------------------------
+#
+# The official plugin starts polling with no drop_pending_updates, so grammY
+# pulls the entire backlog of messages sent while abs was off and dumps them into
+# the fresh session. This drains that backlog *before* launch, while abs is the
+# only getUpdates consumer (we've already checked no poller is live). Peeking
+# never confirms anything; only advancing the offset does, so a peek is safe.
+#
+# "Old flood" = messages sent more than FLOOD_GRACE seconds before abs started.
+# Anything newer is treated as "just sent" and kept.
+readonly FLOOD_GRACE=2
+readonly FLOOD_PROMPT_TIMEOUT=15
+
+flood_check() {
+  local now resp total cutoff old_count max_id first_recent_id last_id ans off
+  now="$(date +%s)"
+  # allowed_updates=["message"] so we only weigh real messages, not edits/callbacks.
+  resp="$(tg_api getUpdates '{"timeout":0,"limit":100,"allowed_updates":["message"]}')"
+  [ -n "$resp" ] || return 0
+  [ "$(jq -r '.ok // false' <<<"$resp" 2>/dev/null)" = "true" ] || return 0
+  total="$(jq '.result | length' <<<"$resp" 2>/dev/null || echo 0)"
+  [ "${total:-0}" -gt 0 ] 2>/dev/null || return 0
+
+  cutoff=$((now - FLOOD_GRACE))
+  old_count="$(jq --argjson c "$cutoff" \
+    '[.result[] | select(.message.date != null and .message.date < $c)] | length' <<<"$resp" 2>/dev/null || echo 0)"
+  # Nothing genuinely old → let the (recent) messages through untouched.
+  [ "${old_count:-0}" -gt 0 ] 2>/dev/null || return 0
+
+  max_id="$(jq '[.result[].update_id] | max' <<<"$resp" 2>/dev/null)"
+  last_id="$(jq '[.result[] | select(.message.date != null)] | last | .update_id' <<<"$resp" 2>/dev/null)"
+  # Boundary for "keep recent": the oldest message newer than the cutoff.
+  first_recent_id="$(jq --argjson c "$cutoff" \
+    'first(.result[] | select(.message.date != null and .message.date >= $c) | .update_id) // empty' <<<"$resp" 2>/dev/null)"
+
+  warn "$old_count Telegram message(s) queued from before this session."
+  ans="d"
+  if [ -t 0 ]; then
+    printf '  [D]iscard old (default) / [K]eep all / keep [L]ast only? ' >&2
+    read -t "$FLOOD_PROMPT_TIMEOUT" -r ans || ans="d"
+    [ -n "$ans" ] || ans="d"
+  else
+    info "  (non-interactive — discarding old backlog)"
+  fi
+
+  # Advancing the offset to N confirms every update with id < N (dropping them)
+  # and leaves N and newer pending for the plugin.
+  case "$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')" in
+    k*)
+      info "  Keeping all queued messages." ;;
+    l*)
+      [ -n "$last_id" ] && tg_api getUpdates "{\"offset\": $last_id, \"timeout\":0}" >/dev/null 2>&1
+      ok "  Dropped the backlog; keeping only the latest message." ;;
+    *)
+      if [ -n "$first_recent_id" ]; then off="$first_recent_id"; else off=$((max_id + 1)); fi
+      tg_api getUpdates "{\"offset\": $off, \"timeout\":0}" >/dev/null 2>&1
+      ok "  Discarded $old_count old message(s)." ;;
+  esac
+}
+
 cmd_run() {
   need_deps
   ensure_plugin
 
+  local did_setup=0
   if ! load_token || [ ! -f "$ABS_STATE" ]; then
     info "${c_dim}No pairing for profile '$PROFILE' — running setup.${c_reset}"
     cmd_setup
     load_token || die "Setup did not complete."
+    did_setup=1
   fi
 
   local cid policy
@@ -1202,12 +1437,59 @@ cmd_run() {
   different bot:  abs --profile <name>    (see: abs profiles)"
   fi
 
+  # Drain any backlog before the plugin starts polling — unless setup just ran,
+  # in which case pairing already consumed the getUpdates stream (and the only
+  # pending message would be the PIN we just handled).
+  if [ "$did_setup" = "0" ] && [ "$policy" != "disabled" ]; then
+    flood_check
+  fi
+
+  # Each session opens at the profile's configured mute default, and with the
+  # auto-silent counters cleared so terminal activity from a past session never
+  # carries over.
+  local dq
+  dq="$(state_get '.default_quiet')"
+  [ "$dq" = "true" ] || dq="false"
+  state_set --argjson q "$dq" '.quiet = $q | .auto_silent = false | .terminal_streak = 0'
+
+  # Wire the smart-silent hook for this session. Written per-profile and passed
+  # with --settings, which MERGES with the user's own hooks (verified) rather
+  # than replacing them. The hook re-enters this same script as __silent-hook.
+  local hooks_file="$ABS_DIR/hooks.json"
+  local hook_cmd status_cmd
+  hook_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") __silent-hook"
+  status_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") statusline"
+  # statusLine shows the live mute/active dot in the bottom bar. It's a scalar
+  # (not a merge), so it overrides any global statusLine for the abs session only
+  # — normal `claude` sessions keep yours. `abs config statusline off` opts out.
+  local status_json='{}'
+  [ "$(state_get '.no_statusline')" = "true" ] \
+    || status_json="$(jq -n --arg s "$status_cmd" '{statusLine: {type: "command", command: $s, padding: 0}}')"
+  jq -n --arg c "$hook_cmd" --argjson sl "$status_json" '$sl + {
+    hooks: {
+      UserPromptSubmit: [ { hooks: [ { type: "command", command: $c, timeout: 5 } ] } ],
+      PostToolUse: [ { matcher: "mcp__plugin_telegram_telegram__reply",
+                       hooks: [ { type: "command", command: $c, timeout: 5 } ] } ]
+    }
+  }' > "$hooks_file" 2>/dev/null || warn "Could not write the session settings; continuing without hook/statusline."
+
   local perm_args=()
   if [ "${ABS_AWAY:-0}" = "1" ]; then
     # Away mode trades a real safety net for not blocking while you're out:
     # file edits stop prompting. Bash and other tools still ask.
     perm_args=(--permission-mode acceptEdits)
     warn "Away mode: file edits will not prompt for approval."
+  fi
+
+  # A stored default model, unless the caller already passed --model on the CLI.
+  local model_args=()
+  local stored_model
+  stored_model="$(state_get '.model')"
+  if [ -n "$stored_model" ] && [ "$stored_model" != "null" ]; then
+    case " $* " in
+      *"--model"*) : ;;                              # explicit CLI --model wins
+      *) model_args=(--model "$stored_model") ;;
+    esac
   fi
 
   # The plugin reads this to find the token and the allowlist. Exporting it is
@@ -1219,9 +1501,14 @@ cmd_run() {
   # an error on bash 3.2, which is what macOS ships and will keep shipping. This
   # line is the last thing abs does, so getting it wrong means setup completes
   # and then the launch dies.
+  local hook_args=()
+  [ -s "$hooks_file" ] && hook_args=(--settings "$hooks_file")
+
   exec claude \
     --channels "plugin:${PLUGIN_ID}" \
     --append-system-prompt "$(build_prompt "$cid")" \
+    ${hook_args[@]+"${hook_args[@]}"} \
+    ${model_args[@]+"${model_args[@]}"} \
     ${perm_args[@]+"${perm_args[@]}"} \
     "$@"
 }
@@ -1243,6 +1530,11 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
   ${c_bold}abs${c_reset} off                 Hard off: drop ALL inbound Telegram
   ${c_bold}abs${c_reset} on                  Re-enable inbound Telegram
+
+  ${c_bold}abs${c_reset} config model <name>  Default model for new sessions (--clear to unset)
+  ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
+  ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot (default on)
+  ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} help                This message
@@ -1286,6 +1578,15 @@ main() {
 
   command -v jq >/dev/null 2>&1 || die "jq is required."
 
+  # The smart-silent hook fires on every prompt: resolve the profile directly,
+  # skip migrations, and never touch the interactive picker. `|| true` keeps a
+  # failure from ever exiting non-zero (an exit 2 would block the user's prompt).
+  if [ "$cmd" = "__silent-hook" ]; then
+    use_profile "${want_profile:-default}"
+    cmd_silent_hook || true
+    return 0
+  fi
+
   # Newest layout first: clauderc's profiles land in ~/.abs, and only if there
   # were none does the pre-profiles single pairing get pulled in.
   migrate_clauderc_home
@@ -1295,9 +1596,9 @@ main() {
   else
     case "$cmd" in
       # is-quiet is called by Claude before every proactive send and must never
-      # block on a prompt. profiles iterates them all, so its starting point is
-      # arbitrary.
-      is-quiet|profiles) use_profile default ;;
+      # block on a prompt; statusline runs on every render — same rule. profiles
+      # iterates them all, so its starting point is arbitrary.
+      is-quiet|statusline|profiles) use_profile default ;;
       *)                 pick_profile ;;
     esac
   fi
@@ -1312,6 +1613,8 @@ main() {
     say)       shift; cmd_say "$@" ;;
     quiet)     shift; cmd_quiet "${1:-}" ;;
     is-quiet)  cmd_is_quiet ;;
+    statusline) cmd_statusline ;;
+    config)    shift; cmd_config "$@" ;;
     off)       cmd_off ;;
     on)        cmd_on ;;
     reset)     cmd_reset ;;

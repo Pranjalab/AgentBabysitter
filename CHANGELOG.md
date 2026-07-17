@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Launch defaults per profile** — `abs config model <name>` (`--clear` to unset)
+  and `abs config silent on|off`, stored in `rc.json` and applied at launch. An
+  explicit `abs --model …` on the command line still wins.
+- **Smart auto-silent** — after 3 consecutive terminal prompts, proactive reports
+  mute automatically (you're clearly at the desk). A Telegram message — or
+  `abs quiet off` — resumes them. No idle timer, so reading at your desk never
+  starts a buzz. Wired as a session hook via `--settings` (merges with your own).
+- **Status-bar indicator** — a small dot in Claude Code's bottom bar shows the
+  live state: green = reports flowing, gray = silent/auto-silent, hollow = inbound
+  off. `abs config statusline off` opts out (e.g. if you run your own statusLine).
+- **Startup flood control** — on start, `abs` drains any Telegram backlog older
+  than the launch and asks at the terminal what to do (default: discard), so a
+  new session no longer opens buried under old messages.
+
+### Changed
+- Inbound Telegram messages are now always replied to, even while reports are
+  muted — a reply is never a "proactive send."
+
 ## [2.0.0] — 2026-07-16
 
 The project was renamed from **Claude RC** to **Agent Babysitter**, and the

@@ -64,4 +64,11 @@ Thumbs.db
 *.swo
 *~
 .idea/
+
+# Internal working docs — design/build logs and launch (go-to-market) strategy.
+# Kept local; not published to the public repo.
+/docs/launch-plan.md
+/docs/launch-copy.md
+/docs/demo-script.md
+/docs/design-silent-and-flood.md
 .vscode/
