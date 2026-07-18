@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.1.6"
+readonly ABS_VERSION="2.2.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -905,6 +905,38 @@ _silent_terminal() {   # a terminal command → count toward auto-silence
   fi
 }
 
+# --- conversation backup (local, date-segregated log) ------------------------
+#
+# A best-effort scrub of things shaped like secrets, so a pasted token never
+# lands in the log. Portable sed only (no GNU-only flags) — abs runs on macOS's
+# bash 3.2 too. It's a safety net, not a guarantee; the log is local and owner-
+# only regardless.
+_log_redact() {
+  printf '%s' "$1" | sed -E \
+    -e 's#[0-9]{8,10}:[A-Za-z0-9_-]{35,}#[redacted-token]#g' \
+    -e 's#sk-[A-Za-z0-9_-]{20,}#[redacted-key]#g' \
+    -e 's#gh[pousr]_[A-Za-z0-9]{30,}#[redacted-token]#g' \
+    -e 's#AKIA[0-9A-Z]{16}#[redacted-key]#g' \
+    -e 's#(TOKEN|KEY|SECRET|PASSWORD|PASSWD|BEARER)("?[[:space:]]*[=:][[:space:]]*"?)[^[:space:]"]+#\1\2[redacted]#g' \
+    2>/dev/null
+}
+
+# Append one line to today's per-profile log. Called from the session hook, so it
+# must stay fast, silent, and never fail the hook. Off if `abs config log off`.
+log_event() {   # <role> <meta> <session> <text>
+  [ "$(state_get '.no_log')" = "true" ] && return 0
+  local role="$1" meta="$2" sess="$3" text="$4" dir f line
+  dir="$ABS_DIR/log"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  text="$(_log_redact "$text" | head -c 4000)"   # bound a giant paste
+  f="$dir/$(date +%Y-%m-%d).jsonl"
+  line="$(jq -cn --arg ts "$(date +%H:%M:%S)" --arg r "$role" --arg m "$meta" \
+     --arg s "$sess" --arg x "$text" \
+     '{ts:$ts, role:$r, meta:$m, session:$s, text:$x}' 2>/dev/null)" || return 0
+  printf '%s\n' "$line" >> "$f" 2>/dev/null || true
+  chmod 600 "$f" 2>/dev/null || true
+}
+
 # Instant "got it": the moment a Telegram message lands, drop a 👀 reaction on it
 # straight from the hook — guaranteed, independent of whether the model remembers
 # to reply, and (unlike a text ack) it can never double up with the model's own
@@ -923,10 +955,11 @@ _silent_ack() {
 
 cmd_silent_hook() {
   [ -f "${ABS_STATE:-/nonexistent}" ] || return 0
-  local input event now
+  local input event now sess
   input="$(cat)"
   now="$(date +%s)"
   event="$(printf '%s' "$input" | jq -r '.hook_event_name // ""' 2>/dev/null)"
+  sess="$(printf '%s' "$input" | jq -r '.session_id // ""' 2>/dev/null)"
 
   case "$event" in
     UserPromptSubmit)
@@ -940,16 +973,84 @@ cmd_silent_hook() {
         if [ "$(state_get '.no_ack')" != "true" ]; then
           ( _silent_ack "$prompt" >/dev/null 2>&1 & ) 2>/dev/null || true
         fi
+        # Log the message without the plugin's <channel …> wrapper.
+        log_event "you" "telegram" "$sess" "$(printf '%s' "$prompt" | sed -E 's#</?channel[^>]*>##g')"
       else
         _silent_terminal "$now"
+        log_event "you" "terminal" "$sess" "$prompt"
       fi ;;
     PostToolUse)
-      # The matcher already limits this to the reply tool; re-check defensively.
       local tool
       tool="$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)"
-      case "$tool" in *telegram*reply*) _silent_reset "$now" ;; esac ;;
+      case "$tool" in
+        *telegram*reply*)
+          _silent_reset "$now"
+          log_event "abs" "→ telegram" "$sess" \
+            "$(printf '%s' "$input" | jq -r '.tool_input.text // ""' 2>/dev/null)" ;;
+        *telegram*react*|*telegram*edit_message*) : ;;  # reactions/edits are noise
+        "") : ;;
+        *) log_event "tool" "$tool" "$sess" "" ;;   # record that a tool ran, name only
+      esac ;;
   esac
   return 0
+}
+
+# abs log [--date YYYY-MM-DD] [--list] [--clear] — read or delete the local
+# conversation backup. The log is yours: plain files under ~/.abs, owner-only,
+# never uploaded, kept until you clear them.
+cmd_log() {
+  require_setup
+  local dir="$ABS_DIR/log" date="" action="view"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --date) date="${2:-}"; shift 2 ;;
+      --list|-l) action="list"; shift ;;
+      --clear)   action="clear"; shift ;;
+      -h|--help) action="help"; shift ;;
+      *) die "Usage: abs log [--date YYYY-MM-DD] [--list] [--clear]" ;;
+    esac
+  done
+
+  case "$action" in
+    help)
+      info "  ${c_bold}abs log${c_reset}                today's conversation"
+      info "  ${c_bold}abs log --date${c_reset} <day>   a specific day (YYYY-MM-DD)"
+      info "  ${c_bold}abs log --list${c_reset}         days on record"
+      info "  ${c_bold}abs log --clear${c_reset}        delete every logged day"
+      return 0 ;;
+    list)
+      local any=0 f d
+      for f in "$dir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        any=1; d="$(basename "$f" .jsonl)"
+        info "  $d  ·  $(wc -l <"$f" | tr -d ' ') entries  ·  $(du -h "$f" 2>/dev/null | cut -f1)"
+      done
+      [ "$any" = 1 ] || info "No conversation log yet."
+      return 0 ;;
+    clear)
+      local n; n="$(find "$dir" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')"
+      [ "${n:-0}" -gt 0 ] || { info "Nothing to clear."; return 0; }
+      printf 'Delete %s day(s) of conversation logs? [y/N] ' "$n" >&2
+      local ans=""; read -r ans || true
+      case "$ans" in
+        [yY]|[yY][eE][sS]) rm -f "$dir"/*.jsonl && ok "Cleared $n day(s) of logs." ;;
+        *) info "Kept." ;;
+      esac
+      return 0 ;;
+    view)
+      local f="$dir/${date:-$(date +%Y-%m-%d)}.jsonl"
+      [ -f "$f" ] || { info "No conversation logged for ${date:-today}."; return 0; }
+      info "${c_dim}$(basename "$f" .jsonl) — $(wc -l <"$f" | tr -d ' ') entries${c_reset}"
+      # role → a short, aligned label; tool lines show just the name.
+      jq -r '
+        .ts as $t | .text as $x |
+        (if .role=="you"  then "🟢 you (\(.meta))"
+         elif .role=="abs" then "🤖 abs \(.meta)"
+         else "   · \(.meta)" end) as $who |
+        "\($t)  \($who)" + (if $x=="" then "" else ":  \($x | gsub("\n";" "))" end)
+      ' "$f" 2>/dev/null || cat "$f"
+      return 0 ;;
+  esac
 }
 
 # Per-profile launch defaults, stored in rc.json and applied by cmd_run:
@@ -1009,6 +1110,13 @@ cmd_config() {
         "")        info "Instant ack: $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)" ;;
         *)         die "Usage: abs config ack on|off" ;;
       esac ;;
+    log)
+      case "$val" in
+        on|true)   state_set 'del(.no_log)'; ok "Conversation log ON — saved locally under ~/.abs, yours to read or clear." ;;
+        off|false) state_set '.no_log = true'; ok "Conversation log OFF — nothing new is recorded." ;;
+        "")        info "Conversation log: $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)" ;;
+        *)         die "Usage: abs config log on|off" ;;
+      esac ;;
     ""|show)
       info "${c_bold}Config for profile '$PROFILE'${c_reset}  ${c_dim}(abs $ABS_VERSION)${c_reset}"
       info "  model          $(state_get '.model' | sed 's/^null$/(Claude Code default)/')"
@@ -1016,7 +1124,8 @@ cmd_config() {
       info "  statusline     $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)"
       info "  usage refresh  $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min"
       info "  update check   $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)"
-      info "  instant ack    $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)" ;;
+      info "  instant ack    $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)"
+      info "  conversation log $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)" ;;
     *)
       die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>  |  update-check on|off" ;;
   esac
@@ -1727,10 +1836,15 @@ cmd_run() {
   local status_json='{}'
   [ "$(state_get '.no_statusline')" = "true" ] \
     || status_json="$(jq -n --arg s "$status_cmd" '{statusLine: {type: "command", command: $s, padding: 0}}')"
-  jq -n --arg c "$hook_cmd" --argjson sl "$status_json" '$sl + {
+  # PostToolUse normally only needs the reply tool (for auto-silent). When the
+  # conversation log is on, widen it to every tool so tool calls get recorded —
+  # so the per-tool hook cost is only paid by users who want the log.
+  local pt_matcher="mcp__plugin_telegram_telegram__reply"
+  [ "$(state_get '.no_log')" = "true" ] || pt_matcher=".*"
+  jq -n --arg c "$hook_cmd" --arg pm "$pt_matcher" --argjson sl "$status_json" '$sl + {
     hooks: {
       UserPromptSubmit: [ { hooks: [ { type: "command", command: $c, timeout: 5 } ] } ],
-      PostToolUse: [ { matcher: "mcp__plugin_telegram_telegram__reply",
+      PostToolUse: [ { matcher: $pm,
                        hooks: [ { type: "command", command: $c, timeout: 5 } ] } ]
     }
   }' > "$hooks_file" 2>/dev/null || warn "Could not write the session settings; continuing without hook/statusline."
@@ -1797,6 +1911,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
                           Report subscription limits (sends to Telegram by default)
   ${c_bold}abs${c_reset} menu               Re-register the Telegram "/" command menu
   ${c_bold}abs${c_reset} say "text"         Speak it and send as a voice note (needs .venv-tts)
+  ${c_bold}abs${c_reset} log [--list|--clear]  Read or delete your local conversation backup
 
   ${c_bold}abs${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
   ${c_bold}abs${c_reset} off                 Hard off: drop ALL inbound Telegram
@@ -1808,6 +1923,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config usage-refresh <min>  How often the usage glance refreshes (default 5)
   ${c_bold}abs${c_reset} config update-check on|off  Daily "new version available" check (default on)
   ${c_bold}abs${c_reset} config ack on|off    👀 the moment a Telegram message lands (default on)
+  ${c_bold}abs${c_reset} config log on|off    Back up the conversation locally (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
@@ -1894,6 +2010,7 @@ main() {
     usage-glance) cmd_usage_glance ;;
     usage-cache)  cmd_usage_cache ;;
     config)    shift; cmd_config "$@" ;;
+    log)       shift; cmd_log "$@" ;;
     off)       cmd_off ;;
     on)        cmd_on ;;
     reset)     cmd_reset ;;

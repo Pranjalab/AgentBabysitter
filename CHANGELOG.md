@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-07-18
+
+### Added
+- **Conversation backup.** abs keeps a local, date-segregated log of the session —
+  your messages, its Telegram replies, and the tools it ran — under
+  `~/.abs/<profile>/log/`, owner-only and never uploaded. Read it with `abs log`
+  (`--list` for the days on record, `--date <day>` for one), delete it with
+  `abs log --clear`. Anything shaped like a secret (bot tokens, `sk-…`, `ghp_…`,
+  AWS keys, `KEY=…`) is scrubbed before writing — best-effort, since the log is
+  local and owner-only anyway. Turn it off with `abs config log off`; when off,
+  the per-tool hook cost isn't paid at all.
+
 ## [2.1.6] — 2026-07-18
 
 ### Added

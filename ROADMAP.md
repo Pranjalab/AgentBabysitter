@@ -6,11 +6,12 @@ we build them one at a time as they become worth it. Ideas and PRs welcome.
 Two of these (4 and 5) shipped in **2.1.6**; the rest have their key decisions
 locked below and are ready to build when we get to them.
 
-## 1. Conversation backup — a local, viewable, deletable archive
+## 1. Conversation backup — a local, viewable, deletable archive  ✅ shipped in 2.2.0
 
-> **Decided:** never store anything that looks like a secret/key; keep logs
-> forever until the user deletes or prunes them; log both messages *and* tool
-> calls; use a proper per-session/per-conversation structure.
+> Date-segregated JSONL under `~/.abs/<profile>/log/`; logs your messages, abs's
+> Telegram replies, and tool calls; secrets scrubbed before writing; kept until
+> `abs log --clear`. Read with `abs log` / `--list` / `--date`; toggle with
+> `abs config log`. (Session id is stored per entry for future per-session views.)
 
 Keep a local copy of every conversation between the Telegram side and the
 terminal session (the messages that flow through the plugin), written to memory

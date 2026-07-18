@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-babysitter"
 # Keep in sync with ABS_VERSION in abs.sh and the repo-root VERSION file.
-version = "2.1.6"
+version = "2.2.0"
 description = "Leave your desk — Claude Code keeps working and reports to your phone over Telegram."
 readme = "README.md"
 requires-python = ">=3.8"
