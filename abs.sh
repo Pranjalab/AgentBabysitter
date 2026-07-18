@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.1.2"
+readonly ABS_VERSION="2.1.3"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1366,9 +1366,10 @@ usage_glance_str() {
   local out=""
   [ -n "$s" ]  && out="5h ${s}%"
   [ -n "$w" ]  && { [ -n "$out" ] && out="${out} · week ${w}%" || out="week ${w}%"; }
-  # Fable weekly only when it's actually been used — "Fable 0%" is pure noise in
-  # a bar that's fighting for width. Show it once it has a nonzero share.
-  [ -n "$fb" ] && [ "$fb" != "0" ] && { [ -n "$out" ] && out="${out} · Fable ${fb}%" || out="Fable ${fb}%"; }
+  # Fable weekly, shown whenever the line exists at all — including 0%. The
+  # /usage output omits it entirely until the model is touched this week, so its
+  # mere presence is the signal; we always surface it.
+  [ -n "$fb" ] && { [ -n "$out" ] && out="${out} · Fable ${fb}%" || out="Fable ${fb}%"; }
   # Next reset = the 5-hour window (soonest). until_reset -> "in 3h 53m", or the
   # raw stamp on a macOS without GNU date.
   if [ -n "$sr" ]; then

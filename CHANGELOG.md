@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.3] — 2026-07-18
+
+### Changed
+- **Usage glance always shows the Fable weekly limit**, including at 0% — reverts
+  the 2.1.2 hide-at-0 behavior. The `/usage` output omits the Fable line until
+  the model is used this week, so whenever it's present we surface it.
+
 ## [2.1.2] — 2026-07-18
 
 ### Changed
