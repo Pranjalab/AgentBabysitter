@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.1.5"
+readonly ABS_VERSION="2.1.6"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -720,8 +720,11 @@ Fetch it with the \`download_attachment\` tool, then transcribe it:
 
     ${PROJECT_ROOT}/.venv/bin/python ${PROJECT_ROOT}/transcribe.py <file.oga>
 
-Then act on the transcript as if they had typed it. No need to read it back to
-them unless a word looks garbled enough to change the meaning.
+Then, BEFORE you act, echo the transcript back so they can verify it and stop or
+correct you mid-way — reply on Telegram with \`Heard: "<transcript>"\` (and it's
+visible in the terminal from the command above). Immediately after that, act on
+the transcript as if they'd typed it — don't wait for the whole task to finish to
+send it. If they follow up to fix a mis-heard word, adjust course.
 
 Outbound, only when they ask for a voice answer:
 
@@ -902,6 +905,22 @@ _silent_terminal() {   # a terminal command → count toward auto-silence
   fi
 }
 
+# Instant "got it": the moment a Telegram message lands, drop a 👀 reaction on it
+# straight from the hook — guaranteed, independent of whether the model remembers
+# to reply, and (unlike a text ack) it can never double up with the model's own
+# answer. Backgrounded and fully silenced by the caller: the hook must stay fast
+# and must not write to stdout (that would be injected into the model's context).
+_silent_ack() {
+  local prompt="$1" chat mid body
+  chat="$(printf '%s' "$prompt" | grep -oE 'chat_id="-?[0-9]+"' | head -1 | grep -oE -- '-?[0-9]+')"
+  mid="$(printf '%s' "$prompt" | grep -oE 'message_id="[0-9]+"' | head -1 | grep -oE '[0-9]+')"
+  [ -n "$chat" ] && [ -n "$mid" ] || return 0
+  load_token 2>/dev/null || return 0
+  body="$(jq -n --argjson c "$chat" --argjson m "$mid" \
+    '{chat_id:$c, message_id:$m, reaction:[{type:"emoji", emoji:"👀"}]}' 2>/dev/null)" || return 0
+  tg_api setMessageReaction "$body" >/dev/null 2>&1 || true
+}
+
 cmd_silent_hook() {
   [ -f "${ABS_STATE:-/nonexistent}" ] || return 0
   local input event now
@@ -916,6 +935,11 @@ cmd_silent_hook() {
       # The plugin wraps every inbound Telegram turn in this exact tag (verified).
       if printf '%s' "$prompt" | grep -qF 'source="plugin:telegram'; then
         _silent_reset "$now"
+        # Instant receipt reaction, backgrounded (fast + no stdout). Opt out with
+        # `abs config ack off`.
+        if [ "$(state_get '.no_ack')" != "true" ]; then
+          ( _silent_ack "$prompt" >/dev/null 2>&1 & ) 2>/dev/null || true
+        fi
       else
         _silent_terminal "$now"
       fi ;;
@@ -978,13 +1002,21 @@ cmd_config() {
         "")        info "Update check: $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)" ;;
         *)         die "Usage: abs config update-check on|off" ;;
       esac ;;
+    ack)
+      case "$val" in
+        on|true)   state_set 'del(.no_ack)'; ok "Instant ack ON — a 👀 lands on your message the moment it arrives." ;;
+        off|false) state_set '.no_ack = true'; ok "Instant ack OFF — no auto-reaction on inbound messages." ;;
+        "")        info "Instant ack: $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)" ;;
+        *)         die "Usage: abs config ack on|off" ;;
+      esac ;;
     ""|show)
       info "${c_bold}Config for profile '$PROFILE'${c_reset}  ${c_dim}(abs $ABS_VERSION)${c_reset}"
       info "  model          $(state_get '.model' | sed 's/^null$/(Claude Code default)/')"
       info "  default silent $(state_get '.default_quiet' | sed 's/^null$/false/')"
       info "  statusline     $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)"
       info "  usage refresh  $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min"
-      info "  update check   $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)" ;;
+      info "  update check   $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)"
+      info "  instant ack    $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)" ;;
     *)
       die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>  |  update-check on|off" ;;
   esac
@@ -1775,6 +1807,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot + usage (default on)
   ${c_bold}abs${c_reset} config usage-refresh <min>  How often the usage glance refreshes (default 5)
   ${c_bold}abs${c_reset} config update-check on|off  Daily "new version available" check (default on)
+  ${c_bold}abs${c_reset} config ack on|off    👀 the moment a Telegram message lands (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state

@@ -3,7 +3,14 @@
 Planned features, not yet built — captured so they aren't lost. No timeline;
 we build them one at a time as they become worth it. Ideas and PRs welcome.
 
+Two of these (4 and 5) shipped in **2.1.6**; the rest have their key decisions
+locked below and are ready to build when we get to them.
+
 ## 1. Conversation backup — a local, viewable, deletable archive
+
+> **Decided:** never store anything that looks like a secret/key; keep logs
+> forever until the user deletes or prunes them; log both messages *and* tool
+> calls; use a proper per-session/per-conversation structure.
 
 Keep a local copy of every conversation between the Telegram side and the
 terminal session (the messages that flow through the plugin), written to memory
@@ -22,6 +29,10 @@ any time, keep and reuse it, or delete it when it's not needed.
 
 ## 2. Per-project bot selection at launch
 
+> **Decided:** reuse each bot's own name — don't ask for a new name. The first
+> bot added to the system is the default (startable any time); the user can add
+> more, and a project remembers which one it uses.
+
 One system can run abs across several projects. With a single default bot, those
 conversations would mix. Profiles already solve this (`abs --profile <name>`),
 but the choice is invisible at launch.
@@ -36,6 +47,9 @@ On `abs` start (especially in a project with no profile yet), **ask**:
   the per-directory memory of which bot a project uses.
 
 ## 3. Configurable persona + a developer extension framework
+
+> **Status:** to be scoped in a separate design discussion — what exactly a user
+> can configure, and the skill/extension model.
 
 Two related pieces.
 
@@ -55,7 +69,10 @@ use. Crucially, help them decide **where a new capability belongs**:
 This extends the "Build on abs" docs with a decision guide, and pairs it with the
 persona-config mechanism so customization is first-class, not a fork.
 
-## 4. Show the voice transcript for verification
+## 4. Show the voice transcript for verification  ✅ shipped in 2.1.6
+
+> Echoes `Heard: "<transcript>"` to Telegram before acting, and acts immediately
+> so you can verify and stop/correct mid-task.
 
 When a voice note comes in and gets transcribed, **surface the transcript** — in
 the terminal (so anyone watching sees exactly what was heard) and optionally
@@ -71,7 +88,10 @@ running off a mis-heard instruction.
 - Open question: terminal-only vs also echo to Telegram; act-and-allow-correction
   vs confirm-first.
 
-## 5. Instant "got it" acknowledgment on inbound
+## 5. Instant "got it" acknowledgment on inbound  ✅ shipped in 2.1.6
+
+> A guaranteed 👀 reaction fires from the session hook the instant a message
+> lands — never double-messages. Opt out with `abs config ack off`.
 
 When a message arrives from Telegram and Claude starts working, the sender has no
 signal it was received. **Acknowledge immediately** — a quick "got it, working on

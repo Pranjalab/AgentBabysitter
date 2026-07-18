@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.6] — 2026-07-18
+
+### Added
+- **Instant acknowledgment on inbound.** The moment a Telegram message lands, abs
+  drops a 👀 reaction on it straight from the session hook — guaranteed and before
+  any work starts, so you know it was received. Never double-messages the way a
+  text ack would. Opt out with `abs config ack off`.
+- **Voice transcript echo.** When you send a voice note, abs replies with
+  `Heard: "…"` before acting on it, so you can verify the transcription and correct
+  or stop it mid-task instead of finding out at the end.
+
 ## [2.1.5] — 2026-07-18
 
 ### Fixed
