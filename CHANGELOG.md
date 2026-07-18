@@ -6,6 +6,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.5] — 2026-07-18
+
+### Fixed
+- **Re-running the installer now updates an existing install** instead of
+  refusing it. It recognizes any prior Agent Babysitter — the git symlink *or* a
+  curl/pipx static copy — by its version constant and replaces it in place, while
+  still refusing to clobber the unrelated v1 Python namesake. This is how every
+  user updates: just re-run the one-line installer (or `git pull`).
+- **The update banner now shows on the first run after a release.** The version
+  check fetches synchronously on a cold cache instead of only in the background,
+  so a newer version is flagged immediately rather than on the second launch.
+
+### Added
+- **The installer offers to install Claude Code** if it's missing, the same way
+  it offers Bun — `curl -fsSL https://claude.ai/install.sh | bash`, into
+  `~/.local/bin`, no sudo.
+
 ## [2.1.4] — 2026-07-18
 
 ### Changed

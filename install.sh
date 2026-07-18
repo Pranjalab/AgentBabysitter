@@ -37,6 +37,7 @@ die()  { printf '%s✗%s %s\n' "$c_red" "$c_reset" "$*" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die "This installer needs curl. (sudo apt install curl)"
 
 bun_fresh=0
+claude_fresh=0
 
 # Piped in, stdin is the script — reading from it would swallow the rest of this
 # file. /dev/tty is the human, when there is one. No tty (CI, nohup) means no
@@ -82,22 +83,35 @@ if ! command -v bun >/dev/null 2>&1; then
   fi
 fi
 
-# These two can't be auto-installed: claude ships its own installer, and jq
-# wants a package manager and a sudo password this script has no business asking
-# for. Name them and stop — abs would only stop later.
-missing=()
-for c in claude jq; do
-  command -v "$c" >/dev/null 2>&1 || missing+=("$c")
-done
-if [ ${#missing[@]} -gt 0 ]; then
-  info "${c_bold}Agent Babysitter needs these first:${c_reset}"
-  for m in "${missing[@]}"; do
-    case "$m" in
-      claude) info "  claude → https://claude.com/claude-code" ;;
-      jq)     info "  jq     → sudo apt install jq   (or: brew install jq)" ;;
-    esac
-  done
-  die "Install those, then run this again."
+# Claude Code is the whole point — abs runs it. It ships an official installer
+# that drops into ~/.local/bin with no sudo, so we can offer it just like Bun.
+if ! command -v claude >/dev/null 2>&1; then
+  info "${c_bold}Agent Babysitter runs Claude Code${c_reset} — and it isn't installed yet."
+  info "${c_dim}Anthropic's installer puts it in ~/.local/bin. No sudo.${c_reset}"
+  if ask_yes "Install Claude Code now? [y/N]"; then
+    info "  ${c_dim}Installing Claude Code…${c_reset}"
+    curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 \
+      || die "Claude Code's installer failed. Install it yourself: https://claude.com/claude-code"
+    # Its installer targets ~/.local/bin; make it visible to this shell now, or
+    # the check just below (and abs's own runtime check) fails on first run.
+    export PATH="$HOME/.local/bin:$PATH"
+    command -v claude >/dev/null 2>&1 || die "Claude Code installed but isn't on PATH — open a new shell and re-run this."
+    claude_fresh=1
+    ok "Claude Code installed."
+  else
+    info ""
+    info "  No problem — install it yourself with:"
+    info "    ${c_bold}curl -fsSL https://claude.ai/install.sh | bash${c_reset}"
+    die "Then re-run this installer."
+  fi
+fi
+
+# jq is the one dep we can't auto-install: it wants a package manager and a sudo
+# password this script has no business asking for. Name it and stop.
+if ! command -v jq >/dev/null 2>&1; then
+  info "${c_bold}Agent Babysitter needs jq:${c_reset}"
+  info "  jq → ${c_bold}sudo apt install jq${c_reset}   (or: ${c_bold}brew install jq${c_reset})"
+  die "Install it, then run this again."
 fi
 
 # --- fetch -------------------------------------------------------------------
@@ -132,33 +146,41 @@ fi
 
 # --- install -----------------------------------------------------------------
 
-# `abs` is a short name, and both branches below overwrite whatever holds it —
-# `ln -sfn` and `install` are equally happy to clobber. Agent Babysitter v1 (the
-# Python one) put its own entry point here, and on a stranger's machine anything
-# could. Taking someone's command out from under them without a word is not this
-# installer's call to make.
+# `abs` is a short name, and both branches below overwrite whatever holds it.
+# A prior Agent Babysitter — the git symlink OR a curl/pipx static copy — carries
+# our ABS_VERSION constant, so we recognize it and update it in place (this is how
+# every existing user gets new versions: just re-run the installer). Agent
+# Babysitter v1 (the unrelated Python namesake) and anything else a stranger put
+# here does NOT carry it, so we still refuse to clobber it without a word.
+abs_owned() {
+  # grep follows a symlink to the real abs.sh; on a static copy it reads the copy.
+  grep -q '^readonly ABS_VERSION=' "$1" 2>/dev/null && return 0
+  case "$(readlink -f "$1" 2>/dev/null)" in *"/abs.sh") return 0 ;; esac
+  return 1
+}
+
 if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
-  current="$(readlink -f "$TARGET" 2>/dev/null || printf '%s' "$TARGET")"
-  case "$current" in
-    *"/abs.sh")
-      : ;;  # already ours — re-running the installer is meant to relink
-    *)
-      if [ "${ABS_FORCE:-}" = "1" ]; then
-        warn "Overwriting $TARGET because ABS_FORCE=1."
-      else
-        warn "$TARGET already exists, and it isn't this script:"
-        info "      $current"
-        info ""
-        info "  That may be Agent Babysitter v1 (the Python package: ${c_bold}pip uninstall agent-babysitter${c_reset}),"
-        info "  or something else entirely. Nothing here will overwrite it for you."
-        info ""
-        info "  Pick one:"
-        info "    • move it aside:     ${c_bold}mv $TARGET $TARGET.old${c_reset}"
-        info "    • install elsewhere: ${c_bold}PREFIX=~/bin ./install.sh${c_reset}"
-        info "    • overwrite anyway:  ${c_bold}ABS_FORCE=1 ./install.sh${c_reset}"
-        die "Refusing to replace a command this installer didn't create."
-      fi ;;
-  esac
+  if abs_owned "$TARGET"; then
+    old_ver="$(grep -m1 '^readonly ABS_VERSION=' "$TARGET" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')"
+    [ -n "$old_ver" ] \
+      && info "${c_dim}Found Agent Babysitter $old_ver — updating it in place.${c_reset}" \
+      || info "${c_dim}Found an existing Agent Babysitter — updating it in place.${c_reset}"
+  elif [ "${ABS_FORCE:-}" = "1" ]; then
+    warn "Overwriting $TARGET because ABS_FORCE=1."
+  else
+    current="$(readlink -f "$TARGET" 2>/dev/null || printf '%s' "$TARGET")"
+    warn "$TARGET already exists, and it isn't Agent Babysitter:"
+    info "      $current"
+    info ""
+    info "  That's most likely the old v1 Python package (${c_bold}pip uninstall agent-babysitter${c_reset}),"
+    info "  or something else entirely. Nothing here will overwrite it for you."
+    info ""
+    info "  Pick one:"
+    info "    • remove the old one: ${c_bold}pip uninstall agent-babysitter${c_reset}  ${c_dim}then re-run this${c_reset}"
+    info "    • install elsewhere:  ${c_bold}PREFIX=~/bin ./install.sh${c_reset}"
+    info "    • overwrite anyway:   ${c_bold}ABS_FORCE=1 ./install.sh${c_reset}"
+    die "Refusing to replace a command this installer didn't create."
+  fi
 fi
 
 mkdir -p "$PREFIX"
@@ -215,6 +237,11 @@ info ""
 if [ "$bun_fresh" = "1" ]; then
   warn "Bun is new here — open a new shell before your first ${c_bold}abs${c_reset}, or run:"
   info "    ${c_bold}export PATH=\"\$HOME/.bun/bin:\$PATH\"${c_reset}"
+  info ""
+fi
+if [ "$claude_fresh" = "1" ]; then
+  warn "Claude Code is new here — open a new shell before your first ${c_bold}abs${c_reset}, or run:"
+  info "    ${c_bold}export PATH=\"\$HOME/.local/bin:\$PATH\"${c_reset}"
   info ""
 fi
 info "${c_dim}First run asks for a Telegram bot token from @BotFather, then pairs your${c_reset}"

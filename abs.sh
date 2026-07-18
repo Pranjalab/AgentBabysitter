@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.1.4"
+readonly ABS_VERSION="2.1.5"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1440,8 +1440,13 @@ update_check() {
     checked="$(jq -r '.checked_at // 0' "$f" 2>/dev/null)"
   fi
   case "$checked" in ''|null|*[!0-9]*) checked=0 ;; esac
-  # Stale (older than a day) or never checked -> one detached refresh.
-  if [ "$(( now - checked ))" -ge 86400 ]; then
+  # Cold cache (never fetched) -> fetch NOW so the very first launch after an
+  # update can already show the banner. Warm but stale -> refresh in the
+  # background: instant launch, and the banner uses the last-known value.
+  if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+    _update_fetch
+    latest="$(jq -r '.latest // ""' "$f" 2>/dev/null)"
+  elif [ "$(( now - checked ))" -ge 86400 ]; then
     ( _update_fetch >/dev/null 2>&1 & ) 2>/dev/null || true
   fi
   [ -n "$latest" ] && [ "$latest" != "null" ] || return 0
