@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.1] — 2026-07-18
+
+### Fixed
+- **Usage glance reset time** — the "resets in …" readout could show a nonsense
+  window (e.g. `resets in 8755h 18m`) right after a 5-hour session rolled over.
+  A cached reset stamp that had just passed was mistaken for a Dec→Jan year-wrap
+  and pushed a full year out. It now only rolls the year forward for stamps more
+  than 300 days past (the real wrap case) and shows `now` for a just-passed
+  window until the next refresh.
+
 ## [2.1.0] — 2026-07-18
 
 ### Added

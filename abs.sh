@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.1.0"
+readonly ABS_VERSION="2.1.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1151,8 +1151,19 @@ until_reset() {
   target="$(date -d "$norm" +%s 2>/dev/null || true)"
   [ -n "$target" ] || { printf '%s' "$stamp"; return; }
   now="$(date +%s)"
-  # A reset that parses as past means we rolled the year; add one.
-  [ "$target" -lt "$now" ] && target=$(date -d "$norm +1 year" +%s 2>/dev/null || echo "$target")
+  # A reset that parses as past has two causes, told apart by how far past:
+  #  • Year wrap — a monthless stamp like "Jan 2" seen in late December parses to
+  #    this January; the true reset is next January, ~360 days out. Add a year.
+  #  • Stale cache — a within-window stamp (the 5-hour session, or a weekly) whose
+  #    reset just rolled over before the lazy cache refresh caught up. Only hours
+  #    past. The reset already happened: say "now" — do NOT add a year (that's the
+  #    "resets in 8755h" bug). No real reset window exceeds a week, so anything
+  #    less than ~300 days past cannot be a legitimate future stamp we mis-rolled.
+  if [ "$target" -lt "$now" ]; then
+    if [ "$(( now - target ))" -gt 25920000 ]; then   # > 300 days past → year wrap
+      target=$(date -d "$norm +1 year" +%s 2>/dev/null || echo "$target")
+    fi
+  fi
   delta=$(( target - now ))
   [ "$delta" -lt 0 ] && { printf 'now'; return; }
   h=$(( delta / 3600 )); m=$(( (delta % 3600) / 60 ))
