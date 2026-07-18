@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.4] — 2026-07-18
+
+### Changed
+- **Usage glance reordered and relabeled** — now reads `Fable 0 · Week 9% · 5H
+  15% resets in 2m`: Fable first, then the weekly all-models limit, then the
+  5-hour window with its next-reset time tucked onto the same segment.
+
 ## [2.1.3] — 2026-07-18
 
 ### Changed

@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.1.3"
+readonly ABS_VERSION="2.1.4"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1363,18 +1363,20 @@ usage_glance_str() {
   case "$s" in ''|*[!0-9]*) s="" ;; esac
   case "$w" in ''|*[!0-9]*) w="" ;; esac
   case "$fb" in ''|*[!0-9]*) fb="" ;; esac
-  local out=""
-  [ -n "$s" ]  && out="5h ${s}%"
-  [ -n "$w" ]  && { [ -n "$out" ] && out="${out} · week ${w}%" || out="week ${w}%"; }
-  # Fable weekly, shown whenever the line exists at all — including 0%. The
-  # /usage output omits it entirely until the model is touched this week, so its
-  # mere presence is the signal; we always surface it.
-  [ -n "$fb" ] && { [ -n "$out" ] && out="${out} · Fable ${fb}%" || out="Fable ${fb}%"; }
-  # Next reset = the 5-hour window (soonest). until_reset -> "in 3h 53m", or the
-  # raw stamp on a macOS without GNU date.
-  if [ -n "$sr" ]; then
-    local rel; rel="$(until_reset "$sr")"
-    [ -n "$rel" ] && { [ -n "$out" ] && out="${out} · resets ${rel}" || out="resets ${rel}"; }
+  # Order: Fable · Week · 5-hour, with the next reset (soonest window) tucked onto
+  # the 5-hour segment. Fable weekly shows whenever the line exists at all — 0%
+  # included; /usage omits it until the model is touched, so its presence is the
+  # signal. until_reset -> "in 3h 53m", or the raw stamp on macOS without GNU date.
+  local out="" rel=""
+  [ -n "$sr" ] && rel="$(until_reset "$sr")"
+  [ -n "$fb" ] && out="Fable ${fb}"
+  [ -n "$w" ]  && { [ -n "$out" ] && out="${out} · Week ${w}%" || out="Week ${w}%"; }
+  if [ -n "$s" ]; then
+    local seg="5H ${s}%"
+    [ -n "$rel" ] && seg="${seg} resets ${rel}"
+    [ -n "$out" ] && out="${out} · ${seg}" || out="$seg"
+  elif [ -n "$rel" ]; then
+    [ -n "$out" ] && out="${out} · resets ${rel}" || out="resets ${rel}"
   fi
   printf '%s' "$out"
 }
