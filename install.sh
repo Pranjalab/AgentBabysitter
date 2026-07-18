@@ -153,9 +153,15 @@ fi
 # Babysitter v1 (the unrelated Python namesake) and anything else a stranger put
 # here does NOT carry it, so we still refuse to clobber it without a word.
 abs_owned() {
-  # grep follows a symlink to the real abs.sh; on a static copy it reads the copy.
+  # A live install (symlink or copy) is proven by our version constant — grep
+  # follows a symlink to the real abs.sh, or reads a static copy directly.
   grep -q '^readonly ABS_VERSION=' "$1" 2>/dev/null && return 0
-  case "$(readlink -f "$1" 2>/dev/null)" in *"/abs.sh") return 0 ;; esac
+  # Only fall back to the name for a DANGLING symlink (a deleted checkout): a live
+  # target already got the grep above, so trusting the name there would let any
+  # unrelated `abs -> …/abs.sh` be silently overwritten.
+  if [ -L "$1" ] && [ ! -e "$1" ]; then
+    case "$(readlink "$1" 2>/dev/null)" in *"/abs.sh") return 0 ;; esac
+  fi
   return 1
 }
 

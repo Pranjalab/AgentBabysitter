@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.2.1"
+readonly ABS_VERSION="2.2.2"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -914,13 +914,21 @@ _silent_terminal() {   # a terminal command → count toward auto-silence
 # bash 3.2 too. It's a safety net, not a guarantee; the log is local and owner-
 # only regardless.
 _log_redact() {
-  printf '%s' "$1" | sed -E \
-    -e 's#[0-9]{8,10}:[A-Za-z0-9_-]{35,}#[redacted-token]#g' \
-    -e 's#sk-[A-Za-z0-9_-]{20,}#[redacted-key]#g' \
-    -e 's#gh[pousr]_[A-Za-z0-9]{30,}#[redacted-token]#g' \
-    -e 's#AKIA[0-9A-Z]{16}#[redacted-key]#g' \
-    -e 's#(TOKEN|KEY|SECRET|PASSWORD|PASSWD|BEARER)("?[[:space:]]*[=:][[:space:]]*"?)[^[:space:]"]+#\1\2[redacted]#g' \
-    2>/dev/null
+  printf '%s' "$1" \
+    | sed -E '/-----BEGIN[A-Za-z ]*PRIVATE KEY-----/,/-----END[A-Za-z ]*PRIVATE KEY-----/c\
+[redacted private key]' 2>/dev/null \
+    | sed -E \
+      -e 's#[0-9]{6,}:[A-Za-z0-9_-]{30,}#[redacted-token]#g' \
+      -e 's#eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]*#[redacted-jwt]#g' \
+      -e 's#xox[a-z]-[A-Za-z0-9-]{10,}#[redacted-token]#g' \
+      -e 's#AIza[0-9A-Za-z_-]{35}#[redacted-key]#g' \
+      -e 's#sk-[A-Za-z0-9_-]{20,}#[redacted-key]#g' \
+      -e 's#gh[pousr]_[A-Za-z0-9]{30,}#[redacted-token]#g' \
+      -e 's#AKIA[0-9A-Z]{16}#[redacted-key]#g' \
+      -e 's#://[^/:@[:space:]]+:[^@[:space:]]+@#://[user]:[redacted]@#g' \
+      -e 's#([Bb][Ee][Aa][Rr][Ee][Rr])[[:space:]]+[A-Za-z0-9._~+/=-]{8,}#\1 [redacted]#g' \
+      -e 's#([Tt][Oo][Kk][Ee][Nn]|[Kk][Ee][Yy]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd])("?[[:space:]]*[=:][[:space:]]*"?)[^[:space:]"]+#\1\2[redacted]#g' \
+      2>/dev/null
 }
 
 # Append one line to today's per-profile log. Called from the session hook, so it
@@ -930,7 +938,10 @@ log_event() {   # <role> <meta> <session> <text>
   local role="$1" meta="$2" sess="$3" text="$4" dir f line
   dir="$ABS_DIR/log"
   mkdir -p "$dir" 2>/dev/null || return 0
-  text="$(_log_redact "$text" | head -c 4000)"   # bound a giant paste
+  # Redact secrets, then strip control chars (keep only \t and \n) so a logged
+  # escape sequence can't replay in the terminal when the log is viewed. Bound a
+  # giant paste last.
+  text="$(_log_redact "$text" | tr -d '\000-\010\013\014\016-\037' | head -c 4000)"
   f="$dir/$(date +%Y-%m-%d).jsonl"
   line="$(jq -cn --arg ts "$(date +%H:%M:%S)" --arg r "$role" --arg m "$meta" \
      --arg s "$sess" --arg x "$text" \
@@ -1736,7 +1747,7 @@ cmd_say() {
   [ -x "$venv" ] || die "No TTS venv at $venv — voice is an optional add-on. See README (Voice)."
   command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found — speak.py needs it to make Opus."
 
-  local keep="" text=""
+  local keep="" text="" tmp=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --keep) keep="$2"; shift 2 ;;
@@ -1748,20 +1759,29 @@ cmd_say() {
   [ -n "$text" ] || die "Nothing to say. Usage: abs say \"text\""
   [ "$text" = "-" ] && text="$(cat)"
 
-  local out; out="${keep:-$(mktemp --suffix=.ogg)}"
+  # macOS mktemp has no --suffix, so make the temp file portably and append .ogg
+  # (ffmpeg infers the container from the extension). Track the placeholder $tmp
+  # so cleanup removes both it and the .ogg.
+  local out
+  if [ -n "$keep" ]; then
+    out="$keep"
+  else
+    tmp="$(mktemp -t abs-voice.XXXXXX 2>/dev/null)" || die "Could not create a temp file."
+    out="$tmp.ogg"
+  fi
   # speak.py chatters progress to stderr; only its last line is the summary.
   "$venv" "${SCRIPT_PATH%/*}/speak.py" "$text" "$out" >/dev/null || {
-    [ -n "$keep" ] || rm -f "$out"
+    [ -n "$keep" ] || rm -f "$out" ${tmp:+"$tmp"}
     die "Synthesis failed."
   }
 
   if tg_send_voice "$cid" "$out"; then
     ok "Voice note sent to @$(state_get '.bot')."
   else
-    [ -n "$keep" ] || rm -f "$out"
+    [ -n "$keep" ] || rm -f "$out" ${tmp:+"$tmp"}
     die "Generated, but Telegram rejected it: $TG_ERR"
   fi
-  [ -n "$keep" ] && info "${c_dim}kept: $out${c_reset}" || rm -f "$out"
+  [ -n "$keep" ] && info "${c_dim}kept: $out${c_reset}" || rm -f "$out" ${tmp:+"$tmp"}
   return 0
 }
 

@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.2] — 2026-07-18
+
+### Fixed
+- **Conversation-log secret scrubbing hardened** (from a security audit). Now also
+  catches JWTs, PEM private keys, passwords embedded in URLs, lower/mixed-case
+  `key=` and `password=` pairs, Slack/Google keys, and Telegram tokens with short
+  bot IDs. Control characters are stripped before writing, so a logged escape
+  sequence can't replay in the terminal when you view the log with `abs log`.
+- **`abs say` works on macOS** — replaced the GNU-only `mktemp --suffix` with a
+  portable temp file, so voice-out no longer dies on macOS.
+- **Installer no longer over-claims ownership** — it only trusts a bare `abs.sh`
+  filename for a *dangling* symlink (a deleted checkout); a live symlink to an
+  unrelated `abs.sh` is left alone rather than silently overwritten.
+
+### Security
+- SECURITY.md and the website Security page now document the conversation log
+  (what's scrubbed, that it's best-effort and local, how to disable/clear it),
+  the trust-by-HTTPS install chain, and the daily update check.
+
 ## [2.2.1] — 2026-07-18
 
 ### Changed

@@ -67,6 +67,22 @@ trade you're making, and worth knowing before you rely on it.
 - **`reset`, not `setup`, clears the allowlist.** Re-running `abs setup` *adds*
   to the allowlist (so existing entries survive). To revoke access for everyone,
   run `abs reset`.
+- **The conversation log is a second copy of everything.** With the log on (the
+  default), your messages, abs's replies, and the tools it ran are written to
+  `~/.abs/<profile>/log/YYYY-MM-DD.jsonl` — local, `600`, never uploaded. Control
+  characters are stripped and secrets are scrubbed on a **best-effort** basis
+  (Telegram / OpenAI `sk-` / GitHub / AWS / Google / Slack keys, JWTs, PEM
+  private keys, `key=` / `password=` pairs, and passwords embedded in URLs). But
+  a secret in a shape the patterns don't recognise can still land there, and
+  home-directory backups or cloud-sync tools will pick the file up. Turn it off
+  with `abs config log off`, and delete it any time with `abs log --clear`.
+- **The install chain is trust-by-HTTPS.** `install.sh` fetches `abs.sh` — and
+  can run Bun's and Claude Code's own `curl | bash` installers — over HTTPS with
+  no checksum, the standard model for this class of tool. Installing from a
+  cloned checkout (`./install.sh`) skips the download entirely.
+- **The update check calls GitHub once a day** to compare versions (opt out with
+  `abs config update-check off`). It only ever *compares* — it never auto-updates
+  or executes anything.
 
 ## Reporting a vulnerability
 
