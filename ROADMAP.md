@@ -54,3 +54,35 @@ use. Crucially, help them decide **where a new capability belongs**:
 
 This extends the "Build on abs" docs with a decision guide, and pairs it with the
 persona-config mechanism so customization is first-class, not a fork.
+
+## 4. Show the voice transcript for verification
+
+When a voice note comes in and gets transcribed, **surface the transcript** — in
+the terminal (so anyone watching sees exactly what was heard) and optionally
+echoed back to Telegram — before acting on it. Transcription isn't perfect, so
+the operator can catch a wrong word and correct or cancel instead of the agent
+running off a mis-heard instruction.
+
+- Print `🎙️ heard: <transcript>` to the terminal after `transcribe.py` returns.
+- Optionally reply "Heard: … — on it" to Telegram (overlaps with #5).
+- Correction path: messages are read between turns, so a wrong transcript can be
+  followed by "no, I meant …". Consider whether a confirm-before-acting step is
+  worth the friction.
+- Open question: terminal-only vs also echo to Telegram; act-and-allow-correction
+  vs confirm-first.
+
+## 5. Instant "got it" acknowledgment on inbound
+
+When a message arrives from Telegram and Claude starts working, the sender has no
+signal it was received. **Acknowledge immediately** — a quick "got it, working on
+it" (or a clarifying question if one's needed) — then continue the real work.
+
+The persona already *asks* for this ("send a one-line 'on it' first"), so this is
+mostly about making it **reliable** rather than net-new:
+
+- Option A: harden the persona rule so the ack is near-guaranteed.
+- Option B: a hook on the inbound message that auto-sends a lightweight signal —
+  a 👀 reaction (via the plugin's `react` tool) or a one-line reply — independent
+  of whether the agent remembers.
+- Open question: reaction vs text (reaction is quieter); avoid double-messaging
+  (ack then the real reply); hook-driven (reliable) vs prompt-driven (flexible).
