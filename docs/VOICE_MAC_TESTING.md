@@ -18,19 +18,57 @@ confirm the MPS (Apple GPU) path actually works. Everything here is on the
 
 ## One-time setup on the Mac
 
-The venvs never port across OSes — rebuild them here:
+The venvs never port across OSes — rebuild them here. Pin the same versions the
+Linux box runs so behaviour matches; installing `chatterbox-tts` on macOS pulls a
+**MPS-capable** torch automatically (no `+cu124` wheel).
+
+**Versions to install**
+
+| Piece | Version | Notes |
+|---|---|---|
+| Python | **3.11** | one interpreter for both venvs |
+| `chatterbox-tts` | **0.1.7** | TTS; bundles the Turbo model + a macOS MPS torch |
+| `faster-whisper` | **1.2.1** | STT; CTranslate2 stays CPU on Mac (no Metal) |
+| ffmpeg | brew latest | Opus muxing |
 
 ```bash
 brew install ffmpeg python@3.11
 
-# TTS (chatterbox) — its own 3.11 env; plain torch here is MPS-enabled
+# TTS (chatterbox) — its own 3.11 env; the torch it pulls here is MPS-enabled
 python3.11 -m venv .venv-tts
-./.venv-tts/bin/pip install chatterbox-tts
+./.venv-tts/bin/pip install -U pip "chatterbox-tts==0.1.7"
 
 # STT (faster-whisper)
-python3 -m venv .venv
-./.venv/bin/pip install faster-whisper
+python3.11 -m venv .venv
+./.venv/bin/pip install -U pip "faster-whisper==1.2.1"
 ```
+
+## Paste-ready prompt for Claude on the Mac
+
+Open Claude Code in the AgentBabysitter repo on the Mac and paste this:
+
+> You're on my Apple-Silicon Mac, in the AgentBabysitter repo. Set up and
+> benchmark the voice pipeline on the `voice-optimize` branch and report real
+> numbers. Steps:
+>
+> 1. `git fetch && git checkout voice-optimize`
+> 2. Install prereqs if missing: `brew install ffmpeg python@3.11`
+> 3. Build both venvs (they don't port across machines):
+>    - `python3.11 -m venv .venv-tts && ./.venv-tts/bin/pip install -U pip "chatterbox-tts==0.1.7"`
+>    - `python3.11 -m venv .venv && ./.venv/bin/pip install -U pip "faster-whisper==1.2.1"`
+> 4. `chmod +x voicelab.sh && ./voicelab.sh` then `./voicelab.sh --turbo` (turbo downloads its weights once).
+> 5. Read `docs/VOICE_PIPELINE_ANALYSIS.md` and `docs/VOICE_MAC_TESTING.md` for what's being measured.
+>
+> Then report back:
+> - Does MPS (Apple GPU) complete a TTS synthesis? Wall time + RTF vs CPU.
+> - Does `--turbo` work, and how much faster than standard on MPS?
+> - Any op with NO MPS kernel (voicelab prints it) — name it.
+> - STT: is `small` accurate/fast enough on CPU, or is `large-v3-turbo` worth it?
+> - Your recommended Mac defaults (device, model, turbo yes/no), and paste the full `voicelab.sh` output.
+>
+> If MPS crashes on an op even with `PYTORCH_ENABLE_MPS_FALLBACK=1` (speak.py sets
+> it), fall back to `--device cpu`, name the failing op, and DON'T change any
+> committed code — just report the correct fix so we decide together.
 
 ## Run the benchmark
 
