@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.2.2"
+readonly ABS_VERSION="2.3.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -764,6 +764,29 @@ be turned back on from the terminal (\`abs --profile ${PROFILE} on\`), because
 inbound is dead once it is off. If they only want to stop the notifications,
 quiet mode is what they actually want — say so before running this.
 
+REMOTE CONTROLS (kill ladder)
+The operator has five hook-enforced control phrases they can send from Telegram
+as a whole message. The hook itself acts on them, so they work even if you're
+misbehaving — you don't run them, but you should know them if asked, and you MUST
+obey the directives the hook injects:
+- ABS MUTE / ABS UNMUTE — mute / resume your proactive reports. On UNMUTE the hook
+  tells you to send a short catch-up of what you did while muted; do it.
+- ABS OFF — cuts inbound + outbound Telegram (you keep working locally). Terminal-
+  only to re-enable.
+- ABS STOP — the hook injects a directive to halt the current plan and wait. When
+  you see it, stop starting new work and wait for the next instruction.
+- ABS EXIT — the hook injects a directive to close the session. If mid-task, ask
+  the operator to confirm first; when idle or confirmed, run the exact command it
+  gives you (\`abs --profile ${PROFILE} exit\`).
+- ABS BLOCK — locks the bot out until a terminal \`abs setup\`. Terminal-only.
+
+COMMAND GUARD
+A PreToolUse hook blocks a small set of destructive Bash commands (rm -rf, force-
+push, reading .env, DROP/TRUNCATE, etc.) when the turn came from Telegram — a
+remote message is lower-trust than the operator at the desk. If a command is
+blocked, don't fight it: tell the operator it was blocked as remote-driven and
+that they can run it at the terminal. From the terminal, nothing is blocked.
+
 SAFETY
 - Never send secrets over Telegram: no tokens, API keys, .env contents,
   credentials, or private keys. Summarize instead ("updated the API key").
@@ -808,8 +831,29 @@ cmd_off() {
 
 cmd_on() {
   require_setup
+  # BLOCK (the top of the kill ladder) sets .blocked; it's meant to survive a
+  # simple `abs on` and force a deliberate re-setup.
+  if [ "$(state_get '.blocked')" = "true" ]; then
+    die "This bot is BLOCKED (someone sent ABS BLOCK). Re-establish it deliberately: abs --profile $PROFILE setup"
+  fi
   set_policy "allowlist"
   ok "Inbound Telegram ENABLED for '$PROFILE' (allowlist)."
+}
+
+# `abs exit` — end the running Claude Code session (the ABS EXIT kill-ladder rung).
+# cmd_run records the session's PID before it execs claude; we signal it here.
+cmd_exit() {
+  require_setup
+  local pid; pid="$(cat "$ABS_DIR/session.pid" 2>/dev/null)"
+  case "$pid" in ''|*[!0-9]*) die "No running session recorded for '$PROFILE'." ;; esac
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null && ok "Session ($pid) signalled to exit — restart with 'abs' from the terminal." \
+      || die "Could not signal session $pid."
+    rm -f "$ABS_DIR/session.pid" 2>/dev/null || true
+  else
+    rm -f "$ABS_DIR/session.pid" 2>/dev/null || true
+    die "No live session (PID $pid is gone)."
+  fi
 }
 
 cmd_quiet() {
@@ -966,6 +1010,54 @@ _silent_ack() {
   tg_api setMessageReaction "$body" >/dev/null 2>&1 || true
 }
 
+# Send a one-line Telegram text straight from the hook (used to confirm a control
+# phrase landed). Direct API call, so it works even as we're cutting the bridge.
+_hook_notify() {
+  local chat="$1" text="$2"
+  [ -n "$chat" ] || return 0
+  load_token 2>/dev/null || return 0
+  tg_send "$chat" "$text" >/dev/null 2>&1 || true
+}
+
+# Remote control ladder. An inbound Telegram message that is EXACTLY one of these
+# phrases (case-insensitive, whole message) is acted on by the hook itself — so it
+# works even if the model is compromised. MUTE/OFF/BLOCK block the prompt (exit 2)
+# and never reach the model; STOP/UNMUTE/EXIT print a directive on stdout (which
+# Claude Code injects into the model's context) and pass through. Returns 1 when
+# the message isn't a control phrase.
+_hook_control() {
+  local prompt="$1" chat="$2" msg up
+  msg="$(printf '%s' "$prompt" | sed -E 's#</?channel[^>]*>##g' | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  up="$(printf '%s' "$msg" | tr '[:lower:]' '[:upper:]')"
+  case "$up" in
+    "ABS MUTE")
+      state_set '.quiet = true' 2>/dev/null || true
+      _hook_notify "$chat" "🔇 Muted — I'll stop sending reports. Send ABS UNMUTE to resume."
+      exit 2 ;;
+    "ABS UNMUTE")
+      state_set '.quiet = false | .auto_silent = false | .terminal_streak = 0' 2>/dev/null || true
+      printf 'The operator sent ABS UNMUTE — proactive reports are back on. Reply on Telegram with a short catch-up of what you did while muted, then carry on.\n'
+      return 0 ;;
+    "ABS OFF")
+      set_policy disabled 2>/dev/null || true
+      state_set '.quiet = true' 2>/dev/null || true
+      _hook_notify "$chat" "⛔ OFF — inbound and outbound Telegram are cut. Re-enable from the terminal: abs on"
+      exit 2 ;;
+    "ABS STOP")
+      printf 'STOP requested by the operator over Telegram. Halt the current plan now: do NOT start any new tool or step. Reply on Telegram that you have stopped and are waiting for a new instruction, then wait for it.\n'
+      return 0 ;;
+    "ABS EXIT")
+      printf 'The operator sent ABS EXIT (close the Claude Code session). If you are mid-task, first ask them to confirm — "I am currently doing X; do you really want to stop the development?" — and only proceed on a clear yes. When idle or once confirmed, tell them you are closing, then run this exact command to end the session: abs --profile %s exit\n' "$PROFILE"
+      return 0 ;;
+    "ABS BLOCK")
+      set_policy disabled 2>/dev/null || true
+      state_set '.quiet = true | .blocked = true' 2>/dev/null || true
+      _hook_notify "$chat" "🔒 BLOCKED — this bot can no longer drive Claude. Re-establish it from the terminal: abs setup"
+      exit 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 cmd_silent_hook() {
   [ -f "${ABS_STATE:-/nonexistent}" ] || return 0
   local input event now sess
@@ -980,16 +1072,25 @@ cmd_silent_hook() {
       prompt="$(printf '%s' "$input" | jq -r '.prompt // ""' 2>/dev/null)"
       # The plugin wraps every inbound Telegram turn in this exact tag (verified).
       if printf '%s' "$prompt" | grep -qF 'source="plugin:telegram'; then
+        local chat_id
+        chat_id="$(printf '%s' "$prompt" | grep -oE 'chat_id="-?[0-9]+"' | head -1 | grep -oE -- '-?[0-9]+')"
+        # Mark the turn's origin so the destructive-command guard (PreToolUse) knows
+        # this work is remote-driven.
+        state_set --arg o telegram '.last_origin = $o' 2>/dev/null || true
+        # Log the message without the plugin's <channel …> wrapper.
+        log_event "you" "telegram" "$sess" "$(printf '%s' "$prompt" | sed -E 's#</?channel[^>]*>##g')"
+        # Remote controls: blocking phrases (MUTE/OFF/BLOCK) exit 2 here; STOP/
+        # UNMUTE/EXIT print a directive and fall through.
+        _hook_control "$prompt" "$chat_id" || true
         _silent_reset "$now"
         # Instant receipt reaction, backgrounded (fast + no stdout). Opt out with
         # `abs config ack off`.
         if [ "$(state_get '.no_ack')" != "true" ]; then
           ( _silent_ack "$prompt" >/dev/null 2>&1 & ) 2>/dev/null || true
         fi
-        # Log the message without the plugin's <channel …> wrapper.
-        log_event "you" "telegram" "$sess" "$(printf '%s' "$prompt" | sed -E 's#</?channel[^>]*>##g')"
       else
         _silent_terminal "$now"
+        state_set --arg o terminal '.last_origin = $o' 2>/dev/null || true
         log_event "you" "terminal" "$sess" "$prompt"
       fi ;;
     PostToolUse)
@@ -1005,6 +1106,48 @@ cmd_silent_hook() {
         *) log_event "tool" "$tool" "$sess" "" ;;   # record that a tool ran, name only
       esac ;;
   esac
+  return 0
+}
+
+# High-confidence "this could wreck something" test for a Bash command string.
+# Deliberately small — a false block on legit work is worse than missing an edge
+# case (the terminal is always trusted, so only Telegram-driven turns hit this).
+_is_destructive() {
+  local c="$1"
+  printf '%s' "$c" | grep -qE '(^|[;&|`(])[[:space:]]*rm[[:space:]]+(-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]|-[a-zA-Z]*[rf][a-zA-Z]*$)' && return 0
+  printf '%s' "$c" | grep -qE 'git[[:space:]]+push[[:space:]].*(--force([[:space:]]|=|$)|-[a-zA-Z]*f([[:space:]]|$))' && return 0
+  printf '%s' "$c" | grep -qE 'git[[:space:]]+reset[[:space:]].*--hard' && return 0
+  printf '%s' "$c" | grep -qE 'git[[:space:]]+clean[[:space:]].*-[a-zA-Z]*[fd]' && return 0
+  printf '%s' "$c" | grep -qE 'git[[:space:]]+(branch|tag)[[:space:]]+(-[a-zA-Z]*D|--delete)' && return 0
+  printf '%s' "$c" | grep -qiE '(DROP|TRUNCATE)[[:space:]]+(TABLE|DATABASE|SCHEMA)' && return 0
+  # DELETE/UPDATE with no WHERE clause.
+  if printf '%s' "$c" | grep -qiE 'DELETE[[:space:]]+FROM|UPDATE[[:space:]]+[A-Za-z_][A-Za-z0-9_.]*[[:space:]]+SET'; then
+    printf '%s' "$c" | grep -qiE 'WHERE' || return 0
+  fi
+  printf '%s' "$c" | grep -qE '(^|[;&|[:space:]])(dd|mkfs(\.[a-z0-9]+)?)[[:space:]]' && return 0
+  printf '%s' "$c" | grep -qE '(chmod|chown)[[:space:]]+(-[a-zA-Z]*R|--recursive)' && return 0
+  # reading a secret file out (exfil), or piping it somewhere.
+  printf '%s' "$c" | grep -qE '(cat|less|more|head|tail|cp|mv|scp|rsync|curl|wget|base64)[[:space:]][^|]*(\.env([[:space:]./]|$)|credentials\.json|\.pem([[:space:]./]|$)|id_[dr]sa([[:space:]./]|$))' && return 0
+  return 1
+}
+
+# PreToolUse hook: block destructive Bash on a Telegram-driven turn. Fails OPEN on
+# any hiccup — a guard that broke every Bash on a glitch would be worse than the
+# gap it closes. Opt out with `abs config guard off`.
+cmd_guard_hook() {
+  [ -f "${ABS_STATE:-/nonexistent}" ] || return 0
+  [ "$(state_get '.no_guard')" = "true" ] && return 0
+  local input tool cmd
+  input="$(cat)"
+  tool="$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)"
+  case "$tool" in Bash) ;; *) return 0 ;; esac
+  [ "$(state_get '.last_origin')" = "telegram" ] || return 0
+  cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
+  [ -n "$cmd" ] || return 0
+  if _is_destructive "$cmd"; then
+    printf '%s\n' "⛔ Blocked by Agent Babysitter: this command looks destructive and the turn came from Telegram. Run it at the terminal (where you're proven to be at the desk), or confirm there." >&2
+    exit 2
+  fi
   return 0
 }
 
@@ -1130,6 +1273,13 @@ cmd_config() {
         "")        info "Conversation log: $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)" ;;
         *)         die "Usage: abs config log on|off" ;;
       esac ;;
+    guard)
+      case "$val" in
+        on|true)   state_set 'del(.no_guard)'; ok "Command guard ON — destructive commands are blocked on Telegram-driven turns." ;;
+        off|false) state_set '.no_guard = true'; ok "Command guard OFF — no destructive-command blocking (takes effect next session)." ;;
+        "")        info "Command guard: $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)" ;;
+        *)         die "Usage: abs config guard on|off" ;;
+      esac ;;
     ""|show)
       info "${c_bold}Config for profile '$PROFILE'${c_reset}  ${c_dim}(abs $ABS_VERSION)${c_reset}"
       info "  model          $(state_get '.model' | sed 's/^null$/(Claude Code default)/')"
@@ -1138,7 +1288,8 @@ cmd_config() {
       info "  usage refresh  $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min"
       info "  update check   $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)"
       info "  instant ack    $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)"
-      info "  conversation log $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)" ;;
+      info "  conversation log $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)"
+      info "  command guard  $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)" ;;
     *)
       die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>  |  update-check on|off" ;;
   esac
@@ -1895,8 +2046,9 @@ cmd_run() {
   # with --settings, which MERGES with the user's own hooks (verified) rather
   # than replacing them. The hook re-enters this same script as __silent-hook.
   local hooks_file="$ABS_DIR/hooks.json"
-  local hook_cmd status_cmd
+  local hook_cmd status_cmd guard_cmd
   hook_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") __silent-hook"
+  guard_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") __guard-hook"
   status_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") statusline"
   # statusLine shows the live mute/active dot in the bottom bar. It's a scalar
   # (not a merge), so it overrides any global statusLine for the abs session only
@@ -1909,12 +2061,17 @@ cmd_run() {
   # so the per-tool hook cost is only paid by users who want the log.
   local pt_matcher="mcp__plugin_telegram_telegram__reply"
   [ "$(state_get '.no_log')" = "true" ] || pt_matcher=".*"
-  jq -n --arg c "$hook_cmd" --arg pm "$pt_matcher" --argjson sl "$status_json" '$sl + {
-    hooks: {
+  # PreToolUse guard on Bash, unless disabled. It blocks destructive commands on
+  # Telegram-driven turns; wired only when on so a guard-off session pays nothing.
+  local pretool='[]'
+  [ "$(state_get '.no_guard')" = "true" ] \
+    || pretool="$(jq -n --arg g "$guard_cmd" '[{matcher:"Bash", hooks:[{type:"command", command:$g, timeout:5}]}]')"
+  jq -n --arg c "$hook_cmd" --arg pm "$pt_matcher" --argjson pre "$pretool" --argjson sl "$status_json" '$sl + {
+    hooks: ({
       UserPromptSubmit: [ { hooks: [ { type: "command", command: $c, timeout: 5 } ] } ],
       PostToolUse: [ { matcher: $pm,
                        hooks: [ { type: "command", command: $c, timeout: 5 } ] } ]
-    }
+    } + (if ($pre|length) > 0 then {PreToolUse: $pre} else {} end))
   }' > "$hooks_file" 2>/dev/null || warn "Could not write the session settings; continuing without hook/statusline."
 
   local perm_args=()
@@ -1957,6 +2114,14 @@ cmd_run() {
   local hook_args=()
   [ -s "$hooks_file" ] && hook_args=(--settings "$hooks_file")
 
+  # `exec` keeps this PID, so $$ recorded now IS the claude session's PID — that's
+  # what `abs exit` (the ABS EXIT kill-ladder rung) signals. Clear the stale
+  # per-turn origin, but NOT `.blocked` — a BLOCK must survive a restart and only
+  # lift on a deliberate `abs setup`.
+  printf '%s\n' "$$" > "$ABS_DIR/session.pid" 2>/dev/null || true
+  chmod 600 "$ABS_DIR/session.pid" 2>/dev/null || true
+  state_set 'del(.last_origin)' 2>/dev/null || true
+
   exec claude \
     --channels "plugin:${PLUGIN_ID}" \
     --append-system-prompt "$(build_prompt "$cid")" \
@@ -1982,8 +2147,12 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} log [--list|--clear]  Read or delete your local conversation backup
 
   ${c_bold}abs${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
-  ${c_bold}abs${c_reset} off                 Hard off: drop ALL inbound Telegram
+  ${c_bold}abs${c_reset} off                 Hard off: drop ALL inbound + outbound Telegram
   ${c_bold}abs${c_reset} on                  Re-enable inbound Telegram
+  ${c_bold}abs${c_reset} exit                End the running session (restart with 'abs')
+
+  ${c_dim}From Telegram, send any of these as a whole message (hook-enforced):${c_reset}
+  ${c_dim}  ABS MUTE / ABS UNMUTE · ABS OFF · ABS STOP · ABS EXIT · ABS BLOCK${c_reset}
 
   ${c_bold}abs${c_reset} config model <name>  Default model for new sessions (--clear to unset)
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
@@ -1992,6 +2161,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config update-check on|off  Daily "new version available" check (default on)
   ${c_bold}abs${c_reset} config ack on|off    👀 the moment a Telegram message lands (default on)
   ${c_bold}abs${c_reset} config log on|off    Back up the conversation locally (default on)
+  ${c_bold}abs${c_reset} config guard on|off  Block destructive cmds on Telegram turns (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
@@ -2046,6 +2216,13 @@ main() {
     cmd_silent_hook || true
     return 0
   fi
+  # PreToolUse guard. cmd_guard_hook exits 2 itself to BLOCK a tool (that exit
+  # bypasses the `|| true`); every other path returns and we exit 0 (fail open).
+  if [ "$cmd" = "__guard-hook" ]; then
+    use_profile "${want_profile:-default}"
+    cmd_guard_hook || true
+    return 0
+  fi
 
   # Newest layout first: clauderc's profiles land in ~/.abs, and only if there
   # were none does the pre-profiles single pairing get pulled in.
@@ -2081,6 +2258,7 @@ main() {
     log)       shift; cmd_log "$@" ;;
     off)       cmd_off ;;
     on)        cmd_on ;;
+    exit)      cmd_exit ;;
     reset)     cmd_reset ;;
     # Anything else is a flag for claude itself: `abs --model opus`
     -*)        cmd_run "$@" ;;

@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-07-18
+
+### Added
+- **Remote control ladder — hook-enforced kill switches.** Five phrases you send
+  from Telegram as a whole message, acted on by the session hook *itself* — so
+  they work even if the model is compromised (it never runs them):
+  - `ABS MUTE` / `ABS UNMUTE` — mute / resume proactive reports (catch-up on resume).
+  - `ABS OFF` — cut inbound *and* outbound Telegram; the session keeps working. Terminal-only to re-enable.
+  - `ABS STOP` — halt the current plan at the next step and wait for a new instruction.
+  - `ABS EXIT` — close the session (asks to confirm if mid-task); restart with `abs`.
+  - `ABS BLOCK` — lock the bot out entirely until a deliberate `abs setup`.
+- **Destructive-command guard.** A `PreToolUse` hook blocks a small, high-confidence
+  set of destructive Bash commands (`rm -rf`, `git push --force`, `reset --hard`,
+  `DROP`/`TRUNCATE`, `DELETE`-without-`WHERE`, reading `.env`/keys, …) when the turn
+  was **driven from Telegram** — a remote message is lower-trust than the operator
+  at the desk. From the terminal, nothing is blocked. Opt out: `abs config guard off`.
+- `abs exit` ends the running session; `abs config guard on|off` toggles the guard.
+
+### Security
+- These turn the previously *advisory* prompt rules into *enforced* ones for the
+  obvious high-damage cases, and add a kill switch that doesn't depend on trusting
+  the model. Honest limit: defense-in-depth, not a sandbox (a determined
+  compromised model could obfuscate a command) — Claude Code's own permission
+  system stays the real boundary. Documented in README, SECURITY.md, and the site.
+
 ## [2.2.2] — 2026-07-18
 
 ### Fixed

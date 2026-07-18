@@ -124,6 +124,27 @@ browser, no app, no breaking focus before a big task.
 Each project gets its own bot, so you can run more than one session in parallel
 without them fighting over messages — `abs --profile work`.
 
+### 🛑 Remote controls — a kill ladder that doesn't trust the model
+
+Send any of these from Telegram **as a whole message** and the session hook acts
+on it *itself* — so they work even if the model has been prompt-injected or turned
+against you (it never runs them):
+
+| Phrase | Does |
+| --- | --- |
+| `ABS MUTE` / `ABS UNMUTE` | Mute / resume proactive reports (catch-up on resume) |
+| `ABS OFF` | Cut inbound **and** outbound Telegram; the session keeps working |
+| `ABS STOP` | Halt the current plan at the next step and wait for a new instruction |
+| `ABS EXIT` | Close the session (asks to confirm if mid-task); restart with `abs` |
+| `ABS BLOCK` | Lock the bot out entirely until a deliberate `abs setup` |
+
+And a **destructive-command guard**: when a turn is driven from Telegram, a
+`PreToolUse` hook blocks a small, high-confidence set of dangerous commands
+(`rm -rf`, `git push --force`, `DROP`/`TRUNCATE`, reading `.env`/keys, …) and tells
+you to run them at the terminal — where you're proven to be at the desk. From the
+terminal, nothing is blocked. Opt out with `abs config guard off`. Full model and
+the honest limits in **[SECURITY.md](SECURITY.md)**.
+
 ### 🔒 Security — a private bot only you can reach
 
 Pairing writes your Telegram ID to an allowlist; anyone else who finds the bot is
@@ -189,11 +210,17 @@ abs --model opus        # any claude flag is passed straight through
 | ⚙️ `abs config silent on` / `off` | Whether new sessions start muted |
 | ⚙️ `abs config statusline on` / `off` | Bottom-bar mute/active dot + usage (default on) |
 | ⚙️ `abs config usage-refresh <min>` | How often the usage glance refreshes (default 5) |
+| ⚙️ `abs config guard on` / `off` | Block destructive commands on Telegram turns (default on) |
 | 🔕 `abs quiet on` / `off` | Mute / unmute reports (inbound still works) |
-| 🛑 `abs off` / `on` | Drop / re-enable all inbound Telegram |
+| 🛑 `abs off` / `on` | Drop / re-enable all inbound + outbound Telegram |
+| 🚪 `abs exit` | End the running session (restart with `abs`) |
 | 🎤 `abs say "text"` | Speak it and send as a voice note |
 | ♻️ `abs reset` | Remove this profile's token, allowlist, and state |
 | ❓ `abs help` | The full list |
+
+From **Telegram**, the hook-enforced kill ladder — sent as a whole message —
+`ABS MUTE` / `ABS UNMUTE` · `ABS OFF` · `ABS STOP` · `ABS EXIT` · `ABS BLOCK`
+(see [Remote controls](#-remote-controls--a-kill-ladder-that-doesnt-trust-the-model)).
 
 You can also just say it in chat — "mute the reports", "what's my usage" — and it
 runs the same commands. For voice setup, profiles, servers, and troubleshooting,

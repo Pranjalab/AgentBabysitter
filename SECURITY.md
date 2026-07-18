@@ -44,6 +44,42 @@ to assume otherwise: **a stranger who finds your bot cannot do anything.**
   commands; and to require terminal confirmation for anything destructive or
   irreversible that arrives over chat.
 
+## Enforced controls (defense in depth)
+
+The prompt asks Claude to behave. These two features **enforce** it at the hook
+layer — code that runs no matter what the model decides — for the obvious,
+high-damage cases. They don't replace Claude Code's permission system; they raise
+the floor beneath it, and give you a kill switch that doesn't rely on trusting the
+model.
+
+- **The remote kill ladder.** Send any of these from Telegram *as a whole
+  message*; the session hook acts on it directly (the model never runs it):
+  - `ABS MUTE` / `ABS UNMUTE` — mute / resume proactive reports (you get a
+    catch-up on resume).
+  - `ABS OFF` — cut inbound **and** outbound Telegram; the session keeps working
+    locally. Re-enable from the terminal (`abs on`).
+  - `ABS STOP` — the hook tells Claude to halt the current plan at the next step
+    and wait. (It can't hard-interrupt a command already mid-run — the Telegram
+    plugin only delivers your message between steps — so a long single command
+    still needs Ctrl-C at the terminal.)
+  - `ABS EXIT` — close the session (Claude asks to confirm if it's mid-task).
+    Restart with `abs`.
+  - `ABS BLOCK` — lock this bot out entirely; only a deliberate `abs setup` from
+    the terminal brings it back.
+- **The destructive-command guard.** A `PreToolUse` hook blocks a small,
+  high-confidence set of Bash commands — `rm -rf`, `git push --force`,
+  `reset --hard`, `clean -fd`, branch deletion, `DROP`/`TRUNCATE`,
+  `DELETE`/`UPDATE` without `WHERE`, `dd`/`mkfs`, recursive `chmod`/`chown`, and
+  reads of `.env` / `credentials.json` / `*.pem` / `id_rsa` — **when the turn was
+  driven from Telegram**. A remote message is lower-trust than you at the desk, so
+  it's stopped and you're told to run it at the terminal. From the terminal,
+  nothing is blocked. Opt out with `abs config guard off`.
+
+**Honest limit:** this is defense-in-depth, **not a sandbox**. A determined,
+compromised model could try to obfuscate a command (base64, a wrapper script) to
+slip past the pattern match — so the guard raises the floor, it isn't a wall.
+Claude Code's own permission system remains the real boundary.
+
 ## What this does *not* protect against
 
 Be clear-eyed about the limits. None of these are bugs — they're the shape of the
