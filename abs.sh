@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.1.1"
+readonly ABS_VERSION="2.1.2"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -851,9 +851,14 @@ cmd_is_quiet() {
 # Raw ANSI is used (not the c_* vars, which blank out when stdout isn't a TTY) so
 # the colour survives to Claude Code, which renders the statusLine's escapes.
 cmd_statusline() {
-  local label="abs:$PROFILE"
   local green='\033[32m' gray='\033[90m' off='\033[0m'
-  [ -f "$ABS_STATE" ] || { printf '%s' "$label"; return 0; }
+  [ -f "$ABS_STATE" ] || { printf 'abs:%s' "$PROFILE"; return 0; }
+  # Show the bot handle, not the profile name: "abs@pranBot" is what the user
+  # recognizes, and since it's one bot per profile it identifies the session just
+  # as uniquely as "default" did — with none of the "what's default?" blankness.
+  local bot label
+  bot="$(state_get '.bot')"
+  if [ -n "$bot" ] && [ "$bot" != "null" ]; then label="abs@$bot"; else label="abs:$PROFILE"; fi
   local dot="${green}●${off}" state=""
   # `abs off` lives in access.json (dmPolicy), not rc.json — check it first.
   if [ -f "$TG_ACCESS" ] \
@@ -1361,8 +1366,9 @@ usage_glance_str() {
   local out=""
   [ -n "$s" ]  && out="5h ${s}%"
   [ -n "$w" ]  && { [ -n "$out" ] && out="${out} · week ${w}%" || out="week ${w}%"; }
-  # Fable weekly only when the line exists (model touched this week).
-  [ -n "$fb" ] && { [ -n "$out" ] && out="${out} · Fable ${fb}%" || out="Fable ${fb}%"; }
+  # Fable weekly only when it's actually been used — "Fable 0%" is pure noise in
+  # a bar that's fighting for width. Show it once it has a nonzero share.
+  [ -n "$fb" ] && [ "$fb" != "0" ] && { [ -n "$out" ] && out="${out} · Fable ${fb}%" || out="Fable ${fb}%"; }
   # Next reset = the 5-hour window (soonest). until_reset -> "in 3h 53m", or the
   # raw stamp on a macOS without GNU date.
   if [ -n "$sr" ]; then

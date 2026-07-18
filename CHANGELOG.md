@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.2] — 2026-07-18
+
+### Changed
+- **Status bar shows the bot handle** — the indicator now reads `abs@yourbot`
+  instead of `abs:default`. One bot per profile means the handle identifies the
+  session just as uniquely, and it's what you actually recognize.
+- **Usage glance drops `Fable 0%`** — a per-model weekly limit at 0% is noise in
+  a bar that's fighting for width; it reappears once that model has real usage.
+
 ## [2.1.1] — 2026-07-18
 
 ### Fixed
