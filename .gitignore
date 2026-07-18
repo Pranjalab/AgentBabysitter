@@ -71,4 +71,7 @@ Thumbs.db
 /docs/launch-copy.md
 /docs/demo-script.md
 /docs/design-silent-and-flood.md
+# Security audit — lists unpatched issues; stays internal until fixed and the
+# user-facing findings are folded into SECURITY.md / the website.
+/docs/ABS_AUDIT_REPORT.md
 .vscode/

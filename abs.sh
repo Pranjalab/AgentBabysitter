@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.2.0"
+readonly ABS_VERSION="2.2.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -844,38 +844,40 @@ cmd_is_quiet() {
 
 # Bottom-bar indicator, wired into the session via the settings file's statusLine
 # key (see cmd_run). Claude Code re-runs this on every render, so it MUST be fast
-# and MUST never error, hang, or exit non-zero — always print one short line. It
-# reads the exact state cmd_is_quiet gates on, so the dot always matches whether a
-# proactive report would really go out. Small text-height ANSI dots (not emoji):
-#   ● green  abs:default              active — reports flowing
-#   ● gray   abs:default · silent      you ran `abs quiet on` (or the default_quiet seed)
-#   ● gray   abs:default · auto-silent  3 terminal commands tripped it; a Telegram msg clears
-#   ○ gray   abs:default · off          inbound disabled (`abs off`)
-# Raw ANSI is used (not the c_* vars, which blank out when stdout isn't a TTY) so
-# the colour survives to Claude Code, which renders the statusLine's escapes.
+# and MUST never error, hang, or exit non-zero — always print one short line.
+#   abs:@bot · ● Text · ● Voice · Fable 2% · Week 12% (resets on Thu) · 5H 22% (…)
+# "abs:" in the theme violet, "@bot" in Telegram blue. Two channel dots, green
+# when that channel can reach Telegram right now: Text = proactive reports are
+# flowing (not muted, not off); Voice = local TTS is installed and inbound is on.
+# Usage percentages are threshold-coloured (green→amber→coral→brick). Muted 256-
+# colour tones throughout — high-contrast colours read badly in a status bar.
+# Real ESC bytes are emitted (printf '%s'), so the colour survives to Claude Code.
 cmd_statusline() {
-  local green='\033[32m' gray='\033[90m' off='\033[0m'
+  local off=$'\033[0m' dim=$'\033[38;5;244m'
+  local c_abs=$'\033[38;5;141m' c_tg=$'\033[38;5;74m' c_on=$'\033[38;5;71m'
   [ -f "$ABS_STATE" ] || { printf 'abs:%s' "$PROFILE"; return 0; }
-  # Show the bot handle, not the profile name: "abs@pranBot" is what the user
-  # recognizes, and since it's one bot per profile it identifies the session just
-  # as uniquely as "default" did — with none of the "what's default?" blankness.
   local bot label
   bot="$(state_get '.bot')"
-  if [ -n "$bot" ] && [ "$bot" != "null" ]; then label="abs@$bot"; else label="abs:$PROFILE"; fi
-  local dot="${green}●${off}" state=""
-  # `abs off` lives in access.json (dmPolicy), not rc.json — check it first.
+  if [ -n "$bot" ] && [ "$bot" != "null" ]; then
+    label="${c_abs}abs:${off}${c_tg}@${bot}${off}"
+  else
+    label="${c_abs}abs:${PROFILE}${off}"
+  fi
+  # Channel state. `abs off` (dmPolicy=disabled) kills both; quiet mutes text only.
+  local off_state=0 muted=0
   if [ -f "$TG_ACCESS" ] \
      && [ "$(jq -r '.dmPolicy // ""' "$TG_ACCESS" 2>/dev/null)" = "disabled" ]; then
-    dot="${gray}○${off}"; state=" · off"
-  elif [ "$(cmd_is_quiet)" = "quiet" ]; then
-    dot="${gray}●${off}"
-    if [ "$(state_get '.quiet')" = "true" ]; then state=" · silent"; else state=" · auto-silent"; fi
+    off_state=1
   fi
-  # Usage glance from the cache (empty until warm); this call also kicks a lazy
-  # background refresh when the cache is stale.
-  local g; g="$(usage_glance_str)"
-  [ -n "$g" ] && g=" · $g"
-  printf '%b' "${dot} ${label}${state}${g}"
+  [ "$(cmd_is_quiet)" = "quiet" ] && muted=1
+  local text_dot voice_dot
+  if [ "$off_state" = 0 ] && [ "$muted" = 0 ]; then text_dot="${c_on}●${off}"; else text_dot="${dim}●${off}"; fi
+  if [ "$off_state" = 0 ] && [ -d "${SCRIPT_PATH%/*}/.venv-tts" ]; then voice_dot="${c_on}●${off}"; else voice_dot="${dim}●${off}"; fi
+  local sep="${dim} · ${off}"
+  # Usage glance (coloured); also kicks a lazy background refresh when stale.
+  local g; g="$(usage_glance_str color)"
+  [ -n "$g" ] && g="${sep}${g}"
+  printf '%s' "${label}${sep}${text_dot} Text${sep}${voice_dot} Voice${g}"
   return 0
 }
 
@@ -1316,6 +1318,13 @@ until_reset() {
   if [ "$h" -gt 0 ]; then printf 'in %dh %dm' "$h" "$m"; else printf 'in %dm' "$m"; fi
 }
 
+# "Jul 23, 5:29pm" -> "Tue" (weekday abbreviation). Best-effort: empty on a macOS
+# without GNU date, so the caller just omits the "(resets on …)" note there.
+reset_weekday() {
+  local norm; norm="$(norm_stamp "$1")"
+  date -d "$norm" +%a 2>/dev/null || true
+}
+
 bar() {
   local pct="$1" width=10 filled i out=""
   # ░ is a hatched cell, not a flat one — at phone size it reads as a row of
@@ -1442,7 +1451,7 @@ usage_cache_file() { printf '%s/usage.json' "$ABS_DIR"; }
 # `field` helper already extracts "<pct>\t<reset>" per limit; we keep just the
 # two percents plus a fetch timestamp.
 usage_cache_write() {
-  local raw="$1" sfield spct sreset wpct fpct now tmp
+  local raw="$1" sfield spct sreset wpct wreset fpct now tmp
   [ -n "$raw" ] && [ -d "$ABS_DIR" ] || return 0
   # The session field carries "<pct>\t<reset-stamp>"; keep both — the 5-hour
   # window is the soonest reset, so that stamp is the "next reset" we show.
@@ -1450,6 +1459,7 @@ usage_cache_write() {
   spct="${sfield%%$'\t'*}"
   sreset=""; case "$sfield" in *$'\t'*) sreset="${sfield#*$'\t'}" ;; esac
   wpct="$(field "$raw" 'Current week \(all models\)' | cut -f1)"
+  wreset="$(field "$raw" 'Current week \(all models\)' | cut -f2)"
   # The per-model weekly line ("Current week (Fable)") only exists once that
   # model has been used this week; null when absent so the glance can omit it.
   fpct="$(field "$raw" 'Current week \(Fable\)' | cut -f1)"
@@ -1459,8 +1469,8 @@ usage_cache_write() {
   now="$(date +%s)"
   tmp="$(mktemp "$ABS_DIR/usage.XXXXXX" 2>/dev/null)" || return 0
   if jq -n --argjson s "$spct" --argjson w "$wpct" --argjson f "$fpct" \
-       --arg sr "$sreset" --argjson t "$now" \
-       '{session_pct:$s, week_pct:$w, fable_pct:$f, session_reset:$sr, fetched_at:$t}' > "$tmp" 2>/dev/null; then
+       --arg sr "$sreset" --arg wr "$wreset" --argjson t "$now" \
+       '{session_pct:$s, week_pct:$w, fable_pct:$f, session_reset:$sr, week_reset:$wr, fetched_at:$t}' > "$tmp" 2>/dev/null; then
     chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$(usage_cache_file)" 2>/dev/null
   fi
   rm -f "$tmp" 2>/dev/null || true
@@ -1481,18 +1491,49 @@ cmd_usage_cache() {
   return 0
 }
 
-# Read the cache -> "5h 3% · wk 7%" (empty until warm). Side effect: kicks a
-# lazy background refresh when the cache is older than the configured interval.
+# Muted 256-colour tone for a usage percentage: soft green / amber / coral /
+# brick as it climbs. Deliberately low-contrast (harsh colours read badly in a
+# status bar). Emits a real ESC sequence so callers can printf '%s' it.
+_pct_color() {
+  local p="$1"
+  if   [ "$p" -lt 60 ]; then printf '%b' '\033[38;5;71m'    # < 60  soft green
+  elif [ "$p" -lt 80 ]; then printf '%b' '\033[38;5;179m'   # 60-79 soft amber
+  elif [ "$p" -lt 90 ]; then printf '%b' '\033[38;5;173m'   # 80-89 soft coral
+  else                       printf '%b' '\033[38;5;131m'   # 90+   muted brick
+  fi
+}
+
+# One usage segment. With colour on, "Label N%" takes the threshold colour and
+# the (resets …) note is dimmed; with colour off (Telegram footer) it's plain.
+_glance_seg() {   # <color?> <label+pct> <pct> <paren-or-empty>
+  local color="$1" text="$2" pct="$3" paren="$4"
+  if [ "$color" = 1 ] && [ -n "$pct" ]; then
+    local off=$'\033[0m' dim=$'\033[38;5;244m' c
+    c="$(_pct_color "$pct")"
+    if [ -n "$paren" ]; then printf '%s%s%s %s%s%s' "$c" "$text" "$off" "$dim" "$paren" "$off"
+    else printf '%s%s%s' "$c" "$text" "$off"; fi
+  else
+    if [ -n "$paren" ]; then printf '%s %s' "$text" "$paren"; else printf '%s' "$text"; fi
+  fi
+}
+
+# Read the cache -> "Fable 2% · Week 12% (resets on Thu) · 5H 22% (resets in 2h)"
+# (empty until warm). Pass "color" for the terminal (muted ANSI); no arg gives
+# the plain form for the Telegram footer. Side effect: kicks a lazy background
+# refresh when the cache is older than the configured interval.
 usage_glance_str() {
-  local f s="" w="" fb="" sr="" stamp=0 interval line
+  local color=0
+  [ "${1:-}" = color ] && color=1
+  local f s="" w="" fb="" sr="" wr="" stamp=0 interval line
   f="$(usage_cache_file)"
   if [ -f "$f" ]; then
-    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.session_reset//""),(.fetched_at//0)]|@tsv' "$f" 2>/dev/null)"
+    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.session_reset//""),(.week_reset//""),(.fetched_at//0)]|@tsv' "$f" 2>/dev/null)"
     s="$(printf '%s' "$line" | cut -f1)"
     w="$(printf '%s' "$line" | cut -f2)"
     fb="$(printf '%s' "$line" | cut -f3)"
     sr="$(printf '%s' "$line" | cut -f4)"
-    stamp="$(printf '%s' "$line" | cut -f5)"
+    wr="$(printf '%s' "$line" | cut -f5)"
+    stamp="$(printf '%s' "$line" | cut -f6)"
   fi
   interval="$(state_get '.usage_refresh')"
   case "$interval" in ''|null|*[!0-9]*) interval="$USAGE_REFRESH_DEFAULT" ;; esac
@@ -1504,20 +1545,27 @@ usage_glance_str() {
   case "$s" in ''|*[!0-9]*) s="" ;; esac
   case "$w" in ''|*[!0-9]*) w="" ;; esac
   case "$fb" in ''|*[!0-9]*) fb="" ;; esac
-  # Order: Fable · Week · 5-hour, with the next reset (soonest window) tucked onto
-  # the 5-hour segment. Fable weekly shows whenever the line exists at all — 0%
-  # included; /usage omits it until the model is touched, so its presence is the
-  # signal. until_reset -> "in 3h 53m", or the raw stamp on macOS without GNU date.
-  local out="" rel=""
+  # Order: Fable · Week · 5-hour. Each limit carries its own reset in parens — the
+  # weekly one as a weekday (resets on Tue), the 5-hour one as a countdown
+  # (resets in 2h 23m). Both are best-effort: on macOS without GNU date the note
+  # is simply omitted rather than showing a raw stamp. Fable shows at 0% too.
+  local out="" rel="" wday=""
   [ -n "$sr" ] && rel="$(until_reset "$sr")"
-  [ -n "$fb" ] && out="Fable ${fb}"
-  [ -n "$w" ]  && { [ -n "$out" ] && out="${out} · Week ${w}%" || out="Week ${w}%"; }
+  [ -n "$wr" ] && wday="$(reset_weekday "$wr")"
+  local off=$'\033[0m' dim=$'\033[38;5;244m' sep=" · "
+  [ "$color" = 1 ] && sep="${dim} · ${off}"
+  [ -n "$fb" ] && out="$(_glance_seg "$color" "Fable ${fb}%" "$fb" "")"
+  if [ -n "$w" ]; then
+    local wp=""; [ -n "$wday" ] && wp="(resets on ${wday})"
+    local wseg; wseg="$(_glance_seg "$color" "Week ${w}%" "$w" "$wp")"
+    [ -n "$out" ] && out="${out}${sep}${wseg}" || out="$wseg"
+  fi
   if [ -n "$s" ]; then
-    local seg="5H ${s}%"
-    [ -n "$rel" ] && seg="${seg} resets ${rel}"
-    [ -n "$out" ] && out="${out} · ${seg}" || out="$seg"
+    local sp=""; [ -n "$rel" ] && sp="(resets ${rel})"
+    local seg; seg="$(_glance_seg "$color" "5H ${s}%" "$s" "$sp")"
+    [ -n "$out" ] && out="${out}${sep}${seg}" || out="$seg"
   elif [ -n "$rel" ]; then
-    [ -n "$out" ] && out="${out} · resets ${rel}" || out="resets ${rel}"
+    [ -n "$out" ] && out="${out}${sep}(resets ${rel})" || out="resets ${rel}"
   fi
   printf '%s' "$out"
 }

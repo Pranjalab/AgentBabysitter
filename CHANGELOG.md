@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-07-18
+
+### Changed
+- **Status-bar restyle.** The bottom-bar indicator now reads `abs:@bot · ● Text ·
+  ● Voice · Fable 2% · Week 12% (resets on Thu) · 5H 22% (resets in 1h)`: the
+  label is coloured (theme violet `abs:` + Telegram-blue `@bot`); two channel
+  dots show whether **Text** (proactive reports) and **Voice** (local TTS) can
+  reach Telegram right now; and each usage percentage is threshold-coloured —
+  green under 60, amber to 80, coral to 90, muted brick above. Reset times moved
+  into per-limit parentheses (weekly as a weekday, 5-hour as a countdown). All
+  muted 256-colour tones. The Telegram usage footer stays plain text.
+
 ## [2.2.0] — 2026-07-18
 
 ### Added
