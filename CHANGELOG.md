@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] — 2026-07-20
+
+### Fixed
+- **Status-bar Voice dot now reflects real activity, not just capability.** It was
+  green whenever `.venv-tts` was installed, which said nothing about whether voice
+  was actually flowing. Now it's green only when a voice note was genuinely sent
+  within a recency window (`ABS_VOICE_ACTIVE_SECS`, default 120s) and dim
+  otherwise — parallel to how the Text dot means "reports are flowing." `abs say`
+  stamps `.last_voice_ts` on each successful send. Updates on Claude Code's next
+  status-line render.
+
 ## [2.5.0] — 2026-07-19
 
 ### Added
