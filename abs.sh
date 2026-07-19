@@ -891,8 +891,11 @@ cmd_is_quiet() {
 # and MUST never error, hang, or exit non-zero — always print one short line.
 #   abs:@bot · ● Text · ● Voice · Fable 2% · Week 12% (resets on Thu) · 5H 22% (…)
 # "abs:" in the theme violet, "@bot" in Telegram blue. Two channel dots, green
-# when that channel can reach Telegram right now: Text = proactive reports are
-# flowing (not muted, not off); Voice = local TTS is installed and inbound is on.
+# when that channel is genuinely live right now: Text = proactive reports are
+# flowing (not muted, not off); Voice = a voice note was actually sent recently
+# (within ABS_VOICE_ACTIVE_SECS, default 120), not merely that TTS is installed.
+# Voice is on-demand, so "recently active" is the honest signal — a permanently
+# green dot just because .venv-tts exists said nothing about whether audio flows.
 # Usage percentages are threshold-coloured (green→amber→coral→brick). Muted 256-
 # colour tones throughout — high-contrast colours read badly in a status bar.
 # Real ESC bytes are emitted (printf '%s'), so the colour survives to Claude Code.
@@ -916,7 +919,16 @@ cmd_statusline() {
   [ "$(cmd_is_quiet)" = "quiet" ] && muted=1
   local text_dot voice_dot
   if [ "$off_state" = 0 ] && [ "$muted" = 0 ]; then text_dot="${c_on}●${off}"; else text_dot="${dim}●${off}"; fi
-  if [ "$off_state" = 0 ] && [ -d "${SCRIPT_PATH%/*}/.venv-tts" ]; then voice_dot="${c_on}●${off}"; else voice_dot="${dim}●${off}"; fi
+  # Voice is green only if a note was actually sent within the recency window —
+  # cmd_say stamps .last_voice_ts on every successful send. Dim covers both
+  # "installed but idle" and "not installed at all", which is what we want.
+  local voice_active=0 lvt now_s voice_win="${ABS_VOICE_ACTIVE_SECS:-120}"
+  lvt="$(state_get '.last_voice_ts')"
+  case "$lvt" in ''|null|*[!0-9]*) lvt=0 ;; esac
+  case "$voice_win" in ''|*[!0-9]*) voice_win=120 ;; esac
+  now_s="$(date +%s)"
+  [ "$lvt" -gt 0 ] && [ "$(( now_s - lvt ))" -le "$voice_win" ] && voice_active=1
+  if [ "$off_state" = 0 ] && [ "$voice_active" = 1 ]; then voice_dot="${c_on}●${off}"; else voice_dot="${dim}●${off}"; fi
   local sep="${dim} · ${off}"
   # Usage glance (coloured); also kicks a lazy background refresh when stale.
   local g; g="$(usage_glance_str color)"
@@ -2057,6 +2069,9 @@ cmd_say() {
   }
 
   if tg_send_voice "$cid" "$out"; then
+    # Stamp the send so the status-bar Voice dot can light up as "recently active"
+    # rather than merely "TTS installed" (see cmd_statusline).
+    state_set --argjson t "$(date +%s)" '.last_voice_ts = $t' 2>/dev/null || true
     ok "Voice note sent to @$(state_get '.bot')."
   else
     [ -n "$keep" ] || rm -f "$out" ${tmp:+"$tmp"}
