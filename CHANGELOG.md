@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] — 2026-07-19
+
+### Added
+- **On-launch update prompt.** Every launch now checks GitHub for a newer release
+  and, on an interactive terminal, asks `Update now and relaunch? [y/N]` (default
+  No). Yes updates abs in place and re-execs the new version into the same session
+  (same profile and passthrough flags); No launches the current version. The check
+  is synchronous but tightly timed out (≤3s) with an offline fallback, so it never
+  hangs a launch; non-interactive sessions (systemd/nohup/CI) print a one-line
+  banner instead of prompting. `abs config update-check off` suppresses it.
+- **`abs update`.** Update abs in place to the latest release on demand. Detects
+  how abs was installed — a git checkout fast-forwards (`git pull --ff-only`); a
+  standalone copy re-runs the official installer over the same file — and verifies
+  the on-disk version actually advanced before reporting success.
+
+### Changed
+- **Update check is now on-launch, not once-a-day.** The previous daily,
+  background, one-launch-behind cache meant a fresh release could stay invisible
+  for up to ~24h plus a launch. The cache is now an offline fallback only.
+
 ## [2.4.0] — 2026-07-19
 
 ### Added
