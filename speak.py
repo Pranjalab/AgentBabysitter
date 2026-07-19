@@ -9,10 +9,11 @@ Usage: speak.py "text" [out.ogg] [--exag 0.5] [--cfg 0.5]
 Lower --cfg slows delivery down, which pairs well with a high --exag.
 (Both are ignored under --turbo, which has no CFG/emotion dial.)
 
---device picks the accelerator: auto = CUDA, else Apple MPS, else CPU. On a Mac
-this reaches the GPU via MPS — without it chatterbox falls to CPU (minutes per
-paragraph). --cpu forces CPU. --turbo uses ChatterboxTurboTTS (no CFG, a 2-step
-distilled decoder — 2-4x faster generation; downloads its weights once).
+--device picks the accelerator: auto = CUDA if present, else CPU. On an
+Apple-Silicon Mac auto stays on CPU on purpose: chatterbox TTS benchmarks
+~1.6-1.9x SLOWER on MPS than CPU here, so MPS is opt-in via --device mps rather
+than the default. --cpu forces CPU. --turbo uses ChatterboxTurboTTS (no CFG, a
+2-step distilled decoder; downloads its weights once).
 
 Outputs Opus in an OGG container — what Telegram wants for a real voice note
 (bubble + waveform) rather than a file attachment.
@@ -46,10 +47,10 @@ p.add_argument("--exag", type=float, default=0.5)
 p.add_argument("--cfg", type=float, default=0.5)
 p.add_argument("--audio-prompt", default=None, help="wav to clone the voice from")
 p.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"],
-               help="accelerator (default auto: cuda > mps > cpu)")
+               help="accelerator (default auto: cuda else cpu; MPS is slower for this model, use --device mps to force)")
 p.add_argument("--cpu", action="store_true", help="force CPU (shortcut for --device cpu)")
 p.add_argument("--turbo", action="store_true",
-               help="ChatterboxTurboTTS: no CFG, 2-step decoder, 2-4x faster")
+               help="ChatterboxTurboTTS: no CFG, 2-step decoder, ~1.8x faster generation on GPU")
 p.add_argument("--max-chars", type=int, default=300,
                help="chunk size — chars are a rough proxy, so stay well under the cap")
 p.add_argument("--gap", type=float, default=0.35, help="pause between paragraphs (s)")
@@ -61,16 +62,21 @@ if not text:
 
 
 def pick_device(pref, force_cpu):
-    """auto -> cuda, else Apple MPS, else CPU. An explicit choice is honoured."""
+    """Explicit choice wins. In auto mode: CUDA if present, else CPU.
+
+    We deliberately do NOT auto-select Apple MPS. Measured on an M-series Mac,
+    chatterbox TTS runs ~1.6-1.9x SLOWER on MPS than on CPU (the T3 stage is a
+    small-batch autoregressive loop, and MPS-fallback for the unimplemented ops
+    adds host<->device copies that outweigh any GPU win). Auto would otherwise
+    pick the slower path on every Mac. MPS is still reachable with an explicit
+    --device mps for anyone who wants to measure it themselves.
+    """
     if force_cpu:
         return "cpu"
     if pref != "auto":
         return pref
     if torch.cuda.is_available():
         return "cuda"
-    mps = getattr(torch.backends, "mps", None)
-    if mps is not None and mps.is_available():
-        return "mps"
     return "cpu"
 
 

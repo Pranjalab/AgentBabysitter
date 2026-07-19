@@ -1,16 +1,36 @@
 # Voice on a Mac — setup + testing
 
-Goal: find the optimum voice input/output config on an Apple-Silicon Mac and
-confirm the MPS (Apple GPU) path actually works. Everything here is on the
-`voice-optimize` branch.
+Goal: find the optimum voice input/output config on an Apple-Silicon Mac.
+Everything here is on the `voice-optimize` branch.
+
+## Confirmed result (M-series Mac, benchmarked)
+
+The Apple GPU (MPS) turned out to be **slower**, not faster, for this model —
+the opposite of the initial expectation. Measured on an M-series Mac with a
+~5s test clip, weights fully cached, warm:
+
+| Run | CPU standard | MPS standard | Gap |
+|---|---|---|---|
+| cool | 60.5s | 113.5s | MPS 1.9× slower |
+| warm/clean | 73.5s | 119.2s | MPS 1.6× slower |
+
+STT: `small` transcribed in 5.2s at 100% word match; `large-v3-turbo` was ~34×
+slower for zero accuracy gain.
+
+**Mac defaults, therefore:** TTS `device=cpu` (standard, not turbo), STT `small`.
+Both are now automatic — `speak.py` auto-selects CPU when there's no CUDA, and
+`small` is already the STT default. MPS stays reachable via `--device mps` for
+anyone who wants to re-measure. Even the winner is ~60-75s for a 5s clip (~11×
+real-time); that's a model limit, not a device one — the real fix is a
+warm-model daemon (backlog).
 
 ## What changed (branch `voice-optimize`)
 
-- **`speak.py`** now selects the device `cuda → mps → cpu` (`pick_device()`), sets
+- **`speak.py`** auto-selects `cuda` if present, else `cpu` (`pick_device()`), sets
   `PYTORCH_ENABLE_MPS_FALLBACK=1` so any op without an MPS kernel drops to CPU
-  instead of crashing, loudness-normalises the output (consistent phone volume),
-  uses Opus VoIP mode, and adds `--device` / `--turbo`. **This is the fix** that
-  makes a Mac use its GPU instead of silently running on CPU for minutes.
+  instead of crashing (for the opt-in `--device mps` path), loudness-normalises the
+  output (consistent phone volume), uses Opus VoIP mode, and adds `--device` /
+  `--turbo`. On a Mac, auto stays on CPU **on purpose** — see the result above.
 - **`transcribe.py`** auto-sizes CPU threads, greedy-decodes (`beam_size=1`),
   pins nothing by default (auto-detects language — set `ABS_STT_LANG=en` for a
   speed win), and biases project vocabulary. CTranslate2 has no Metal backend, so

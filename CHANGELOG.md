@@ -25,10 +25,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `initial_prompt` — measured ~12% faster and 87%→100% word accuracy on a sample
   (project names like "Agent"/"git" stop getting mangled). Language auto-detects by
   default; `ABS_STT_LANG=en` pins it for a further speed win.
-- **Cross-platform voice devices.** `speak.py` now selects `cuda → mps → cpu`, so an
-  Apple-Silicon Mac uses its GPU instead of silently running on CPU; loudness-
-  normalised, VoIP-tuned Opus output. Ships `voicelab.sh` to benchmark STT+TTS on
-  any machine and `docs/VOICE_MAC_TESTING.md` for the Mac setup.
+- **Cross-platform voice devices.** `speak.py` auto-selects `cuda` if present, else
+  `cpu`; loudness-normalised, VoIP-tuned Opus output. Apple MPS is opt-in
+  (`--device mps`), not the default: benchmarked on an M-series Mac, chatterbox TTS
+  runs ~1.6-1.9× *slower* on MPS than CPU (small-batch autoregressive loop + MPS
+  op-fallback copies), so auto stays on CPU there. STT (`small`) stays on CPU on Mac
+  regardless (CTranslate2 has no Metal backend). Ships `voicelab.sh` to benchmark
+  STT+TTS on any machine and `docs/VOICE_MAC_TESTING.md` for the Mac setup.
 
 ## [2.3.0] — 2026-07-18
 
