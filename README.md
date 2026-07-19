@@ -21,7 +21,13 @@ Claude Code already does the work. Agent Babysitter is the piece that lets you
 walk away from it — a thin bash script wrapped around Anthropic's official
 Telegram plugin. No daemon, no webhook, no second copy of your session.
 
-<!-- Demo GIF goes here — the full loop: Claude working → Telegram "task done" → reply → Claude continues. -->
+<div align="center">
+
+<video src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/demo.mp4" controls muted playsinline width="80%"></video>
+
+<sub><strong>▶︎ 50-second demo</strong> — one-line install, pair your phone with a PIN, then close the laptop and let Claude keep working. <a href="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/demo.mp4">Watch the demo →</a></sub>
+
+</div>
 
 ---
 
