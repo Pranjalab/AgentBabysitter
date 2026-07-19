@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.4.0"
+readonly ABS_VERSION="2.5.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1254,8 +1254,8 @@ cmd_config() {
       esac ;;
     update-check)
       case "$val" in
-        on|true)   state_set 'del(.no_update_check)'; ok "Update check ON — abs tells you when a newer version ships." ;;
-        off|false) state_set '.no_update_check = true'; ok "Update check OFF — no version pings, no daily GitHub call." ;;
+        on|true)   state_set 'del(.no_update_check)'; ok "Update check ON — abs offers to update on launch when a newer version ships." ;;
+        off|false) state_set '.no_update_check = true'; ok "Update check OFF — no launch prompt, no GitHub version call." ;;
         "")        info "Update check: $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)" ;;
         *)         die "Usage: abs config update-check on|off" ;;
       esac ;;
@@ -1773,10 +1773,13 @@ cmd_usage_glance() {
 
 # --- update check ------------------------------------------------------------
 #
-# Serverless: once a day, background-fetch a tiny VERSION file from main and
-# cache it in update.json (its own file, not rc.json, to stay clear of the hot
-# silent-hook writes). At startup we show a banner from the LAST known result,
-# so the check never blocks the launch. Opt out with `abs config update-check`.
+# On every launch we ask main's VERSION file whether a newer release exists and,
+# if the session is interactive, offer to update-and-relaunch right then. The
+# fetch is synchronous but tightly timed out (≤3s) with an offline fallback to
+# the last cached answer, so a slow or unreachable network delays the launch by
+# a few seconds at most and never hangs it. Opt out with `abs config
+# update-check off`. update.json caches the last-seen version purely so an
+# offline launch still knows what it last saw.
 
 # version_gt A B -> success iff A is a strictly newer SemVer than B. Pure bash so
 # it works on macOS, whose `sort` has no -V. Numeric compare of major.minor.patch;
@@ -1798,52 +1801,134 @@ version_gt() {
 
 update_cache_file() { printf '%s/update.json' "$ABS_DIR"; }
 
-# The slow half: fetch main's VERSION and cache it. Safe to background; never errors.
-_update_fetch() {
-  [ -d "$ABS_DIR" ] || return 0
+# Fetch main's VERSION. Prints the version (digits and dots) on success, nothing
+# on failure — and ALWAYS returns 0, because it's read as "$(_fetch_latest)" and
+# on bash 3.2 a `return 1` inside a command substitution fires the ERR trap even
+# when the caller tests the result (same contract as fetch_usage). Callers judge
+# by the output. Refreshes the offline-fallback cache as a side effect. Tight
+# connect/total timeouts so an unreachable host costs a few seconds, not a hang.
+_fetch_latest() {
   local url v tmp
   url="${ABS_VERSION_URL:-https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/VERSION}"
-  v="$(curl -fsSL --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')"
-  case "$v" in ''|*[!0-9.]*) return 0 ;; esac   # digits and dots only, or bail
-  tmp="$(mktemp "$ABS_DIR/update.XXXXXX" 2>/dev/null)" || return 0
-  jq -n --arg v "$v" --argjson t "$(date +%s)" '{latest:$v, checked_at:$t}' > "$tmp" 2>/dev/null \
-    && chmod 600 "$tmp" && mv -f "$tmp" "$(update_cache_file)" 2>/dev/null
-  rm -f "$tmp" 2>/dev/null || true
+  v="$(curl -fsSL --connect-timeout 2 --max-time 3 "$url" 2>/dev/null | tr -d '[:space:]')"
+  case "$v" in ''|*[!0-9.]*) return 0 ;; esac   # nothing valid → caller sees empty
+  if [ -d "$ABS_DIR" ] && tmp="$(mktemp "$ABS_DIR/update.XXXXXX" 2>/dev/null)"; then
+    jq -n --arg v "$v" --argjson t "$(date +%s)" '{latest:$v, checked_at:$t}' > "$tmp" 2>/dev/null \
+      && chmod 600 "$tmp" && mv -f "$tmp" "$(update_cache_file)" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  printf '%s\n' "$v"
   return 0
 }
 
-# Called at launch: refresh lazily (once/day, backgrounded) and print a one-line
-# banner if the cached latest is newer than us. Never blocks, never errors.
-update_check() {
-  [ "$(state_get '.no_update_check')" = "true" ] && return 0
-  local f latest="" checked=0 now
-  f="$(update_cache_file)"; now="$(date +%s)"
-  if [ -f "$f" ]; then
-    latest="$(jq -r '.latest // ""' "$f" 2>/dev/null)"
-    checked="$(jq -r '.checked_at // 0' "$f" 2>/dev/null)"
-  fi
-  case "$checked" in ''|null|*[!0-9]*) checked=0 ;; esac
-  # Cold cache (never fetched) -> fetch NOW so the very first launch after an
-  # update can already show the banner. Warm but stale -> refresh in the
-  # background: instant launch, and the banner uses the last-known value.
-  if [ -z "$latest" ] || [ "$latest" = "null" ]; then
-    _update_fetch
-    latest="$(jq -r '.latest // ""' "$f" 2>/dev/null)"
-  elif [ "$(( now - checked ))" -ge 86400 ]; then
-    ( _update_fetch >/dev/null 2>&1 & ) 2>/dev/null || true
-  fi
-  [ -n "$latest" ] && [ "$latest" != "null" ] || return 0
-  if version_gt "$latest" "$ABS_VERSION"; then
-    local cmd
-    if git -C "$(dirname "$SCRIPT_PATH")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      cmd="git pull  (in $(dirname "$SCRIPT_PATH"))"
-    else
-      cmd="curl -fsSL https://agentbabysitter.com/install.sh | bash"
-    fi
-    warn "Update available: $ABS_VERSION → $latest"
-    info "  ${c_dim}update with:${c_reset} $cmd"
-  fi
+# Best-known latest: a fresh fetch if the network cooperates, else the last value
+# we cached (so an offline launch still knows what it last saw). Prints it or
+# nothing; always returns 0 (read as "$(_latest_known)" — same reason as above).
+_latest_known() {
+  local v f
+  v="$(_fetch_latest)"
+  if [ -n "$v" ]; then printf '%s\n' "$v"; return 0; fi
+  f="$(update_cache_file)"
+  [ -f "$f" ] && jq -r '.latest // ""' "$f" 2>/dev/null
   return 0
+}
+
+# Update abs in place to `want` and verify it landed. A git checkout (abs is a
+# symlink into it) updates with `git pull --ff-only`; a standalone copy re-runs
+# the official installer, which downloads, syntax-checks, and atomically installs
+# over the same file. Verifies the on-disk ABS_VERSION actually advanced before
+# reporting success, so a failed pull or a network blip never leaves you thinking
+# you upgraded when you didn't. Returns 0 only on a verified upgrade.
+abs_self_update() {
+  local want="${1:-}" dir now
+  dir="$(dirname "$SCRIPT_PATH")"
+  if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    info "${c_dim}Updating the checkout at $dir  (git pull --ff-only)…${c_reset}"
+    if ! git -C "$dir" pull --ff-only >&2; then
+      warn "git pull --ff-only failed — the checkout has local changes or diverged."
+      info "  Resolve it by hand in $dir, then relaunch."
+      return 1
+    fi
+  else
+    local url="${ABS_INSTALL_URL:-https://agentbabysitter.com/install.sh}"
+    info "${c_dim}Re-running the installer  (curl … | bash)…${c_reset}"
+    # PREFIX pins the installer to the exact directory abs runs from, so it
+    # overwrites the copy we're about to re-exec rather than a default location.
+    if ! curl -fsSL --connect-timeout 5 --max-time 60 "$url" | PREFIX="$dir" bash >&2; then
+      warn "The installer did not complete — leaving your current version in place."
+      return 1
+    fi
+  fi
+  # Verify against the file now on disk: for a symlink SCRIPT_PATH resolves to the
+  # updated abs.sh; for a copy it IS the file the installer just overwrote.
+  now="$(grep -m1 '^readonly ABS_VERSION=' "$SCRIPT_PATH" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')"
+  if [ -z "$now" ]; then
+    warn "Update ran but the new version couldn't be read from $SCRIPT_PATH."
+    return 1
+  fi
+  if [ -n "$want" ] && version_gt "$want" "$now"; then
+    warn "Update ran but the on-disk version is still $now (wanted $want)."
+    return 1
+  fi
+  ok "Updated to $now."
+  return 0
+}
+
+# Called at launch. Checks for a newer release and, when the session is
+# interactive, offers to update-and-relaunch. Yes updates and re-execs the new
+# abs (landing the user in their session on the new version); No — the default —
+# just launches. Non-interactive or offline falls back to a one-line banner and
+# never blocks. `abs config update-check off` suppresses the whole thing.
+update_prompt() {
+  [ "$(state_get '.no_update_check')" = "true" ] && return 0
+  local latest reply
+  latest="$(_latest_known)"
+  [ -n "$latest" ] && [ "$latest" != "null" ] || return 0
+  version_gt "$latest" "$ABS_VERSION" || return 0
+
+  # No controlling terminal (systemd, nohup, CI): can't ask. Show the banner and
+  # let the launch proceed.
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    warn "Update available: $ABS_VERSION → $latest  (run: abs update)"
+    return 0
+  fi
+
+  warn "A new Agent Babysitter is available: $ABS_VERSION → $latest"
+  printf '  %sUpdate now and relaunch? [y/N]%s ' "$c_bold" "$c_reset" >&2
+  read -r reply || reply=""
+  case "$reply" in
+    [yY]|[yY][eE][sS]) ;;
+    *) info "  ${c_dim}Skipping — launching $ABS_VERSION. Update anytime with: abs update${c_reset}"; return 0 ;;
+  esac
+
+  if abs_self_update "$latest"; then
+    info "${c_dim}Relaunching on the new version…${c_reset}"
+    # Re-exec the updated on-disk abs with the same profile and passthrough args,
+    # so the user lands exactly where this launch would have put them.
+    exec bash "$SCRIPT_PATH" --profile "$PROFILE" ${ABS_RUN_ARGS[@]+"${ABS_RUN_ARGS[@]}"}
+  fi
+  # Update failed: don't strand the user — fall through and launch what we have.
+  warn "Continuing with $ABS_VERSION."
+  return 0
+}
+
+# `abs update` — check and, if newer, update in place (no relaunch; this isn't a
+# session launch). Same engine the launch prompt uses.
+cmd_update() {
+  local latest
+  latest="$(_latest_known)"
+  if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+    warn "Couldn't reach GitHub to check for updates — try again when you're online."
+    return 1
+  fi
+  if ! version_gt "$latest" "$ABS_VERSION"; then
+    ok "Already up to date — Agent Babysitter $ABS_VERSION."
+    return 0
+  fi
+  info "Update available: $ABS_VERSION → $latest"
+  # Tested form so abs_self_update's soft `return 1` never trips the ERR trap; the
+  # dispatch site guards cmd_update itself the same way.
+  if abs_self_update "$latest"; then return 0; else return 1; fi
 }
 
 # --- command menu ------------------------------------------------------------
@@ -2044,6 +2129,10 @@ flood_check() {
 }
 
 cmd_run() {
+  # Remember the passthrough args (claude flags like --model opus) so an
+  # update-and-relaunch can reconstruct this exact invocation. A global because
+  # update_prompt re-execs from deep inside the launch, not from cmd_run's scope.
+  ABS_RUN_ARGS=("$@")
   need_deps
   ensure_plugin
 
@@ -2142,14 +2231,16 @@ cmd_run() {
   # what makes profiles work — without it every profile would drive one bot.
   export TELEGRAM_STATE_DIR="$TG_DIR"
 
+  # Check for a newer release and, if one exists, offer to update-and-relaunch
+  # before we commit to this launch. Placed ahead of the background warm-ups so a
+  # "yes" re-execs without having spawned throwaway work first. Never blocks past
+  # a ~3s network timeout; declines (the default) fall straight through to launch.
+  update_prompt
+
   # Warm the usage-glance cache in the background so the first status-bar reading
   # isn't blank. Detached; it forks before exec and outlives it, so the launch is
   # never delayed by the ~2.4s /usage fetch.
   ( cmd_usage_cache >/dev/null 2>&1 & ) 2>/dev/null || true
-
-  # Show an update banner (from the last daily check) and refresh it in the
-  # background. Never blocks the launch.
-  update_check
 
   info "${c_dim}Starting Claude Code — profile '$PROFILE' → @$(state_get '.bot')${c_reset}"
   # ${a[@]+"${a[@]}"}, not "${a[@]}": expanding an empty array under `set -u` is
@@ -2204,12 +2295,13 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
   ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot + usage (default on)
   ${c_bold}abs${c_reset} config usage-refresh <min>  How often the usage glance refreshes (default 5)
-  ${c_bold}abs${c_reset} config update-check on|off  Daily "new version available" check (default on)
+  ${c_bold}abs${c_reset} config update-check on|off  On-launch "update now?" prompt (default on)
   ${c_bold}abs${c_reset} config ack on|off    👀 the moment a Telegram message lands (default on)
   ${c_bold}abs${c_reset} config log on|off    Back up the conversation locally (default on)
   ${c_bold}abs${c_reset} config guard on|off  Block destructive cmds on Telegram turns (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
+  ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} version             Print the installed version
   ${c_bold}abs${c_reset} help                This message
@@ -2282,7 +2374,9 @@ main() {
       # block on a prompt; statusline runs on every render, usage-glance/-cache
       # ride along with it — same rule. profiles iterates them all, so its
       # starting point is arbitrary.
-      is-quiet|statusline|usage-glance|usage-cache|profiles) use_profile default ;;
+      # update only needs ABS_DIR for its version cache — resolve default rather
+      # than dragging the user through the profile picker just to upgrade.
+      is-quiet|statusline|usage-glance|usage-cache|profiles|update) use_profile default ;;
       *)                 pick_profile ;;
     esac
   fi
@@ -2304,6 +2398,7 @@ main() {
     log)       shift; cmd_log "$@" ;;
     off)       cmd_off ;;
     on)        cmd_on ;;
+    update)    cmd_update || exit $? ;;
     exit)      cmd_exit ;;
     reset)     cmd_reset ;;
     # Anything else is a flag for claude itself: `abs --model opus`
