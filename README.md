@@ -106,6 +106,11 @@ Send a voice note and it's transcribed; ask for the answer spoken and it replies
 with a real voice message. Both run **locally** — no audio ever leaves your
 machine.
 
+Pick the **model** for speed vs. expression (`abs config voice standard|turbo` —
+turbo generates ~1.8× faster), and **clone a voice** from any short reference clip
+so replies speak in the voice you choose (`abs config voice-sample <clip>`, or
+`--audio-prompt` per call).
+
 <div align="center">
 <img src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/voice-and-report.jpg" alt="A Telegram chat showing voice notes in both directions and a written task-done report from Claude." width="440">
 </div>
@@ -211,10 +216,12 @@ abs --model opus        # any claude flag is passed straight through
 | ⚙️ `abs config statusline on` / `off` | Bottom-bar mute/active dot + usage (default on) |
 | ⚙️ `abs config usage-refresh <min>` | How often the usage glance refreshes (default 5) |
 | ⚙️ `abs config guard on` / `off` | Block destructive commands on Telegram turns (default on) |
+| ⚙️ `abs config voice standard` / `turbo` | Default TTS model — expressive vs. ~1.8× faster |
+| ⚙️ `abs config voice-sample <file>` | Clone a voice for spoken replies (both models) |
 | 🔕 `abs quiet on` / `off` | Mute / unmute reports (inbound still works) |
 | 🛑 `abs off` / `on` | Drop / re-enable all inbound + outbound Telegram |
 | 🚪 `abs exit` | End the running session (restart with `abs`) |
-| 🎤 `abs say "text"` | Speak it and send as a voice note |
+| 🎤 `abs say [--turbo] "text"` | Speak it and send as a voice note (`--audio-prompt` to clone) |
 | ♻️ `abs reset` | Remove this profile's token, allowlist, and state |
 | ❓ `abs help` | The full list |
 

@@ -4,7 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.4.0] — 2026-07-19
+
+### Added
+- **Voice model selector.** `abs config voice standard|turbo` picks the default
+  TTS model — standard keeps the emotion/pacing dials (`--exag`/`--cfg`); turbo
+  (ChatterboxTurboTTS, bundled in chatterbox-tts) generates ~1.8× faster on GPU
+  (measured) with no dials. Per-call override: `abs say --turbo` / `--standard`.
+- **Voice cloning / selectable voice.** `abs config voice-sample <file>` clones a
+  voice from any short reference clip (normalised to a wav in the profile dir) and
+  applies it to every spoken reply, both models; `--clear` reverts to the built-in
+  voice. Per call: `abs say --audio-prompt <wav>` / `--default-voice`.
+- **`abs say` flag pass-through** — `--turbo`, `--standard`, `--device`,
+  `--audio-prompt`, `--exag`, `--cfg`, etc. reach `speak.py` so you can A/B models
+  and voices from the CLI and send either as a real voice note.
+
+### Changed
+- **Faster, more accurate transcription.** Greedy decode (`beam_size=1`),
+  `condition_on_previous_text=False`, adaptive CPU threads, and a project-vocabulary
+  `initial_prompt` — measured ~12% faster and 87%→100% word accuracy on a sample
+  (project names like "Agent"/"git" stop getting mangled). Language auto-detects by
+  default; `ABS_STT_LANG=en` pins it for a further speed win.
+- **Cross-platform voice devices.** `speak.py` auto-selects `cuda` if present, else
+  `cpu`; loudness-normalised, VoIP-tuned Opus output. Apple MPS is opt-in
+  (`--device mps`), not the default: benchmarked on an M-series Mac, chatterbox TTS
+  runs ~1.6-1.9× *slower* on MPS than CPU (small-batch autoregressive loop + MPS
+  op-fallback copies), so auto stays on CPU there. STT (`small`) stays on CPU on Mac
+  regardless (CTranslate2 has no Metal backend). Ships `voicelab.sh` to benchmark
+  STT+TTS on any machine and `docs/VOICE_MAC_TESTING.md` for the Mac setup.
 
 ## [2.3.0] — 2026-07-18
 

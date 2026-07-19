@@ -74,4 +74,8 @@ Thumbs.db
 # Security audit — lists unpatched issues; stays internal until fixed and the
 # user-facing findings are folded into SECURITY.md / the website.
 /docs/ABS_AUDIT_REPORT.md
+# Internal working docs — a personal test checklist and the voice-pipeline
+# optimization analysis; kept local, not for the public repo.
+/docs/TEST-LIST.md
+/docs/VOICE_PIPELINE_ANALYSIS.md
 .vscode/

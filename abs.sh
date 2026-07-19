@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.3.0"
+readonly ABS_VERSION="2.4.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1280,6 +1280,36 @@ cmd_config() {
         "")        info "Command guard: $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)" ;;
         *)         die "Usage: abs config guard on|off" ;;
       esac ;;
+    voice)
+      # Which TTS model `abs say` (and the persona's voice replies) use by default.
+      # Absence = standard, so it stays the default on profiles predating this setting.
+      case "$val" in
+        standard|normal) state_set 'del(.tts_model)'; ok "Voice model: standard — keeps the emotion/pacing dials (--exag/--cfg)." ;;
+        turbo)           state_set '.tts_model = "turbo"'; ok "Voice model: turbo — ~1.8x faster generation, no emotion dials." ;;
+        "")              info "Voice model: $(state_get '.tts_model' | sed 's/^null$/standard/')" ;;
+        *)               die "Usage: abs config voice standard|turbo" ;;
+      esac ;;
+    voice-sample)
+      # A reference clip to clone the voice from, applied to every `abs say` (both
+      # models) unless a per-call --audio-prompt overrides it. Stored as a normalised
+      # wav inside the profile dir so it survives the original source going away.
+      local vs_path="$ABS_DIR/voice-sample.wav"
+      case "$val" in
+        --clear|clear)
+          state_set 'del(.voice_sample)'; rm -f "$vs_path"
+          ok "Voice sample cleared — back to each model's built-in voice." ;;
+        "")
+          local vs; vs="$(state_get '.voice_sample')"
+          { [ -n "$vs" ] && [ "$vs" != null ] && [ -f "$vs" ]; } \
+            && info "Voice sample: $vs" || info "Voice sample: (model default voice)" ;;
+        *)
+          [ -f "$val" ] || die "No such file: $val"
+          command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg needed to save a voice sample."
+          ffmpeg -y -i "$val" -ar 24000 -ac 1 "$vs_path" >/dev/null 2>&1 \
+            || die "Could not process that audio into a voice sample."
+          state_set --arg p "$vs_path" '.voice_sample = $p'
+          ok "Voice sample saved — every voice reply now speaks in this voice (both models)." ;;
+      esac ;;
     ""|show)
       info "${c_bold}Config for profile '$PROFILE'${c_reset}  ${c_dim}(abs $ABS_VERSION)${c_reset}"
       info "  model          $(state_get '.model' | sed 's/^null$/(Claude Code default)/')"
@@ -1289,9 +1319,11 @@ cmd_config() {
       info "  update check   $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)"
       info "  instant ack    $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)"
       info "  conversation log $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)"
-      info "  command guard  $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)" ;;
+      info "  command guard  $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)"
+      info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
+      info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>  |  update-check on|off" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>  |  update-check on|off  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 
@@ -1898,17 +1930,30 @@ cmd_say() {
   [ -x "$venv" ] || die "No TTS venv at $venv — voice is an optional add-on. See README (Voice)."
   command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found — speak.py needs it to make Opus."
 
-  local keep="" text="" tmp=""
+  local keep="" text="" tmp="" say_args="" model_set="" audio_set=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --keep) keep="$2"; shift 2 ;;
+      --turbo) say_args="$say_args --turbo"; model_set=1; shift ;;
+      --standard|--normal) model_set=1; shift ;;   # force standard (no --turbo)
+      --audio-prompt) say_args="$say_args --audio-prompt $2"; audio_set=1; shift 2 ;;
+      --default-voice) audio_set=1; shift ;;       # ignore the saved sample, use model default
+      --exag|--cfg|--device|--max-chars|--gap)
+        say_args="$say_args $1 $2"; shift 2 ;;
       --) shift; text="$*"; break ;;
-      -*) die "Usage: abs say [--keep FILE] \"text\"   (text of \"-\" reads stdin)" ;;
+      -*) die "Usage: abs say [--keep FILE] [--turbo|--standard] [--audio-prompt WAV|--default-voice] [--device D] \"text\"" ;;
       *)  text="$1"; shift ;;
     esac
   done
   [ -n "$text" ] || die "Nothing to say. Usage: abs say \"text\""
   [ "$text" = "-" ] && text="$(cat)"
+  # No explicit model on the command line -> use the configured default (abs config voice).
+  [ -z "$model_set" ] && [ "$(state_get '.tts_model')" = "turbo" ] && say_args="$say_args --turbo"
+  # No explicit voice on the command line -> use the saved voice sample if one is set.
+  if [ -z "$audio_set" ]; then
+    local vs; vs="$(state_get '.voice_sample')"
+    { [ -n "$vs" ] && [ "$vs" != null ] && [ -f "$vs" ]; } && say_args="$say_args --audio-prompt $vs"
+  fi
 
   # macOS mktemp has no --suffix, so make the temp file portably and append .ogg
   # (ffmpeg infers the container from the extension). Track the placeholder $tmp
@@ -1921,7 +1966,7 @@ cmd_say() {
     out="$tmp.ogg"
   fi
   # speak.py chatters progress to stderr; only its last line is the summary.
-  "$venv" "${SCRIPT_PATH%/*}/speak.py" "$text" "$out" >/dev/null || {
+  "$venv" "${SCRIPT_PATH%/*}/speak.py" $say_args "$text" "$out" >/dev/null || {
     [ -n "$keep" ] || rm -f "$out" ${tmp:+"$tmp"}
     die "Synthesis failed."
   }
@@ -2143,7 +2188,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} usage [--print|--send]
                           Report subscription limits (sends to Telegram by default)
   ${c_bold}abs${c_reset} menu               Re-register the Telegram "/" command menu
-  ${c_bold}abs${c_reset} say "text"         Speak it and send as a voice note (needs .venv-tts)
+  ${c_bold}abs${c_reset} say [--turbo] "text" Speak it and send as a voice note (needs .venv-tts;
+                          --turbo = faster model, --device cuda|mps|cpu to pick hardware)
   ${c_bold}abs${c_reset} log [--list|--clear]  Read or delete your local conversation backup
 
   ${c_bold}abs${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
