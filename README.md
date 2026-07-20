@@ -23,9 +23,9 @@ Telegram plugin. No daemon, no webhook, no second copy of your session.
 
 <div align="center">
 
-<video src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/demo.mp4" controls muted playsinline width="80%"></video>
+<a href="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/demo.mp4"><img src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/demo.gif" alt="Agent Babysitter demo — one-line install, pair your phone with a PIN, then close the laptop and let Claude keep working" width="80%"></a>
 
-<sub><strong>▶︎ 50-second demo</strong> — one-line install, pair your phone with a PIN, then close the laptop and let Claude keep working. <a href="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/demo.mp4">Watch the demo →</a></sub>
+<sub><strong>▶︎ 50-second demo</strong> — one-line install, pair your phone with a PIN, then close the laptop and let Claude keep working. <a href="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/demo.mp4">Watch with audio →</a></sub>
 
 </div>
 
