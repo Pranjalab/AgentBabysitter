@@ -2495,6 +2495,18 @@ cmd_run() {
     "$@"
 }
 
+# `abs daemon` — control surface for the v3 always-on daemon (absd): the
+# install|start|stop|status|logs verbs that manage the single background process
+# polling every idle bot. Not built yet — absd is a Python asyncio daemon that
+# lands in Phase 1 of PLAN.md. This stub exists so the verb is discoverable and
+# so callers get a clean, explained non-zero exit instead of "Unknown command"
+# while v3 is in flight. It needs no profile and no jq, so dispatch handles it
+# before either is resolved. See PLAN.md sections 4 and 6.
+cmd_daemon() {
+  info "absd: not implemented yet — see PLAN.md"
+  exit 1
+}
+
 cmd_help() {
   cat <<EOF
 ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Telegram
@@ -2531,6 +2543,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config guard on|off  Block destructive cmds on Telegram turns (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
+  ${c_bold}abs${c_reset} daemon              Always-on daemon (v3, not implemented yet — see PLAN.md)
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} version             Print the installed version
@@ -2572,6 +2585,8 @@ main() {
   case "$cmd" in
     help|-h|--help) cmd_help; return 0 ;;
     version|--version|-V) printf 'Agent Babysitter %s\n' "$ABS_VERSION"; return 0 ;;
+    # daemon is a v3 stub: it needs no profile and no jq, and exits 1 itself.
+    daemon) cmd_daemon ;;
   esac
 
   command -v jq >/dev/null 2>&1 || die "jq is required."
