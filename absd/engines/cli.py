@@ -26,8 +26,16 @@ import shlex
 import sys
 from dataclasses import asdict
 
-from absd.engines.base import SessionInfo
-from absd.engines.tmux import DEFAULT_SOCKET, EngineError, TmuxEngine
+from absd.engines import HerdrEngine, get_engine
+from absd.engines.base import Engine, EngineError, SessionInfo
+from absd.engines.tmux import DEFAULT_SOCKET, TmuxEngine
+
+#: Default engine for the CLI. tmux keeps the Step 1.1 behaviour/tests unchanged;
+#: override per-invocation with ``--engine`` or the ``ABS_ENGINE`` env var (which
+#: passes straight through the ``abs.sh`` shim, so no bash change is needed). The
+#: daemon's own ``config.json`` engine selection is a later step (1.3+); this is
+#: just so ``abs sessions``/``abs attach`` can target herdr when asked.
+_DEFAULT_ENGINE = os.environ.get("ABS_ENGINE", "tmux")
 
 
 def format_sessions_table(sessions: list[SessionInfo]) -> str:
@@ -49,7 +57,7 @@ def format_sessions_table(sessions: list[SessionInfo]) -> str:
     return "\n".join(lines)
 
 
-def _cmd_sessions(engine: TmuxEngine, as_json: bool) -> int:
+def _cmd_sessions(engine: Engine, as_json: bool) -> int:
     sessions = engine.list_sessions()
     if as_json:
         print(json.dumps([asdict(s) for s in sessions]))
@@ -58,7 +66,7 @@ def _cmd_sessions(engine: TmuxEngine, as_json: bool) -> int:
     return 0
 
 
-def _cmd_attach(engine: TmuxEngine, profile: str | None) -> int:
+def _cmd_attach(engine: Engine, profile: str | None) -> int:
     """Resolve the target session and exec into tmux. Returns an exit code only
     on the no-attach paths; on success it never returns (execvp replaces us)."""
     live = [s for s in engine.list_sessions() if s.alive]
@@ -107,9 +115,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="ABS session-engine adapter (tmux backend).",
     )
     parser.add_argument(
+        "--engine",
+        choices=("tmux", "herdr", "auto"),
+        default=_DEFAULT_ENGINE,
+        help=(
+            f"session backend (default: {_DEFAULT_ENGINE!r}, from $ABS_ENGINE). "
+            "'auto' picks herdr if present, else tmux."
+        ),
+    )
+    parser.add_argument(
         "--socket",
         default=DEFAULT_SOCKET,
-        help=f"tmux socket name (default: {DEFAULT_SOCKET!r}); tests override it.",
+        help=f"tmux socket name (default: {DEFAULT_SOCKET!r}); tmux engine only.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -125,9 +142,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_engine(engine_name: str, socket: str) -> Engine:
+    """Construct the requested engine. tmux honours ``--socket`` (so tests and the
+    isolated ``abs`` socket work); herdr/auto take no socket."""
+    if engine_name == "tmux":
+        return TmuxEngine(socket_name=socket)
+    if engine_name == "herdr":
+        return HerdrEngine()
+    return get_engine(engine_name)  # "auto" (or anything get_engine accepts)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    engine = TmuxEngine(socket_name=args.socket)
+    engine = _build_engine(args.engine, args.socket)
     try:
         if args.command == "sessions":
             return _cmd_sessions(engine, as_json=args.json)

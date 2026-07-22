@@ -33,7 +33,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from absd.engines.base import SessionInfo
+from absd.engines.base import EngineError, SessionInfo
 
 #: Every ABS tmux session is named with this prefix + the profile name.
 SESSION_PREFIX = "abs-"
@@ -55,13 +55,19 @@ _PANE_FORMAT = _FS.join(
 _DEFAULT_TIMEOUT = 10.0
 
 
-class EngineError(RuntimeError):
-    """A session-engine operation failed (bad tmux exit, missing binary, etc.).
-
-    Engine-local for now; if HerdrEngine (Step 1.2) wants to share it, promote it
-    to ``engines.base``. Kept out of the protocol module so ``base`` stays the
-    implementation-free contract.
-    """
+#: ``EngineError`` was promoted to :mod:`absd.engines.base` in Step 1.2 so both
+#: backends share one failure type (the parameterized suite catches it for either
+#: engine). Re-exported here so the historical import path
+#: (``from absd.engines.tmux import EngineError``) keeps working unchanged.
+__all__ = [
+    "EngineError",
+    "PaneRecord",
+    "TmuxEngine",
+    "parse_pane_records",
+    "sessions_from_records",
+    "DEFAULT_SOCKET",
+    "SESSION_PREFIX",
+]
 
 
 def _default_conf_path() -> Path:

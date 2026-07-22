@@ -25,6 +25,20 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 
+class EngineError(RuntimeError):
+    """A session-engine operation failed (bad backend exit, missing binary, a
+    duplicate-session request, etc.).
+
+    Shared failure type for the contract, so callers (and the parameterized test
+    suite) can catch one exception regardless of backend. Backends may raise
+    subclasses (``TmuxEngineError``/``HerdrError``) for backend-specific catches;
+    all of them are ``EngineError``. Living here — not in a concrete backend —
+    keeps it part of the protocol, not owned by tmux (Step 1.2). This is the only
+    logic in an otherwise implementation-free module; the ``Engine`` Protocol and
+    ``SessionInfo`` are unchanged.
+    """
+
+
 @dataclass
 class SessionInfo:
     """A snapshot of one engine-managed session, as returned by ``list_sessions``.
