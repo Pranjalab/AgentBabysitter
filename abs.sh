@@ -2507,6 +2507,32 @@ cmd_daemon() {
   exit 1
 }
 
+# v3 engine adapter shims. `abs sessions` and `abs attach [profile]` shell into
+# the Python session-engine adapter (absd/engines/cli.py) — the tmux/herdr logic
+# lives there, not in bash. Like `daemon`, these need no jq and no profile
+# resolution (the adapter reads the engine directly), so dispatch handles them in
+# the pre-jq case block. We `exec` so that `abs attach` becomes bash -> python ->
+# tmux and the user lands in the session with no extra process in the way.
+#
+# The venv python is resolved the same way SCRIPT_PATH resolves everything else:
+# relative to the real script location (the repo root in a dev checkout, where
+# absd/ and .venv both live). PYTHONPATH is set explicitly so `-m absd...`
+# resolves regardless of the caller's cwd; we do NOT assume `python3` on PATH is
+# the right interpreter.
+cmd_engine() {
+  local sub="${1:-}"; shift || true
+  local root py
+  root="$(dirname "$SCRIPT_PATH")"
+  py="$root/.venv/bin/python"
+  [ -x "$py" ] || die "The v3 engine adapter needs $root/.venv (Python 3.11+). Not found."
+  [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root); v3 adapter unavailable."
+  # `abs attach` with no positional target may take the global --profile instead.
+  if [ "$sub" = "attach" ] && [ "$#" -eq 0 ] && [ -n "${want_profile:-}" ]; then
+    set -- "$want_profile"
+  fi
+  exec env PYTHONPATH="$root" "$py" -m absd.engines.cli "$sub" "$@"
+}
+
 cmd_help() {
   cat <<EOF
 ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Telegram
@@ -2543,6 +2569,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config guard on|off  Block destructive cmds on Telegram turns (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
+  ${c_bold}abs${c_reset} sessions            List engine sessions (v3; --json for scripts)
+  ${c_bold}abs${c_reset} attach [profile]    Attach to a running session (v3)
   ${c_bold}abs${c_reset} daemon              Always-on daemon (v3, not implemented yet — see PLAN.md)
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
@@ -2587,6 +2615,8 @@ main() {
     version|--version|-V) printf 'Agent Babysitter %s\n' "$ABS_VERSION"; return 0 ;;
     # daemon is a v3 stub: it needs no profile and no jq, and exits 1 itself.
     daemon) cmd_daemon ;;
+    # v3 engine shims: no profile, no jq — they exec the Python adapter.
+    sessions|attach) cmd_engine "$@" ;;
   esac
 
   command -v jq >/dev/null 2>&1 || die "jq is required."
