@@ -74,12 +74,25 @@ HERDR_SESSION=abs-<profile> herdr session list --json
 Server log line on start:
 `herdr server running; you can use any herdr CLI command in another terminal.`
 
-### 2. Create a workspace with a specific cwd
+### 2. Create a workspace with a specific cwd (and inject env)
 
 ```bash
 HERDR_SESSION=abs-<profile> herdr workspace create \
-  --cwd /abs/project/path --label abs-<profile> --no-focus
+  --cwd /abs/project/path --label abs-<profile> --no-focus \
+  --env KEY=VALUE --env KEY2=VALUE2
 ```
+
+**Env injection (added Step 1.2).** `workspace create --env KEY=VALUE` (repeatable)
+sets environment variables **for the launched process** — this is herdr's
+per-pane env mechanism (the analogue of tmux `new-session -e`). Verified on 0.7.5:
+the values reach the process launched by a later `pane run` (confirmed via
+`/proc/<pid>/environ`) and do **not** appear on the pane's command line / `ps` /
+pane title. Visibility tradeoff, same as tmux `-e`: any same-user process can read
+them via `/proc/<pid>/environ`, so this is fine for non-secret launcher vars but
+**secrets must never be passed this way** (PLAN 5.5). `HerdrEngine.create_session`
+uses one `--env` per env item. (The Step 0.2 spike passed the pid-file path only
+inside the command args; `--env` is the general mechanism and is what the engine
+uses.)
 
 Response (single JSON line) — pull the root pane id out of it:
 
@@ -137,12 +150,32 @@ HERDR_SESSION=abs-<profile> herdr pane process-info --pane w1:p1
     {"pid":729719,"name":"sleep","cmdline":"sleep 3600", ...}]}}}
 ```
 
-Liveness = the session shows `running:true` **and** the pane has a foreground
-process (or the launcher's `session.pid` is alive). `herdr pane list` /
-`herdr pane get w1:p1` also confirm the pane exists (`agent_status`, `scroll`,
-`terminal_title`). For the `HerdrEngine.is_alive(profile)` adapter method, the
-`session.pid` check is primary (matches TmuxEngine); `pane process-info` is the
-herdr-specific confirmation.
+**CORRECTION (Step 1.2 — the Step 0.2 wording was subtly wrong).** herdr **keeps
+the pane and session alive after the launched command exits**: the pane's
+interactive shell reclaims the foreground (like tmux `remain-on-exit on`). So
+"session `running:true`" and "the pane has a foreground process" are BOTH still
+true after the command dies (the idle shell is a foreground process) — neither is
+a liveness signal on its own. Empirically verified: kill the launched command and
+`session list` still shows `running:true`, `pane list` still shows `w1:p1`, and
+`process-info` still returns a foreground process — the bare shell.
+
+The reliable, launcher-agnostic signal is the **foreground process group vs the
+shell**: while a command runs via `pane run` it owns the pane's foreground, so
+`foreground_process_group_id != shell_pid`; when it exits, the shell reclaims the
+foreground and `foreground_process_group_id == shell_pid`. Verified transition:
+command foregrounds ~0.7 s after `pane run` (the pane shell sources `.bashrc`
+first — conda init etc.), and the signal flips back within ~0.02 s of the command
+dying.
+
+So `HerdrEngine.is_alive(profile)` = session `running:true` **and**
+`foreground_process_group_id != shell_pid` (from `pane process-info`). This is
+engine-native and does **not** depend on the launcher writing `session.pid` —
+correct, because the `Engine.is_alive(profile)` contract only receives the profile
+and must match TmuxEngine, which keys on its own state, not on launcher
+cooperation. The `foreground_process_group_id` (while running) equals the launched
+command's own pid/`$$`, so it is also what the engine reports as `SessionInfo.pid`.
+The launcher's `session.pid` remains a cheap independent daemon-level check
+(PLAN 4.1), just not the engine's `is_alive` signal.
 
 ### 5. Attachability without an interactive TTY
 
@@ -181,6 +214,11 @@ HERDR_SESSION=abs-<profile> herdr session delete abs-<profile> # removes saved s
   `kill -0`). herdr kills the group, unlike a bare `SIGTERM` to the parent.
 - `session stop` leaves **no** herdr process running (`pgrep herdr` empty). The
   session then shows `running:false`; `session delete` clears the residual dir.
+- **Added Step 1.2:** `session stop` **alone** also reaps the pane's children —
+  verified: `session stop` without a preceding `pane close` left the fake-claude
+  and its `sleep` child dead (no orphans under init). `HerdrEngine.kill` still
+  does `pane close` → `session stop` → `session delete` (belt-and-suspenders +
+  clears saved state), but a bare `session stop` is sufficient to avoid orphans.
 
 ## Item 7 — agent status events (real claude), socket `events.subscribe`
 
