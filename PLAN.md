@@ -255,7 +255,10 @@ absd must stay cheap to port to Rust or TS/Bun someday (D2). Concretely:
 Create `absd/` package skeleton, `pyproject.toml` wiring (extend existing), pytest setup,
 `tests/` with a trivial passing test, `docs/v3/` tree. `abs daemon` bash subcommand stub
 (prints "not implemented").
-- **Agent verify:** `pytest` green in repo venv; `shellcheck abs.sh` still clean.
+- **Agent verify:** `pytest` green in repo venv; `shellcheck abs.sh` introduces no
+  findings beyond the v2.6.0 baseline (the baseline is NOT zero — 22 pre-existing
+  info/warning findings; the contract everywhere in this plan is "no NEW findings",
+  proven by diffing shellcheck output against the branch point).
 - **Pranjal verify:** `abs help` unchanged for existing commands; nothing about his
   current v2 workflow breaks (start/stop a normal session once).
 - **Critique gate:** layout review — does the skeleton match section 4.3?
@@ -464,13 +467,18 @@ in the start confirmation. Attach/detach/kill ladder all work identically.
   Pranjal's manual checklists are the only live-API testing.
 - Unit + integration tests run with `pytest` from the repo venv; integration tests that
   need tmux/herdr/docker skip cleanly with a visible SKIP reason when the tool is absent.
-- Every step's manual checklist lives in `docs/v3/manual-tests/<step-id>.md` — written by
-  the implementing agent as exact numbered phone/terminal actions with expected
-  observations, so Pranjal can execute them without context.
+- Every step with a non-empty *Pranjal verify* gets a manual checklist in
+  `docs/v3/manual-tests/<step-id>.md` — exact numbered phone/terminal actions with
+  expected observations, executable without context. Steps whose Pranjal-verify is
+  "none" may skip it or provide a minimal optional one. Checklists must stay
+  *stable as later steps land* (scope commands to the step's own surface; don't
+  hardcode whole-suite counts).
 - Critique files (`docs/v3/critique/<step-id>.md`) must include: deviations, untested
   surface, and "what would break first in production" — honesty over polish.
 - Existing v2 behavior is regression-tested each phase: TEST-LIST.md smoke items still
-  pass (manual, Pranjal) and `shellcheck` stays clean.
+  pass (manual, Pranjal) and `shellcheck abs.sh` introduces no new findings vs the
+  v2.6.0 baseline (see Step 0.1; a `.shellcheckrc`/baseline cleanup may land later as
+  its own change).
 
 ## 11. Risk register
 
