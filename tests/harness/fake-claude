@@ -29,6 +29,7 @@ mode="${FAKE_CLAUDE_MODE:-normal}"
 pid_file="${FAKE_CLAUDE_PID_FILE:-}"
 crash_after="${FAKE_CLAUDE_CRASH_AFTER:-3}"
 auth_delay="${FAKE_CLAUDE_AUTH_DELAY:-0}"
+sleep_pid=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,7 +47,16 @@ case "$mode" in
   crash-after-*) crash_after="${mode#crash-after-}"; mode="crash-after" ;;
 esac
 
-cleanup() { [ -n "$pid_file" ] && rm -f "$pid_file" 2>/dev/null; return 0; }
+# Kill any backgrounded `sleep` child before exiting. Both long-lived modes run
+# the sleep in the background so the TERM/INT trap can fire immediately (via an
+# interrupted `wait`); without this the sleep is only signalled when it shares
+# our process group. A parent-only SIGTERM (e.g. `subprocess.terminate()`, which
+# does NOT signal the whole group) would otherwise orphan the sleep to init.
+cleanup() {
+  [ -n "${sleep_pid:-}" ] && kill "$sleep_pid" 2>/dev/null
+  [ -n "$pid_file" ] && rm -f "$pid_file" 2>/dev/null
+  return 0
+}
 
 # Record our own PID exactly as abs.sh records session.pid before exec'ing claude,
 # so the daemon's liveness check has something to read. Written in every mode
@@ -60,10 +70,12 @@ case "$mode" in
   normal)
     trap 'cleanup; exit 0' TERM INT
     # Stay alive but interruptible: a backgrounded sleep + wait lets the trap
-    # fire immediately on signal instead of after a full sleep interval.
+    # fire immediately on signal instead of after a full sleep interval. The
+    # sleep PID is recorded so cleanup can kill it (no orphaned child).
     while :; do
       sleep 3600 &
-      wait "$!"
+      sleep_pid=$!
+      wait "$sleep_pid"
     done
     ;;
 
@@ -79,7 +91,12 @@ case "$mode" in
 
   crash-after)
     trap 'cleanup; exit 0' TERM INT
-    sleep "$crash_after"
+    # Backgrounded sleep + wait for the same reasons as normal mode: the trap
+    # fires immediately on a parent-only SIGTERM/SIGINT and cleanup reaps the
+    # sleep child instead of orphaning it.
+    sleep "$crash_after" &
+    sleep_pid=$!
+    wait "$sleep_pid"
     printf '%s\n' "fake-claude: simulated crash after ${crash_after}s" >&2
     cleanup
     exit 42

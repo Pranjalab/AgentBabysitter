@@ -14,7 +14,47 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
+
 FAKE_CLAUDE = Path(__file__).parent / "harness" / "fake-claude"
+
+
+def _child_pids(parent_pid: int) -> list[int]:
+    """PIDs whose parent is ``parent_pid`` (Linux /proc). Robust to a comm
+    containing spaces/parens by splitting after the final ')'."""
+    kids: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        try:
+            after_comm = stat.rsplit(")", 1)[1].split()
+            ppid = int(after_comm[1])  # fields after comm: state, ppid, ...
+        except (IndexError, ValueError):
+            continue
+        if ppid == parent_pid:
+            kids.append(int(entry.name))
+    return kids
+
+
+def _comm(pid: int) -> str:
+    try:
+        return (Path("/proc") / str(pid) / "comm").read_text().strip()
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return ""
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def test_harness_script_is_executable() -> None:
@@ -108,3 +148,41 @@ def test_ignores_unknown_claude_style_args(tmp_path: Path) -> None:
         proc.send_signal(signal.SIGINT)
         rc = proc.wait(timeout=5)
     assert rc == 0
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="requires Linux /proc")
+def test_normal_mode_reaps_sleep_child_on_term_no_orphan(tmp_path: Path) -> None:
+    """Regression (docs/v3/critique/0.2.md): normal mode backgrounds a `sleep`
+    child so its TERM/INT trap can fire immediately. A parent-only SIGTERM —
+    what ``subprocess.terminate()`` sends: the PID, NOT the whole process group —
+    must still reap that child, not orphan it to init. The Step 0.3 harness
+    leaked six such sleeps precisely because cleanup did not kill the child."""
+    pid_file = tmp_path / "session.pid"
+    proc = subprocess.Popen(
+        [str(FAKE_CLAUDE), "--mode", "normal", "--pid-file", str(pid_file)]
+    )
+    try:
+        # Wait for the backgrounded sleep child to appear.
+        deadline = time.time() + 3
+        sleep_child: int | None = None
+        while time.time() < deadline:
+            for c in _child_pids(proc.pid):
+                if _comm(c) == "sleep":
+                    sleep_child = c
+                    break
+            if sleep_child is not None:
+                break
+            time.sleep(0.02)
+        assert sleep_child is not None, "normal mode should spawn a sleep child"
+    finally:
+        # SIGTERM to the fake-claude PID only (not the group) — the orphan case.
+        proc.terminate()
+        rc = proc.wait(timeout=5)
+    assert rc == 0, "normal mode must exit cleanly on SIGTERM"
+    # The specific sleep child must die, not get reparented to init and linger.
+    deadline = time.time() + 3
+    while time.time() < deadline and _pid_alive(sleep_child):
+        time.sleep(0.02)
+    assert not _pid_alive(sleep_child), (
+        f"sleep child {sleep_child} survived parent SIGTERM — orphaned to init"
+    )
