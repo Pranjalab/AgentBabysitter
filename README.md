@@ -112,6 +112,14 @@ Send a voice note and it's transcribed; ask for the answer spoken and it replies
 with a real voice message. Both run **locally** — no audio ever leaves your
 machine.
 
+Voice is an optional add-on (it pulls in Whisper + Chatterbox, a few GB), so the
+installer offers it as a separate step — or turn it on any time with a single
+command:
+
+```bash
+abs voice setup      # builds the local speech engines; abs voice status to check
+```
+
 Pick the **model** for speed vs. expression (`abs config voice standard|turbo` —
 turbo generates ~1.8× faster), and **clone a voice** from any short reference clip
 so replies speak in the voice you choose (`abs config voice-sample <clip>`, or

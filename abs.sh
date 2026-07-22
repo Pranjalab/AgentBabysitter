@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.5.1"
+readonly ABS_VERSION="2.6.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -45,6 +45,10 @@ readonly PAIR_TIMEOUT=300
 # Our own state. Profiles live under here; each holds one bot's pairing.
 readonly ABS_HOME="${ABS_HOME:-$HOME/.abs}"
 readonly PROFILES_DIR="$ABS_HOME/profiles"
+
+# Raw-file base for anything abs fetches for itself at runtime (currently the
+# voice scripts). Overridable for testing against a fork/branch.
+readonly ABS_RAW="${ABS_REPO:-https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main}"
 
 # Two older layouts, both migrated on first run and then left where they are.
 # This tool was called Claude RC until v2 and kept profiles under ~/.claude/clauderc.
@@ -628,7 +632,62 @@ Send \"abs quiet\" to mute reports, \"abs status\" to check state." \
 
 build_prompt() {
   local cid="$1"
-  local PROJECT_ROOT="${SCRIPT_PATH%/*}"
+  local VROOT; VROOT="$(voice_root)"
+
+  # The VOICE section is only truthful when the venvs actually exist. On a fresh
+  # install they don't (voice is an opt-in add-on), and asserting a working
+  # pipeline there is what made the agent walk into dead paths and refuse to work
+  # around them. So swap in an honest "not set up" block when it isn't built.
+  local voice_section
+  if voice_have; then
+    voice_section="$(cat <<VOICEON
+This project has a working voice pipeline in both directions. Use it. The engine
+is installed locally in its own venv — there is no TTS binary on PATH, so don't
+go hunting for one.
+
+Inbound: a voice note arrives with attachment_file_id on the <channel> tag.
+Fetch it with the \`download_attachment\` tool, then transcribe it:
+
+    ${VROOT}/.venv/bin/python ${VROOT}/transcribe.py <file.oga>
+
+Then, BEFORE you act, echo the transcript back so they can verify it and stop or
+correct you mid-way — reply on Telegram with \`Heard: "<transcript>"\` (and it's
+visible in the terminal from the command above). Immediately after that, act on
+the transcript as if they'd typed it — don't wait for the whole task to finish to
+send it. If they follow up to fix a mis-heard word, adjust course.
+
+Outbound, only when they ask for a voice answer:
+
+    bash "${SCRIPT_PATH}" --profile ${PROFILE} say "the text to speak"
+
+That synthesizes and sends the voice bubble itself, so do not also \`reply\` with
+the same words. Never attach audio with \`reply\` — it lands as a document, not a
+playable voice note. Synthesis takes ~30s and holds the GPU.
+
+You cannot hear what you generated. If it matters, run the output back through
+transcribe.py and confirm the words survived — that catches truncation and
+garbling. On tone you are guessing; say so rather than claiming it sounds good.
+VOICEON
+)"
+  else
+    voice_section="$(cat <<VOICEOFF
+Voice is an optional add-on and is NOT set up on this machine. Do not run
+speak.py, transcribe.py, or \`abs say\` — the venvs don't exist yet and every one
+of them will just fail.
+
+If the operator sends a voice note, you cannot transcribe it. Say so plainly, ask
+them to type it instead, and tell them they can turn voice on once with:
+
+    bash "${SCRIPT_PATH}" --profile ${PROFILE} voice setup
+
+If they ask you to speak a reply, same thing: voice isn't installed; that one-time
+command builds it (a few minutes, downloads the models). Do not try to fake a
+voice reply by attaching audio through \`reply\` — it lands as a file, not a
+playable voice note.
+VOICEOFF
+)"
+  fi
+
   cat <<EOF
 === AGENT BABYSITTER IS ACTIVE (Telegram) ===
 
@@ -711,32 +770,7 @@ it with \`reply\`: you would only duplicate what the script already delivered.
 Say nothing further unless the numbers deserve a comment.
 
 VOICE
-This project has a working voice pipeline in both directions. Use it. Do not go
-hunting for a TTS binary on PATH — there isn't one, and the engine you want is
-already installed here in its own venv.
-
-Inbound: a voice note arrives with attachment_file_id on the <channel> tag.
-Fetch it with the \`download_attachment\` tool, then transcribe it:
-
-    ${PROJECT_ROOT}/.venv/bin/python ${PROJECT_ROOT}/transcribe.py <file.oga>
-
-Then, BEFORE you act, echo the transcript back so they can verify it and stop or
-correct you mid-way — reply on Telegram with \`Heard: "<transcript>"\` (and it's
-visible in the terminal from the command above). Immediately after that, act on
-the transcript as if they'd typed it — don't wait for the whole task to finish to
-send it. If they follow up to fix a mis-heard word, adjust course.
-
-Outbound, only when they ask for a voice answer:
-
-    bash "${SCRIPT_PATH}" --profile ${PROFILE} say "the text to speak"
-
-That synthesizes and sends the voice bubble itself, so do not also \`reply\` with
-the same words. Never attach audio with \`reply\` — it lands as a document, not a
-playable voice note. Synthesis takes ~30s and holds the GPU.
-
-You cannot hear what you generated. If it matters, run the output back through
-transcribe.py and confirm the words survived — that catches truncation and
-garbling. On tone you are guessing; say so rather than claiming it sounds good.
+${voice_section}
 
 SCREENSHOTS AND PHOTOS
 Pasting an image into the terminal is awkward; sending one over Telegram is not.
@@ -2010,6 +2044,184 @@ cmd_menu() {
     "$(clear_keyboard)" || warn "Menu registered, but the chat notice didn't send: $TG_ERR"
 }
 
+# --- voice add-on: local speech-to-text + text-to-speech ---------------------
+#
+# Voice is optional and heavy (torch + a few GB of models), so it is never part
+# of the base install — it is built on demand by `abs voice setup`, into
+# voice_root():
+#   * a dev checkout keeps its scripts and venvs beside abs.sh (unchanged);
+#   * a curl/pipx install — where abs is a lone copy in ~/.local/bin — gets them
+#     in ~/.abs/voice, so multi-GB venvs don't litter a bin dir (and `abs
+#     uninstall` wipes them with the rest of ~/.abs).
+# uv does the hard parts: it fetches the two Python versions whisper and
+# chatterbox each need, and links wheels from its cache so a rebuild is quick.
+
+# Where the voice add-on lives. Beside abs when the scripts sit there (dev
+# checkout); otherwise the dedicated dir under ABS_HOME.
+voice_root() {
+  local beside="${SCRIPT_PATH%/*}"
+  if [ -f "$beside/speak.py" ] || [ -d "$beside/.venv-tts" ]; then
+    printf '%s\n' "$beside"
+  else
+    printf '%s\n' "$ABS_HOME/voice"
+  fi
+}
+
+# True only when the whole pipeline is present: both venvs and both scripts.
+# Both build_prompt and cmd_say gate on this, so "installed" means one thing.
+voice_have() {
+  local r; r="$(voice_root)"
+  [ -x "$r/.venv/bin/python" ] && [ -x "$r/.venv-tts/bin/python" ] \
+    && [ -f "$r/speak.py" ] && [ -f "$r/transcribe.py" ]
+}
+
+# yes/no on the human's terminal. abs prompts on /dev/tty everywhere, which is
+# also what lets `curl install.sh | bash` hand off to `abs voice setup` — that
+# child's stdin is the piped installer, but /dev/tty is still the person.
+voice_ask() {
+  local reply=""
+  read -rp "  $1 " reply < /dev/tty 2>/dev/null || return 1
+  case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+
+# One status row: green tick when present, red cross + a fix hint otherwise.
+# kind: file (default) | x (executable) | cmd (on PATH).
+_voice_row() {
+  local label="$1" path="$2" kind="$3" hint="$4" present=""
+  case "$kind" in
+    x)   [ -x "$path" ] && present=1 ;;
+    cmd) command -v "$path" >/dev/null 2>&1 && present=1 ;;
+    *)   [ -f "$path" ] && present=1 ;;
+  esac
+  if [ -n "$present" ]; then
+    info "  ${c_green}✓${c_reset} $label"
+  else
+    info "  ${c_red}✗${c_reset} $label  ${c_dim}— $hint${c_reset}"
+  fi
+}
+
+# `abs voice status` — the piece-by-piece check, so a broken install is legible
+# at a glance instead of only surfacing as a cryptic failure mid-task.
+voice_status() {
+  local r; r="$(voice_root)"
+  info "${c_bold}Voice${c_reset}  ${c_dim}(root: $r)${c_reset}"
+  _voice_row "transcribe.py   speech → text"  "$r/transcribe.py"        file "abs voice setup"
+  _voice_row "speak.py        text → speech"  "$r/speak.py"             file "abs voice setup"
+  _voice_row "STT engine      .venv"          "$r/.venv/bin/python"     x    "abs voice setup"
+  _voice_row "TTS engine      .venv-tts"      "$r/.venv-tts/bin/python" x    "abs voice setup"
+  _voice_row "ffmpeg          packages Opus"  ffmpeg                    cmd  "sudo apt install ffmpeg  (or brew install ffmpeg)"
+  _voice_row "uv              env manager"    uv                        cmd  "abs voice setup installs it for you"
+  info ""
+  if voice_have; then
+    ok "Voice is ready.  Try: ${c_bold}abs say \"hello from your laptop\"${c_reset}"
+  else
+    info "Not set up yet.  Build it with: ${c_bold}abs voice setup${c_reset}"
+  fi
+}
+
+# `abs voice setup` — the one place voice gets built. Idempotent; safe to re-run.
+voice_setup() {
+  local force=0
+  for a in "$@"; do
+    case "$a" in
+      --force|--rebuild) force=1 ;;
+      -h|--help)
+        info "Usage: abs voice setup [--force]"
+        info "  Builds the local speech-to-text (Whisper) and text-to-speech (Chatterbox) engines."
+        info "  --force  rebuild the venvs even if they already exist."
+        return 0 ;;
+      *) die "Usage: abs voice setup [--force]" ;;
+    esac
+  done
+
+  local r; r="$(voice_root)"
+
+  if voice_have && [ "$force" = 0 ]; then
+    ok "Voice is already set up at $r."
+    info "  Rebuild from scratch with: ${c_bold}abs voice setup --force${c_reset}"
+    return 0
+  fi
+
+  info "${c_bold}Setting up voice${c_reset} — local speech-to-text (Whisper) and text-to-speech (Chatterbox)."
+  info "${c_dim}Everything runs on your machine. First use also downloads ~3-5 GB of model weights.${c_reset}"
+  info "${c_dim}Target: $r${c_reset}"
+  info ""
+
+  # ffmpeg packages the synthesized audio as the Opus/OGG a Telegram voice note
+  # needs. We can't install it (package manager + sudo), so name it and stop —
+  # building the venvs first would only defer the failure to the first `abs say`.
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    warn "Voice needs ffmpeg, and it isn't installed."
+    info "  Install it, then re-run ${c_bold}abs voice setup${c_reset}:"
+    info "    ${c_bold}sudo apt install ffmpeg${c_reset}   (or: ${c_bold}brew install ffmpeg${c_reset})"
+    die "Need ffmpeg first."
+  fi
+
+  # uv both manages the two venvs AND fetches the exact Python each needs
+  # (chatterbox wants 3.11, whisper 3.13), so the machine doesn't need either
+  # preinstalled. Offer to install it the same way the base installer offers Bun.
+  if ! command -v uv >/dev/null 2>&1; then
+    info "${c_bold}Voice needs uv${c_reset} — a fast Python env manager (installs to ~/.local/bin, no sudo)."
+    if voice_ask "Install uv now? [y/N]"; then
+      info "  ${c_dim}Installing uv…${c_reset}"
+      curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 \
+        || die "uv's installer failed. Install it yourself: https://docs.astral.sh/uv/getting-started/installation/"
+      export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+      command -v uv >/dev/null 2>&1 || die "uv installed but isn't on PATH — open a new shell and re-run: abs voice setup"
+      ok "uv installed."
+    else
+      info "  Install it yourself: ${c_bold}curl -LsSf https://astral.sh/uv/install.sh | sh${c_reset}"
+      die "Then re-run: abs voice setup"
+    fi
+  fi
+
+  mkdir -p "$r" || die "Could not create $r"
+
+  # The two CLI scripts. In a dev checkout they already sit beside abs (r is the
+  # checkout, nothing to fetch); for an installed abs, pull them into ~/.abs/voice.
+  local f
+  for f in transcribe.py speak.py; do
+    if [ ! -f "$r/$f" ]; then
+      info "  ${c_dim}Fetching $f…${c_reset}"
+      curl -fsSL "$ABS_RAW/$f" -o "$r/$f" || die "Could not download $f from $ABS_RAW"
+    fi
+  done
+
+  # STT: faster-whisper on Python 3.13. No torch — small and quick.
+  info "  ${c_dim}Building speech-to-text engine (.venv, Python 3.13)…${c_reset}"
+  uv venv "$r/.venv" --python 3.13 || die "Could not create the STT venv (uv venv --python 3.13)."
+  VIRTUAL_ENV="$r/.venv" uv pip install faster-whisper || die "Could not install faster-whisper."
+  ok "Speech-to-text ready."
+
+  # TTS: chatterbox-tts on Python 3.11 (its numba pin needs an older Python, so
+  # it gets its own env). setuptools<81 is not optional — chatterbox's
+  # watermarker imports pkg_resources, which setuptools 81 dropped. This step
+  # pulls torch, so it's the slow one.
+  info "  ${c_dim}Building text-to-speech engine (.venv-tts, Python 3.11)… pulls torch, a few minutes.${c_reset}"
+  uv venv "$r/.venv-tts" --python 3.11 || die "Could not create the TTS venv (uv venv --python 3.11)."
+  VIRTUAL_ENV="$r/.venv-tts" uv pip install chatterbox-tts "setuptools<81" || die "Could not install chatterbox-tts."
+  ok "Text-to-speech ready."
+
+  info ""
+  ok "Voice is set up."
+  info "  Speak a line:  ${c_bold}abs say \"hi from your laptop\"${c_reset}"
+  info "  Check it:      ${c_bold}abs voice status${c_reset}"
+  info "  ${c_dim}The first say/transcribe downloads the model weights once — after that it's local and offline.${c_reset}"
+}
+
+cmd_voice() {
+  local sub="${1:-status}"; shift 2>/dev/null || true
+  case "$sub" in
+    status|show|"") voice_status ;;
+    setup|install)  voice_setup "$@" ;;
+    -h|--help)
+      info "Usage: abs voice [status|setup]"
+      info "  status   show which voice pieces are installed (default)"
+      info "  setup    build the local voice engines (add --force to rebuild)" ;;
+    *) die "Usage: abs voice [status|setup]" ;;
+  esac
+}
+
 # --- voice out ---------------------------------------------------------------
 #
 # Why this exists rather than "just call speak.py": the plugin's own `reply`
@@ -2023,8 +2235,9 @@ cmd_say() {
   local cid; cid="$(state_get '.chat_id')"
   [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $ABS_STATE."
 
-  local venv="${SCRIPT_PATH%/*}/.venv-tts/bin/python"
-  [ -x "$venv" ] || die "No TTS venv at $venv — voice is an optional add-on. See README (Voice)."
+  local vroot; vroot="$(voice_root)"
+  local venv="$vroot/.venv-tts/bin/python"
+  [ -x "$venv" ] || die "Voice isn't set up. Turn it on once with: abs voice setup"
   command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found — speak.py needs it to make Opus."
 
   local keep="" text="" tmp="" say_args="" model_set="" audio_set=""
@@ -2063,7 +2276,7 @@ cmd_say() {
     out="$tmp.ogg"
   fi
   # speak.py chatters progress to stderr; only its last line is the summary.
-  "$venv" "${SCRIPT_PATH%/*}/speak.py" $say_args "$text" "$out" >/dev/null || {
+  "$venv" "$vroot/speak.py" $say_args "$text" "$out" >/dev/null || {
     [ -n "$keep" ] || rm -f "$out" ${tmp:+"$tmp"}
     die "Synthesis failed."
   }
@@ -2294,8 +2507,10 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} usage [--print|--send]
                           Report subscription limits (sends to Telegram by default)
   ${c_bold}abs${c_reset} menu               Re-register the Telegram "/" command menu
-  ${c_bold}abs${c_reset} say [--turbo] "text" Speak it and send as a voice note (needs .venv-tts;
-                          --turbo = faster model, --device cuda|mps|cpu to pick hardware)
+  ${c_bold}abs${c_reset} voice setup         Install the local voice engines (speech in + out)
+  ${c_bold}abs${c_reset} voice status        Show which voice pieces are installed
+  ${c_bold}abs${c_reset} say [--turbo] "text" Speak it and send as a voice note (needs 'abs voice
+                          setup'; --turbo = faster model, --device cuda|mps|cpu)
   ${c_bold}abs${c_reset} log [--list|--clear]  Read or delete your local conversation backup
 
   ${c_bold}abs${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
@@ -2391,7 +2606,7 @@ main() {
       # starting point is arbitrary.
       # update only needs ABS_DIR for its version cache — resolve default rather
       # than dragging the user through the profile picker just to upgrade.
-      is-quiet|statusline|usage-glance|usage-cache|profiles|update) use_profile default ;;
+      is-quiet|statusline|usage-glance|usage-cache|profiles|update|voice) use_profile default ;;
       *)                 pick_profile ;;
     esac
   fi
@@ -2404,6 +2619,7 @@ main() {
     usage)     shift; cmd_usage "${1:-}" ;;
     menu)      shift; cmd_menu ;;
     say)       shift; cmd_say "$@" ;;
+    voice)     shift; cmd_voice "$@" ;;
     quiet)     shift; cmd_quiet "${1:-}" ;;
     is-quiet)  cmd_is_quiet ;;
     statusline) cmd_statusline ;;

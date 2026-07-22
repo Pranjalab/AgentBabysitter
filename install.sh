@@ -250,5 +250,23 @@ if [ "$claude_fresh" = "1" ]; then
   info "    ${c_bold}export PATH=\"\$HOME/.local/bin:\$PATH\"${c_reset}"
   info ""
 fi
+# --- voice (optional add-on) -------------------------------------------------
+# Local, but big (Whisper + Chatterbox, a few GB), so it's never forced — offered
+# once, here, and the actual build is handed to the abs we just installed so
+# there's a single source of truth for it (`abs voice setup`). ask_yes already
+# no-ops without a tty, so CI/nohup installs just skip this cleanly.
+info ""
+info "${c_bold}Optional — voice.${c_reset} Send Claude a voice note, or have it speak its reply back."
+info "${c_dim}Runs entirely on your machine. One-time ~3-5 GB download, a few minutes to build.${c_reset}"
+if ask_yes "Set up voice now? [y/N]"; then
+  info ""
+  "$TARGET" voice setup \
+    || warn "Voice setup didn't finish — run it any time: ${c_bold}abs voice setup${c_reset}"
+  info ""
+else
+  info "  Skipped. Turn it on any time with: ${c_bold}abs voice setup${c_reset}"
+  info ""
+fi
+
 info "${c_dim}First run asks for a Telegram bot token from @BotFather, then pairs your${c_reset}"
 info "${c_dim}account with a PIN. Nothing leaves your machine except Telegram API calls.${c_reset}"

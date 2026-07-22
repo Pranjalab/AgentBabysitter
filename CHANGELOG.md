@@ -4,6 +4,35 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] — 2026-07-22
+
+### Added
+- **`abs voice setup` — voice is now installable by everyone, not just a dev
+  checkout.** Voice previously worked only where `abs` was a symlink into a repo
+  clone with the venvs built by hand; a `curl | bash` install never shipped the
+  scripts or built the engines, so `abs say` and voice transcription failed on
+  every real install. `abs voice setup` fixes that end to end: it checks
+  `ffmpeg`, installs [`uv`](https://docs.astral.sh/uv/) if missing, has `uv` fetch
+  the Python versions Whisper (3.13) and Chatterbox (3.11) each need, downloads
+  `transcribe.py`/`speak.py`, and builds both venvs. Idempotent; `--force`
+  rebuilds.
+- **`abs voice status`** — a green/red check of every voice piece (scripts, both
+  venvs, `ffmpeg`, `uv`) so a broken install is legible at a glance instead of
+  only surfacing as a mid-task failure.
+- **The installer offers voice as an opt-in step.** After the base install it
+  asks whether to set voice up now and hands off to `abs voice setup` (skipped
+  cleanly on non-interactive installs).
+
+### Changed
+- **Voice engines for an installed `abs` now live in `~/.abs/voice`** rather than
+  beside the command, keeping multi-GB venvs out of `~/.local/bin` and letting
+  `abs uninstall` remove them with the rest of the state. A dev checkout is
+  unchanged — its scripts and venvs stay next to `abs.sh`.
+- **The Telegram system prompt's VOICE section is now conditional on voice
+  actually being installed.** When the venvs are absent it tells the agent plainly
+  that voice isn't set up and to point the user at `abs voice setup`, instead of
+  asserting a working pipeline and sending the agent down dead paths.
+
 ## [2.5.1] — 2026-07-20
 
 ### Fixed

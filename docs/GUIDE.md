@@ -63,8 +63,20 @@ Lower `--cfg` slows delivery, which pairs well with a high `--exag`.
 
 ### Setting up voice
 
-Voice is optional — everything else works without it. It needs
-[`uv`](https://docs.astral.sh/uv/) and `ffmpeg`.
+Voice is optional — everything else works without it. The installer offers to
+set it up, and you can (re)run it any time:
+
+```sh
+abs voice setup      # installs uv if needed, builds both venvs, fetches the scripts
+abs voice status     # green/red check of every piece (scripts, venvs, ffmpeg, uv)
+```
+
+It needs `ffmpeg` (name it yourself — `sudo apt install ffmpeg` / `brew install
+ffmpeg`); everything else, including [`uv`](https://docs.astral.sh/uv/) and the
+two Python versions, `abs voice setup` handles. For an installed `abs` the engines
+live in `~/.abs/voice`; in a dev checkout they sit beside `abs.sh`.
+
+Under the hood it's just two `uv` environments — the same thing by hand:
 
 ```sh
 uv venv .venv     --python 3.13 && VIRTUAL_ENV=.venv     uv pip install faster-whisper
