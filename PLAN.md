@@ -518,6 +518,19 @@ in the start confirmation. Attach/detach/kill ladder all work identically.
 - **Critique gate:** re-run the hostile-reviewer walkthrough including container escape
   surface; document the R6 token-staleness observation plan.
 
+> **BUILT** (see `docs/v3/critique/3.2.md`). A sandbox is a real ABS session target:
+> the engine pane runs `docker exec -it absd-sbx-<name> absd-session <profile> …`, so
+> claude runs INSIDE the box and the plugin polls from there. **Liveness adaptation:**
+> a sandbox session's pid is container-namespace (host can't `kill -0`), so the daemon
+> uses the ENGINE PANE ONLY (the marker records `sandbox: <name>`; FIX-C host-pid
+> clobber is skipped; recovery uses the pane). The CONTAINER survives session end
+> (reclaim kills only the engine pane; `abs sandbox stop|destroy` is separate). Flow:
+> "🏖 Sandbox…" project entry → picker (existing + New) → mode → handoff. Terminal:
+> `abs start sandbox [name]` (writes host session.pid = the docker-exec-client pid so
+> the daemon yields). Image bumped v1→v2 (bun for the plugin's MCP server + the
+> `absd-session` launcher). Same-bot creds only; dedicated-bot for untrusted work is
+> a later stage.
+
 ## 10. Global testing & critique protocol
 
 - **Never test against real Telegram/Anthropic in automated tests** (fakes from 0.3).
