@@ -643,6 +643,40 @@ write_state() {
   chmod 600 "$tmp"; mv -f "$tmp" "$ABS_STATE"
 }
 
+# Like write_state, plus the restricted-assistant markers the daemon reads to run
+# keep-alive instead of idle-polling (Stage 3): restricted/model/sandbox/keep_alive.
+write_restricted_state() {
+  local uid="$1" cid="$2" username="$3" sandbox="$4" tmp
+  mkdir -p "$ABS_DIR"
+  chmod 700 "$ABS_HOME" "$PROFILES_DIR" "$ABS_DIR"
+  tmp="$(mktemp "$ABS_DIR/rc.XXXXXX")"
+  jq -n --arg u "$uid" --arg c "$cid" --arg b "$username" --arg d "$TG_DIR" --arg s "$sandbox" \
+    '{user_id:$u, chat_id:$c, bot:$b, quiet:false, default_quiet:false, tg_dir:$d,
+      restricted:true, model:"haiku", sandbox:$s, keep_alive:true}' > "$tmp"
+  chmod 600 "$tmp"; mv -f "$tmp" "$ABS_STATE"
+}
+
+# Resolve the trusted PIN-relay profile (an existing paired bot) and read its token +
+# chat into RELAY_* globals. MUTATES PROFILE/TG_* (use_profile switches to the relay
+# profile) — the caller MUST use_profile its real target afterward. RELAY_TOKEN stays
+# empty when there is no usable trusted profile (then the PIN is terminal-only).
+# Shared by `abs start new-bot` and `abs restricted create` (Stage 2/3 provisioning).
+RELAY_TOKEN=""; RELAY_CID=""; RELAY_BOT=""
+_resolve_relay_target() {
+  RELAY_TOKEN=""; RELAY_CID=""; RELAY_BOT=""
+  local root py relay_prof
+  root="$(dirname "$SCRIPT_PATH")"; py="$root/.venv/bin/python"
+  [ -x "$py" ] || return 0
+  relay_prof="$(env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.newbot relay-target --abs-home "$ABS_HOME" 2>/dev/null || true)"
+  [ -n "$relay_prof" ] || return 0
+  use_profile "$relay_prof"
+  if load_token; then
+    RELAY_TOKEN="$BOT_TOKEN"
+    RELAY_CID="$(state_get '.chat_id')"; [ "$RELAY_CID" = "null" ] && RELAY_CID=""
+    RELAY_BOT="$(state_get '.bot')"; [ "$RELAY_BOT" = "null" ] && RELAY_BOT=""
+  fi
+}
+
 cmd_setup() {
   need_deps
   assert_no_live_session
@@ -2693,19 +2727,11 @@ cmd_new_bot() {
   py="$root/.venv/bin/python"
   if [ ! -x "$py" ] || [ ! -d "$root/absd" ]; then die "abs start new-bot needs $root/.venv (Python 3.11+)."; fi
 
-  # Resolve the trusted relay target (an existing paired bot) and read its token +
-  # chat NOW, while globals still point at it — before read_new_token overwrites
-  # BOT_TOKEN with the new bot's. No trusted profile → terminal-only PIN display.
-  local relay_prof="" relay_token="" relay_cid="" relay_bot=""
-  relay_prof="$(env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.newbot relay-target --abs-home "$ABS_HOME" 2>/dev/null || true)"
-  if [ -n "$relay_prof" ]; then
-    use_profile "$relay_prof"
-    if load_token; then
-      relay_token="$BOT_TOKEN"
-      relay_cid="$(state_get '.chat_id')"; [ "$relay_cid" = "null" ] && relay_cid=""
-      relay_bot="$(state_get '.bot')"; [ "$relay_bot" = "null" ] && relay_bot=""
-    fi
-  fi
+  # Resolve the trusted relay target (an existing paired bot) into RELAY_* globals
+  # NOW, while globals still point at it — before read_new_token overwrites BOT_TOKEN
+  # with the new bot's. No trusted profile → terminal-only PIN display.
+  _resolve_relay_target
+  local relay_token="$RELAY_TOKEN" relay_cid="$RELAY_CID" relay_bot="$RELAY_BOT"
 
   step "Add a new bot"
   print_token_instructions
@@ -2770,6 +2796,156 @@ cmd_start() {
     sandbox) _start_sandbox "$@" ;;
     new-bot) cmd_new_bot "$@" ;;
     *) die "Usage: abs start {sandbox [name] | new-bot}" ;;
+  esac
+}
+
+# --- restricted assistant (Stage 3) ------------------------------------------
+#
+# A restricted assistant is a locked-down helper bot: its OWN dedicated sandbox with
+# a SEPARATE login (no host ~/.claude copied), Haiku, and a system prompt that refuses
+# to build/run code and disclaims session control. The daemon keeps its in-box session
+# alive (relaunch on death). Session control (start/stop/destroy) is operator-only,
+# here at the terminal — the bot's users cannot drive it.
+
+_restricted_py() {
+  # Echoes the venv python; dies if the v3 stack isn't installed.
+  local root py
+  root="$(dirname "$SCRIPT_PATH")"; py="$root/.venv/bin/python"
+  if [ ! -x "$py" ] || [ ! -d "$root/absd" ]; then
+    die "abs restricted needs $root/.venv (Python 3.11+)."
+  fi
+  printf '%s' "$py"
+}
+
+# abs restricted create <name> — dedicated no-creds sandbox + a provisioned bot +
+# the restricted profile markers. Does NOT launch: the daemon keep-alive takes over
+# once the box is logged in (abs restricted login).
+cmd_restricted_create() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "Usage: abs restricted create <name>"
+  [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || die "Bad name: '$name' (letters, digits, - and _ only)."
+  need_deps
+  assert_no_live_session
+  ensure_plugin
+  [ -t 0 ] || die "abs restricted create is interactive — run it at a terminal."
+  command -v docker >/dev/null 2>&1 || die "abs restricted create needs Docker."
+  profile_exists "$name" && die "A profile named '$name' already exists."
+
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+
+  # 1) dedicated sandbox, NO host credentials copied (separate login inside the box).
+  step "Creating the dedicated sandbox '$name' (no host credentials)…"
+  env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox create "$name" --no-creds \
+    || die "Couldn't create the sandbox. Build the image first: abs sandbox build"
+
+  # 2) provision a bot for it (terminal token → PIN relayed to your phone → pair),
+  # reusing the stage-2 pieces. Relay resolved before read_new_token overwrites BOT_*.
+  _resolve_relay_target
+  local relay_token="$RELAY_TOKEN" relay_cid="$RELAY_CID" relay_bot="$RELAY_BOT"
+
+  step "Add a bot for the restricted assistant '$name'"
+  print_token_instructions
+  read_new_token                               # sets BOT_TOKEN + BOT_USERNAME
+
+  use_profile "$name"
+  save_token
+
+  if [ -n "$relay_token" ] && [ -n "$relay_cid" ]; then
+    info "${c_dim}A pairing PIN will also be sent to your phone via @${relay_bot}.${c_reset}"
+  else
+    info "${c_dim}No trusted bot to relay through — the PIN will be shown here only.${c_reset}"
+  fi
+  do_pairing "$BOT_USERNAME" "$relay_token" "$relay_cid" "$relay_bot"
+
+  write_access "$PAIR_UID"
+  write_restricted_state "$PAIR_UID" "$PAIR_CID" "$BOT_USERNAME" "$name"
+
+  tg_send "$PAIR_CID" "Restricted assistant paired ✅
+
+I'm a limited helper — I can answer questions, look things up, and manage your notes, but I can't build software or control sessions. The operator manages me from the terminal." \
+    "$(clear_keyboard)" \
+    || warn "Paired, but the confirmation message didn't send: $TG_ERR"
+  register_commands "$PAIR_CID" || warn "Paired, but the command menu didn't register."
+
+  step "Restricted assistant '$name' ready"
+  ok "Bot @${BOT_USERNAME} → profile '$name' (Haiku, sandbox '$name', no host creds)."
+  info "Next:"
+  info "  ${c_bold}abs restricted login $name${c_reset}   log Claude in inside the box (one time)"
+  info "  ${c_dim}then the daemon keeps the assistant alive automatically.${c_reset}"
+}
+
+# abs restricted login <name> — drop the operator into an interactive claude login
+# INSIDE the box (device-code/browser). After login the daemon relaunches on its own.
+cmd_restricted_login() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "Usage: abs restricted login <name>"
+  profile_exists "$name" || die "No such restricted profile: '$name'."
+  command -v docker >/dev/null 2>&1 || die "abs restricted login needs Docker."
+  [ -t 0 ] || die "abs restricted login is interactive — run it at a terminal."
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+
+  step "Logging Claude in inside sandbox '$name'"
+  env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
+  info "${c_dim}Complete the login, then type /exit (or Ctrl-D) to leave. The daemon will bring the assistant online within ~${c_reset}${c_dim}a few seconds.${c_reset}"
+  exec docker exec -it "absd-sbx-$name" claude
+}
+
+# abs restricted list — every restricted profile + its sandbox/model/paused state.
+cmd_restricted_list() {
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.restricted list --abs-home "$ABS_HOME"
+}
+
+# abs restricted stop <name> — pause keep-alive (daemon stops relaunching) + stop the
+# box. Operator-only. abs restricted start <name> resumes.
+cmd_restricted_stop() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "Usage: abs restricted stop <name>"
+  profile_exists "$name" || die "No such restricted profile: '$name'."
+  use_profile "$name"
+  state_set '.paused = true'
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox stop "$name" >/dev/null 2>&1 || true
+  ok "Restricted assistant '$name' paused (keep-alive off) and its box stopped."
+  info "${c_dim}Resume with: abs restricted start $name${c_reset}"
+}
+
+# abs restricted start <name> — resume keep-alive + start the box. The daemon relaunches.
+cmd_restricted_start() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "Usage: abs restricted start <name>"
+  profile_exists "$name" || die "No such restricted profile: '$name'."
+  use_profile "$name"
+  state_set 'del(.paused)'
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
+  ok "Restricted assistant '$name' resumed — the daemon will bring it back online shortly."
+}
+
+# abs restricted destroy <name> — remove the sandbox + the profile. Operator-only.
+cmd_restricted_destroy() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "Usage: abs restricted destroy <name>"
+  profile_exists "$name" || die "No such restricted profile: '$name'."
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  # Pause first so the daemon stops relaunching while we tear down.
+  use_profile "$name"; state_set '.paused = true' 2>/dev/null || true
+  env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox destroy "$name" --purge >/dev/null 2>&1 || true
+  rm -rf "${PROFILES_DIR:?}/$name"
+  ok "Restricted assistant '$name' destroyed (sandbox + profile removed)."
+  info "${c_dim}The daemon drops its poller within ~60s (profile rescan). Delete the bot in @BotFather if you like.${c_reset}"
+}
+
+cmd_restricted() {
+  local what="${1:-}"; shift || true
+  case "$what" in
+    create)  cmd_restricted_create "$@" ;;
+    login)   cmd_restricted_login "$@" ;;
+    list)    cmd_restricted_list "$@" ;;
+    start)   cmd_restricted_start "$@" ;;
+    stop)    cmd_restricted_stop "$@" ;;
+    destroy) cmd_restricted_destroy "$@" ;;
+    *) die "Usage: abs restricted {create|login|list|start|stop|destroy} <name>" ;;
   esac
 }
 
@@ -3236,6 +3412,11 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
                           Docker sandbox sessions — one dedicated host folder, isolated (v3)
   ${c_bold}abs${c_reset} start sandbox [name]  Run a Claude session INSIDE a sandbox container (v3)
   ${c_bold}abs${c_reset} start new-bot        Provision a brand-new bot + profile, then launch it (v3)
+  ${c_bold}abs${c_reset} restricted create <name>  Locked-down assistant: own box, separate login,
+                          Haiku, no code-writing — daemon keeps it alive (v3)
+  ${c_bold}abs${c_reset} restricted login <name>   Log Claude in inside a restricted assistant's box
+  ${c_bold}abs${c_reset} restricted list             List restricted assistants
+  ${c_bold}abs${c_reset} restricted start|stop|destroy <name>  Resume / pause / remove one
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} version             Print the installed version
@@ -3347,6 +3528,9 @@ main() {
       # through the picker to choose an existing one first; resolve to default
       # (the guard/relay context). `abs start sandbox` still picks a profile.
       start) if [ "${2:-}" = "new-bot" ]; then use_profile default; else pick_profile; fi ;;
+      # `abs restricted …` targets a NAMED profile via its argument (the subcommand
+      # use_profile's it itself); resolve to default so the picker never fires.
+      restricted) use_profile default ;;
       *)                 pick_profile ;;
     esac
   fi
@@ -3354,6 +3538,7 @@ main() {
   case "$cmd" in
     run)       shift || true; cmd_run "$@" ;;
     start)     shift; cmd_start "$@" ;;
+    restricted) shift; cmd_restricted "$@" ;;
     setup)     cmd_setup ;;
     status)    cmd_status ;;
     profiles)  cmd_profiles ;;

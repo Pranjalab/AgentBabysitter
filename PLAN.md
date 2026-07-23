@@ -531,6 +531,42 @@ in the start confirmation. Attach/detach/kill ladder all work identically.
 > `absd-session` launcher). Same-bot creds only; dedicated-bot for untrusted work is
 > a later stage.
 
+### Stage 3 — the restricted assistant profile (final major stage)
+
+> **BUILT** (new scope; see `docs/v3/critique/restricted.md`). `abs restricted create
+> <name>` provisions a locked-down helper bot — everyday Q&A / web lookups / notes /
+> calculations, but it REFUSES to write or run project code and CANNOT start/stop
+> sessions. ONE switch (`restricted: true`) implies **four enforcement layers**:
+> (1) an injected system prompt — SOFT — with the exact refusal "This is a restricted
+> assistant — ask the operator to upgrade your profile to build projects."; (2) Haiku
+> (`model: "haiku"`); (3) a DEDICATED sandbox; (4) NO host credentials copied
+> (`abs sandbox create --no-creds`) — the box logs in SEPARATELY (`abs restricted
+> login`). **Honest:** the prompt is bypassable; the REAL containment is layers 3+4
+> (throwaway box, no host creds/files), not the prompt.
+>
+> **Closes the 3.2 in-container gap:** `absd-session` now consumes `--model` /
+> `--append-system-prompt` / `--restricted` (bundled prompt); `build_sandbox_launcher_argv`
+> grows matching options (a normal sandbox session's argv is byte-for-byte the 3.2
+> shape). Image bumped **v2 → v3** (bakes the prompt at
+> `/usr/local/share/absd/restricted-prompt.txt`; migration = `abs sandbox build
+> --rebuild`).
+>
+> **Daemon keep-alive:** a `keep_alive: true` profile is not idle-polled — the daemon
+> keeps its in-sandbox session alive (relaunch on death, `base·2^attempt` backoff),
+> pane-only liveness across the docker boundary. After `restricted_relaunch_cap`
+> consecutive fast deaths (not-logged-in / crash) it STOPS relaunching and DMs the
+> operator once ("run `abs restricted login <name>`"); a `creds_present` (`test -s`,
+> never read) pre-check short-circuits the same. Once-per-down-transition (no spam);
+> auto-recovers when the box logs in (creds absent→present resets the cap). In the
+> down-window the daemon refuses `ABS START`/`ABS EXIT` (session control is
+> operator-only) — a restricted bot can never launch a normal host session. Events:
+> `restricted_relaunch` / `restricted_login_needed`. Terminal: `abs restricted
+> create|login|list|start|stop|destroy <name>`. Tests: prompt content, launcher argv,
+> profile fields, no-creds create (mock + gated real-docker: box has no credentials),
+> backoff, and the keep-alive loop (relaunch carries haiku+restricted+box; cap →
+> login-needed + stop; once-per-transition; ABS START refused down) — no real
+> claude/telegram/login.
+
 ### Stage 2 — `abs start new-bot` (provision a bot + profile from the terminal)
 
 > **BUILT** (new scope, beyond the original plan; see `docs/v3/critique/newbot.md`).
