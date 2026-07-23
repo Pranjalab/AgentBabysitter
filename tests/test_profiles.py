@@ -114,3 +114,34 @@ def test_tg_dir_from_rc_wins(abs_home: Path) -> None:
     write_profile(abs_home, "default", tg_dir=custom)
     p = Profile.load("default", abs_home, home=Path("/home/tester"))
     assert p.tg_dir == custom  # rc.json .tg_dir, not the default fallback
+
+
+# ---- kill-ladder writes (D11): set_off / set_blocked -------------------------
+
+
+def test_set_off_writes_disabled_preserves_keys(abs_home: Path) -> None:
+    import stat as _stat
+
+    write_profile(abs_home, "default", allow_ids=[42])
+    prof = discover(abs_home, home=abs_home)[0]
+    prof.set_off()
+    access = json.loads(prof.access_path.read_text())
+    assert access["dmPolicy"] == "disabled"
+    assert access["allowFrom"] == ["42"]  # preserved
+    assert access["ackReaction"] == "👀"  # preserved
+    assert _stat.S_IMODE(prof.access_path.stat().st_mode) == 0o600
+    assert prof.is_off() is True
+
+
+def test_set_blocked_writes_true_preserves_keys(abs_home: Path) -> None:
+    import stat as _stat
+
+    write_profile(abs_home, "default", allow_ids=[42])
+    prof = discover(abs_home, home=abs_home)[0]
+    prof.set_blocked()
+    rc = json.loads(prof.rc_path.read_text())
+    assert rc["blocked"] is True
+    assert rc["bot"] == "default_bot"  # preserved
+    assert rc["tg_dir"]  # preserved
+    assert _stat.S_IMODE(prof.rc_path.stat().st_mode) == 0o600
+    assert prof.is_blocked() is True

@@ -130,6 +130,22 @@ HANDOFF_FAILED_MSG = (
     "`abs daemon logs` at the terminal."
 )
 
+# Login detection (Step 1.6). Pre-launch: credentials file absent/empty.
+LOGIN_MISSING_MSG = (
+    "⚠ Claude Code is not logged in on this machine. Please run `claude` in a "
+    "terminal and complete login, then try ABS START again."
+)
+# Post-launch: the session never came alive (failed_start) — likely a login issue.
+FAILED_START_MSG = (
+    "⚠ Session ended immediately — possible login issue. Run `claude` in a "
+    "terminal to check, then ABS START again."
+)
+
+# Kill-ladder-while-idle acks (Step 1.7 / D11).
+OFF_ACK = "📴 Inbound off. Re-enable from the terminal: abs on"
+BLOCK_ACK = "🔒 Blocked. Re-establish it deliberately from the terminal: abs setup"
+CLEAR_POOL_ACK = "🗑 Pool cleared ({n} message(s) removed)."
+
 # A resume tap whose recorded folder has since been deleted (Step 2.2 edge case).
 RECENT_GONE_MSG = "📁 That folder no longer exists — I've removed it from recents."
 
@@ -221,6 +237,21 @@ def is_pool_cmd(text: str | None) -> bool:
 
 def is_start(text: str | None) -> bool:
     return canonical_command(text) == "ABS START"
+
+
+# Kill-ladder-while-idle commands (Step 1.7 / D11). Exact whole-message,
+# case-insensitive; NO slash aliases / menu entries (destructive — deliberate
+# text-only friction).
+def is_off(text: str | None) -> bool:
+    return normalize_command(text) == "ABS OFF"
+
+
+def is_block(text: str | None) -> bool:
+    return normalize_command(text) == "ABS BLOCK"
+
+
+def is_clear_pool(text: str | None) -> bool:
+    return normalize_command(text) == "ABS CLEAR POOL"
 
 
 # ---- pure reply rendering -----------------------------------------------------
@@ -402,13 +433,18 @@ class Flow:
     """
 
     chat_id: int
-    step: str  # "recents" | "project" | "folder" | "mode"
+    step: str  # "recents" | "project" | "folder" | "mode" | "pool"
     options: list[ProjectOption]
     started_at: float
     chosen_path: str | None = None
     label: str = ""
     #: Recents offered on the "recents" step (list of RecentEntry). Empty otherwise.
     recents: list[Any] = field(default_factory=list)
+    #: The launch decision awaiting pool selection (set when entering the "pool"
+    #: step; finalized into ``_handoff_request`` once send/skip is chosen).
+    pending: "HandoffRequest | None" = None
+    #: The unforwarded pooled messages offered on the "pool" step.
+    pool_msgs: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -422,6 +458,12 @@ class HandoffRequest:
     #: True for a "▶ Resume" launch — appends ``--continue`` so claude resumes the
     #: previous conversation in that path (Step 2.2 resume-first).
     resume: bool = False
+    #: Pooled messages joined as claude's initial prompt (Step 1.7 forwarding), or
+    #: None. Delivered as one argv element via the launcher.
+    initial_prompt: str | None = None
+    #: update_ids of the forwarded pooled messages — marked forwarded_at ONLY after
+    #: create_session succeeds (D14: skip/failed launch keeps them unforwarded).
+    forward_ids: list[int] = field(default_factory=list)
 
 
 # ---- offset persistence -------------------------------------------------------
@@ -458,12 +500,19 @@ class Poller:
         session_count: Callable[[], int] | None = None,
         clock: Callable[[], float] = time.monotonic,
         events: EventLog | None = None,
+        creds_path: Path | None = None,
     ) -> None:
         self.profile = profile
         self.client = client
         self.cfg = cfg
         #: Shared structured event log (observability). None → emit is a no-op.
         self.events = events
+        #: Claude Code credentials file — presence+size checked before HANDOFF
+        #: (Step 1.6 login detection; contents NEVER read). Defaults to
+        #: ``$HOME/.claude/.credentials.json``; injectable for tests.
+        self.creds_path = creds_path or (
+            Path(os.environ.get("HOME") or Path.home()) / ".claude" / ".credentials.json"
+        )
         self.pool = Pool(profile.pool_path)
         self.state_dir = Path(state_dir)
         self.state_path = self.state_dir / f"poller-{profile.name}.json"
@@ -707,6 +756,26 @@ class Poller:
             await self._reply_pool(ex)
             return
 
+        # Kill-ladder-while-idle (Step 1.7 / D11): OFF / BLOCK stop this poller by
+        # writing the SAME state files the terminal uses (recovery is terminal-only);
+        # CLEAR POOL empties the pool. All three ack and emit a command event.
+        if is_off(ex.text):
+            self._emit(EVENT_COMMAND, name="ABS OFF")
+            self.profile.set_off()
+            await self._reply(ex, OFF_ACK)
+            return
+        if is_block(ex.text):
+            self._emit(EVENT_COMMAND, name="ABS BLOCK")
+            self.profile.set_blocked()
+            await self._reply(ex, BLOCK_ACK)
+            return
+        if is_clear_pool(ex.text):
+            self._emit(EVENT_COMMAND, name="ABS CLEAR POOL")
+            n = self.pool.count()
+            self.pool.clear()
+            await self._reply(ex, CLEAR_POOL_ACK.format(n=n))
+            return
+
         # Everything else pools (D14). Dedupe on update_id (crash re-delivery).
         if ex.update_id in pooled_ids:
             log.debug(
@@ -932,6 +1001,40 @@ class Poller:
             reply_markup=flow_mod.build_mode_keyboard(),
         )
 
+    def _credentials_present(self) -> bool:
+        """Login precheck (Step 1.6): the credentials file exists and is non-empty.
+        PRESENCE + SIZE ONLY via ``stat`` — the file is NEVER opened for read, so
+        no credential content is ever read or logged."""
+        try:
+            return self.creds_path.stat().st_size > 0
+        except OSError:
+            return False
+
+    async def _finalize_or_pool(
+        self, flow: Flow, project_path: str, label: str, away: bool, resume: bool
+    ) -> None:
+        """Finalize a launch decision — but if the pool has unforwarded messages,
+        first run the pool-selection step (Step 1.7 CORRECTION 1: selection is a
+        FLOW step BEFORE handoff, since after handoff the plugin owns the token and
+        the user's replies would go to the session, not the daemon)."""
+        decision = HandoffRequest(
+            chat_id=flow.chat_id, project_path=project_path, label=label,
+            away=away, resume=resume,
+        )
+        unforwarded = self.pool.unforwarded()
+        if unforwarded:
+            flow.pending = decision
+            flow.pool_msgs = unforwarded
+            flow.step = "pool"
+            await self.client.send_message(
+                flow.chat_id,
+                flow_mod.render_pool_selection([m.text for m in unforwarded]),
+                reply_markup=flow_mod.build_pool_keyboard(),
+            )
+            return
+        self._handoff_request = decision
+        self.flow = None
+
     async def _advance_flow(self, ex: Extracted) -> None:
         """Drive one step of the active flow from an update (callback or text)."""
         flow = self.flow
@@ -978,14 +1081,10 @@ class Poller:
                 )
                 return
             # One-tap resume: skip project + mode, use the recorded mode, --continue.
-            self._handoff_request = HandoffRequest(
-                chat_id=flow.chat_id,
-                project_path=entry.path,
-                label=entry.label,
-                away=(entry.mode == "away"),
-                resume=True,
+            # Pool-selection may still run before the actual handoff.
+            await self._finalize_or_pool(
+                flow, entry.path, entry.label, away=(entry.mode == "away"), resume=True
             )
-            self.flow = None
             return
 
         if flow.step == "project":
@@ -1053,15 +1152,44 @@ class Poller:
                     reply_markup=flow_mod.build_mode_keyboard(),
                 )
                 return
-            # Flow complete: record the decision and clear the flow. The actual
-            # HANDOFF (offset commit → marker → launch → confirm) runs in poll_once
-            # right after this batch, so it happens outside the poll (PLAN.md 4.1).
-            self._handoff_request = HandoffRequest(
-                chat_id=flow.chat_id,
-                project_path=flow.chosen_path or "",
-                label=flow.label or Path(flow.chosen_path or "").name,
+            # Mode chosen — finalize (or run the pool-selection step first). The
+            # actual HANDOFF runs in poll_once right after this batch (PLAN.md 4.1).
+            await self._finalize_or_pool(
+                flow,
+                flow.chosen_path or "",
+                flow.label or Path(flow.chosen_path or "").name,
                 away=(mode == flow_mod.MODE_AWAY),
+                resume=False,
             )
+            return
+
+        if flow.step == "pool":
+            choice = flow_mod.parse_pool_choice(data, text, len(flow.pool_msgs))
+            await self._answer_if_callback(ex)
+            if choice is None:
+                await self.client.send_message(
+                    flow.chat_id,
+                    "Reply `send all`, `send 1,3`, or `skip` (or tap a button).",
+                )
+                return
+            decision = flow.pending
+            assert decision is not None
+            if choice == "skip":
+                selected: list[Any] = []
+            elif choice == "all":
+                selected = list(flow.pool_msgs)
+            else:  # list of 1-based indices
+                selected = [
+                    flow.pool_msgs[i - 1]
+                    for i in choice
+                    if 1 <= i <= len(flow.pool_msgs)
+                ]
+            if selected:
+                decision.initial_prompt = flow_mod.build_offline_prompt(
+                    [m.text for m in selected]
+                )
+                decision.forward_ids = [m.update_id for m in selected]
+            self._handoff_request = decision
             self.flow = None
             return
 
@@ -1152,6 +1280,18 @@ class Poller:
         if req is None:
             return
 
+        # (1a) Login precheck (Step 1.6), immediately before HANDOFF: the Claude
+        # Code credentials file must exist and be non-empty (presence only — never
+        # read). Missing → do NOT launch; tell the user to log in. The flow is
+        # already complete, so we just abort cleanly (nothing started, nothing to
+        # mark forwarded — D14 keeps the pool).
+        if not self._credentials_present():
+            log.warning("poller[%s] login precheck failed — not launching", self.profile.name)
+            self._emit(EVENT_ERROR, level="error", where="login_precheck")
+            if req.chat_id is not None:
+                await self._safe_send(req.chat_id, LOGIN_MISSING_MSG)
+            return
+
         # (2) single final offset commit.
         if self.offset is not None:
             try:
@@ -1194,6 +1334,12 @@ class Poller:
             pane_id=handle.pane_id, launcher_pid=handle.pid,
         )
         self._emit(EVENT_SESSION_START, pane_id=handle.pane_id, pid=handle.pid)
+
+        # Mark forwarded pooled messages as delivered — ONLY now that the session
+        # was created with them as its initial prompt (D14: a skip or a failed
+        # launch never reaches here, so those stay unforwarded, kept in the pool).
+        if req.forward_ids:
+            self.pool.mark_forwarded(req.forward_ids)
 
         # (5) confirmation. The attach hint is the SAFE wrapper `abs attach` — it
         # resolves the owning engine and re-checks liveness before attaching, so it
@@ -1238,7 +1384,8 @@ class Poller:
         if self.engine is None:
             raise EngineError("no session engine configured")
         argv = flow_mod.build_launcher_argv(
-            self._script_path(), self.profile.name, req.away, resume=req.resume
+            self._script_path(), self.profile.name, req.away,
+            resume=req.resume, initial_prompt=req.initial_prompt,
         )
         env = {"ABS_HOME": str(self.profile.abs_home)}
         return self.engine.create_session(
@@ -1520,8 +1667,15 @@ class Poller:
             return
         self._clear_handoff_marker()
         if self._handoff_chat_id is not None:
+            # A session that never came alive (failed_start) most likely hit a login
+            # issue (Step 1.6b) — say so instead of the generic "session ended".
+            note = (
+                FAILED_START_MSG
+                if self._session_end_reason == END_FAILED_START
+                else SESSION_ENDED_MSG
+            )
             try:
-                await self.client.send_message(self._handoff_chat_id, SESSION_ENDED_MSG)
+                await self.client.send_message(self._handoff_chat_id, note)
             except TelegramError:
                 pass
         self._emit(EVENT_RECLAIM_DONE, backoff_409s=self._reclaim_409s)

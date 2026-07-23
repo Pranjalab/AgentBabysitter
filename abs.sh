@@ -2720,6 +2720,11 @@ cmd_run() {
   local cont_args=()
   [ "${MENU_CONTINUE:-0}" = "1" ] && cont_args=(--continue)
 
+  # Pool forwarding (v3): the daemon's --prompt value becomes claude's initial
+  # positional prompt (one argv element — quotes/newlines/emoji preserved).
+  local prompt_args=()
+  [ -n "${ABS_INITIAL_PROMPT:-}" ] && prompt_args=("$ABS_INITIAL_PROMPT")
+
   # `exec` keeps this PID, so $$ recorded now IS the claude session's PID — that's
   # what `abs exit` (the ABS EXIT kill-ladder rung) signals. Clear the stale
   # per-turn origin, but NOT `.blocked` — a BLOCK must survive a restart and only
@@ -2735,7 +2740,8 @@ cmd_run() {
     ${model_args[@]+"${model_args[@]}"} \
     ${perm_args[@]+"${perm_args[@]}"} \
     ${cont_args[@]+"${cont_args[@]}"} \
-    "$@"
+    "$@" \
+    ${prompt_args[@]+"${prompt_args[@]}"}
 }
 
 # `abs daemon` — control surface for the v3 always-on daemon (absd): the
@@ -2971,6 +2977,11 @@ main() {
       # top recent. Both are no-ops when there is no menu (non-TTY / no recents).
       --new)       ABS_START_MENU_BYPASS=new; shift ;;
       --resume)    ABS_START_MENU_BYPASS=resume; shift ;;
+      # v3 pool forwarding: the daemon passes the pooled messages as one --prompt
+      # value; cmd_run re-emits it as claude's initial positional prompt. A flag
+      # (not a bare positional) so abs.sh's dispatch never reads it as a command.
+      --prompt)    ABS_INITIAL_PROMPT="${2:-}"; shift 2 ;;
+      --prompt=*)  ABS_INITIAL_PROMPT="${1#*=}"; shift ;;
       *)           args+=("$1"); shift ;;
     esac
   done

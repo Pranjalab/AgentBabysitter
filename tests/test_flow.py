@@ -177,6 +177,50 @@ def test_build_launcher_argv_resume_appends_continue() -> None:
     assert "--away" in both and both[-1] == "--continue"
 
 
+def test_build_launcher_argv_initial_prompt_one_element() -> None:
+    tricky = 'say "hi"\nline2 🎉'
+    argv = flow.build_launcher_argv(
+        "/opt/abs.sh", "work", away=False, resume=True, initial_prompt=tricky
+    )
+    assert argv[-2] == "--prompt"
+    assert argv[-1] == tricky  # exact, ONE element (quotes/newline/emoji intact)
+    assert "--continue" in argv
+    # no prompt when None
+    assert "--prompt" not in flow.build_launcher_argv("/opt/abs.sh", "w", away=False)
+
+
+def test_build_offline_prompt() -> None:
+    p = flow.build_offline_prompt(["a", "b"])
+    assert p == flow.OFFLINE_PROMPT_PREFIX + "\na\nb"
+
+
+def test_parse_pool_choice() -> None:
+    # callbacks
+    assert flow.parse_pool_choice(flow.CB_POOL_ALL, "", 3) == "all"
+    assert flow.parse_pool_choice(flow.CB_POOL_SKIP, "", 3) == "skip"
+    assert flow.parse_pool_choice("garbage", "", 3) is None
+    # text
+    assert flow.parse_pool_choice(None, "send all", 3) == "all"
+    assert flow.parse_pool_choice(None, "all", 3) == "all"
+    assert flow.parse_pool_choice(None, "skip", 3) == "skip"
+    assert flow.parse_pool_choice(None, "send 1,3", 3) == [1, 3]
+    assert flow.parse_pool_choice(None, "1, 3", 3) == [1, 3]
+    assert flow.parse_pool_choice(None, "send 3,1,3", 3) == [1, 3]  # dedup + sort
+    assert flow.parse_pool_choice(None, "send 9", 3) is None  # out of range → none
+    assert flow.parse_pool_choice(None, "nope", 3) is None
+    assert flow.parse_pool_choice(None, "", 3) is None
+
+
+def test_pool_keyboard_and_render() -> None:
+    kb = flow.build_pool_keyboard()
+    datas = [b["callback_data"] for b in kb["inline_keyboard"][0]]
+    assert datas == [flow.CB_POOL_ALL, flow.CB_POOL_SKIP]
+    out = flow.render_pool_selection(["hello", "x" * 100])
+    assert "2 pooled message(s) waiting" in out
+    assert "1. hello" in out
+    assert "…" in out  # long line truncated to 60
+
+
 # ---- resume-first recents screen (Step 2.2) ----------------------------------
 
 

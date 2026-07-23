@@ -93,6 +93,7 @@ def make_poller(
     clock=None,
     script_path: str = "/opt/abs.sh",
     events=None,
+    creds_path=None,
     **cfg_kw,
 ) -> Poller:
     prof = discover(abs_home, home=abs_home)[0]
@@ -104,6 +105,12 @@ def make_poller(
         workspace_root=workspace_root,
         **cfg_kw,
     )
+    # Hermetic login precheck: default to a PRESENT credentials file under the temp
+    # ABS_HOME so handoff tests never depend on the real ~/.claude (login-detection
+    # tests pass their own missing/empty creds_path).
+    if creds_path is None:
+        creds_path = abs_home / ".creds.json"
+        creds_path.write_text("{}")
     kwargs = {}
     if clock is not None:
         kwargs["clock"] = clock
@@ -115,6 +122,7 @@ def make_poller(
         engine=engine,
         script_path=script_path,
         events=events,
+        creds_path=creds_path,
         **kwargs,
     )
 

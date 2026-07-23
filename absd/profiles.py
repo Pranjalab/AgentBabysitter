@@ -141,6 +141,43 @@ class Profile:
     def pool_path(self) -> Path:
         return self.profile_dir / "pool.jsonl"
 
+    # ---- kill-ladder writes (D11 — the ONLY writes the daemon makes to a
+    # ---- profile's own state; everything else here is read-only) ---------
+    #
+    # ``ABS OFF`` / ``ABS BLOCK`` from Telegram while unattended (Step 1.7) act on
+    # the SAME files/fields the terminal uses, so recovery is the same terminal
+    # path (``abs on`` / ``abs setup``). Both writes are atomic (temp + replace,
+    # 0600) and MERGE — they touch exactly one field and preserve every other key
+    # (access.json is the plugin's file; rc.json carries fields we don't model).
+    # This is D11-sanctioned (kill ladder extends to the daemon); it never changes
+    # the ALLOWLIST (5.3) — only the off/blocked flags.
+
+    def _merge_json(self, path: Path, updates: dict) -> None:
+        data = _read_json(path) or {}
+        data.update(updates)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, (json.dumps(data) + "\n").encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(tmp), str(path))
+        os.chmod(path, 0o600)
+
+    def set_off(self) -> None:
+        """``ABS OFF``: mirror abs.sh ``set_policy disabled`` — ``dmPolicy`` in
+        access.json goes to ``"disabled"``; :meth:`is_off` then stops polling.
+        Re-enabled only from the terminal (``abs on``)."""
+        self._merge_json(self.access_path, {"dmPolicy": "disabled"})
+
+    def set_blocked(self) -> None:
+        """``ABS BLOCK``: mirror ``_hook_control`` — ``.blocked = true`` in rc.json;
+        :meth:`is_blocked` then stops polling. Cleared only by a deliberate
+        terminal ``abs setup`` (``abs on`` refuses while blocked)."""
+        self._merge_json(self.rc_path, {"blocked": True})
+
     # ---- dynamic state (re-read on demand) -------------------------------
 
     def load_token(self) -> str | None:

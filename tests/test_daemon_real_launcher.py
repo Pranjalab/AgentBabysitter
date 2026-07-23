@@ -433,3 +433,26 @@ def test_interactive_menu_resume_via_pty(tmp_path: Path, stub_bin: Path) -> None
     assert cwd_file.exists(), out.decode(errors="replace")
     assert cwd_file.read_text().strip() == str(recent.resolve())
     assert "--continue" in argv_file.read_text()
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+def test_daemon_start_prompt_forwarded_to_claude(tmp_path: Path, stub_bin: Path) -> None:
+    # abs.sh --prompt <text> reaches claude as its initial positional prompt, ONE
+    # element (quotes/newline/emoji intact) — the pool-forwarding delivery path.
+    home = tmp_path / "home"; home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    _dump_stub(stub_bin)
+    argv_file = tmp_path / "argv"
+    prompt = 'Messages received while you were offline:\nrun the "big" one 🎉 & <x>'
+
+    proc = subprocess.run(
+        ["bash", str(ABS_SH), "--profile", "default", "--daemon-start", "--prompt", prompt],
+        env=_env(abs_home, home, stub_bin, FAKE_CLAUDE_ARGV_FILE=str(argv_file)),
+        capture_output=True, text=True, timeout=30, cwd=str(tmp_path),
+    )
+    _no_leftover_launcher()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    argv = argv_file.read_text()
+    assert prompt in argv  # the full prompt (incl. its newline) reached claude
+    assert "--channels" in argv  # normal launch, prompt appended as a positional

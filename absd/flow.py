@@ -257,23 +257,121 @@ def safe_join_under_root(root: Path, name: str) -> Path | None:
 
 
 def build_launcher_argv(
-    script_path: str, profile: str, away: bool, resume: bool = False
+    script_path: str,
+    profile: str,
+    away: bool,
+    resume: bool = False,
+    initial_prompt: str | None = None,
 ) -> list[str]:
     """The exact launcher the engine runs (PLAN.md 4.2): reuse ``abs.sh`` via
-    ``bash <SCRIPT_PATH> --profile <p> --daemon-start [--away] [--continue]`` —
-    never a Python reimplementation of the launcher.
+    ``bash <SCRIPT_PATH> --profile <p> --daemon-start [--away] [--continue]
+    [--prompt <text>]`` — never a Python reimplementation of the launcher.
 
     ``resume`` appends ``--continue``. ``abs.sh``'s arg parser treats
-    ``--profile``/``--daemon-start``/``--away`` as its own global flags and
-    forwards everything else (here, ``--continue``) straight to ``claude``, so
-    ``--continue`` resumes the most recent conversation in the launch cwd (claude's
-    own semantics; a cwd with no prior conversation just starts fresh)."""
+    ``--profile``/``--daemon-start``/``--away``/``--prompt`` as its own global
+    flags; ``--continue`` and the ``--prompt`` VALUE reach ``claude`` (the value as
+    claude's initial positional prompt). ``initial_prompt`` is passed as ONE argv
+    element (``--prompt`` + the text) — no shell rejoining — so quotes, newlines and
+    emoji survive intact through the engine command path (Step 1.7 pool forwarding).
+
+    Why ``--prompt <text>`` and not a bare positional: a bare trailing positional
+    (``bash abs.sh … "text"``) would be read by ``abs.sh``'s dispatch as an unknown
+    *command* and die; the flag routes cleanly, and ``cmd_run`` re-emits the value
+    as claude's initial positional prompt."""
     argv = ["bash", script_path, "--profile", profile, "--daemon-start"]
     if away:
         argv.append("--away")
     if resume:
         argv.append("--continue")
+    if initial_prompt:
+        argv += ["--prompt", initial_prompt]
     return argv
+
+
+# --------------------------------------------------------------------------- #
+# Pool forwarding selection (Step 1.7, before HANDOFF)
+# --------------------------------------------------------------------------- #
+
+# Callback data for the pool-selection step.
+CB_POOL_ALL = "as:pool:all"
+CB_POOL_SKIP = "as:pool:skip"
+
+# Preview truncation for the pool-selection screen.
+POOL_PREVIEW_TRUNC = 60
+
+# Prefix for the forwarded messages delivered as claude's initial prompt.
+OFFLINE_PROMPT_PREFIX = "Messages received while you were offline:"
+
+
+def build_pool_keyboard() -> dict[str, Any]:
+    """Inline keyboard for the pool-selection step: Send all / Skip."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📤 Send all", "callback_data": CB_POOL_ALL},
+                {"text": "🙈 Skip", "callback_data": CB_POOL_SKIP},
+            ]
+        ]
+    }
+
+
+def _truncate(text: str, limit: int = POOL_PREVIEW_TRUNC) -> str:
+    text = (text or "").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def render_pool_selection(texts: list[str]) -> str:
+    """The pool-selection prompt: numbered, truncated previews of the unforwarded
+    messages, with the send/skip guidance (keyboard + numbered-text fallback)."""
+    lines = [f"📨 {len(texts)} pooled message(s) waiting:"]
+    for i, t in enumerate(texts, start=1):
+        lines.append(f"{i}. {_truncate(t)}")
+    lines.append("")
+    lines.append("Tap 📤 Send all / 🙈 Skip — or reply `send all`, `send 1,3`, or `skip`.")
+    return "\n".join(lines)
+
+
+def parse_pool_choice(
+    data: str | None, text: str, count: int
+) -> "str | list[int] | None":
+    """Resolve a pool-selection input. Returns ``"all"``, ``"skip"``, a list of
+    1-based indices to send (deduped, in range, sorted), or ``None`` if it selects
+    nothing (re-prompt).
+
+    Callback: ``as:pool:all`` / ``as:pool:skip``. Text: ``send all`` / ``skip`` /
+    ``send 1,3`` (also bare ``1,3``)."""
+    if data:
+        if data == CB_POOL_ALL:
+            return "all"
+        if data == CB_POOL_SKIP:
+            return "skip"
+        return None
+    norm = (text or "").strip().lower()
+    if not norm:
+        return None
+    if norm in ("skip", "none"):
+        return "skip"
+    if norm in ("send all", "all"):
+        return "all"
+    body = norm[len("send"):].strip() if norm.startswith("send") else norm
+    picks: set[int] = set()
+    for part in body.replace(" ", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit():
+            return None
+        n = int(part)
+        if 1 <= n <= count:
+            picks.add(n)
+    return sorted(picks) if picks else None
+
+
+def build_offline_prompt(texts: list[str]) -> str:
+    """Join selected pooled texts into claude's initial prompt (one string)."""
+    return OFFLINE_PROMPT_PREFIX + "\n" + "\n".join(texts)
 
 
 # --------------------------------------------------------------------------- #
