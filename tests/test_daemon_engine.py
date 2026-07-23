@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -137,3 +138,60 @@ async def test_handoff_launches_real_session_then_reclaim_detects_death(
         assert _wait_until(lambda: poller._session_dead()), "death must reconcile both signals"
     finally:
         engine.kill(profile_name)
+
+
+async def test_reclaim_tears_down_leftover_engine_session(
+    engine, abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    # BUG 1: when the launched command exits, a herdr session's pane shell survives
+    # and the session stays "running" — so the NEXT handoff fails "already running".
+    # RECLAIM must engine.kill() it. Proven on BOTH engines with the stub launcher.
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    Registry(abs_home / "daemon" / "registry.json").add(proj)
+
+    prof = discover(abs_home, home=abs_home)[0]
+    client = client_factory(prof.load_token())
+    cfg = DaemonConfig(poll_timeout_s=0, workspace_root="")
+    poller = Poller(
+        prof, client, cfg, state_dir=abs_home / "daemon",
+        engine=engine, script_path=str(STUB),
+    )
+    name = prof.name
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:p:0", from_id=42, chat_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:m:n", from_id=42, chat_id=42)
+    await poller.poll_once()
+    assert poller.session_state == STATE_SESSION_LIVE
+
+    try:
+        assert _wait_until(lambda: engine.is_alive(name))
+        assert await poller.watch_once() is True  # observed alive
+        # Simulate the launched command (claude) exiting on its own.
+        pid = prof.live_session_pid()
+        assert pid is not None
+        os.kill(pid, signal.SIGTERM)
+        assert _wait_until(lambda: poller._session_dead())
+        assert await poller.watch_once() is False  # → RECLAIM
+
+        async def _rec(_d: float) -> None:
+            pass
+
+        await poller.reclaim(sleep=_rec)
+
+        # RECLAIM killed the engine session, so the profile no longer lingers and
+        # a fresh create for the same profile succeeds (the next-handoff case).
+        assert _wait_until(
+            lambda: name not in {s.profile for s in engine.list_sessions()}
+        ), "reclaim must remove the leftover engine session"
+        engine.create_session(
+            name, proj, [str(STUB), "--profile", name, "--daemon-start"],
+            {"ABS_HOME": str(abs_home)},
+        )
+        assert _wait_until(lambda: engine.is_alive(name)), "next start must succeed"
+    finally:
+        engine.kill(name)

@@ -88,16 +88,29 @@ NO_PROJECTS_MSG = (
     "or set a workspace root:\n"
     "  abs config workspace-root <dir>"
 )
-# The HANDOFF confirmation (Step 1.5). Attach hint per the plan.
+# The HANDOFF confirmation (Step 1.5). Includes the EXACT attach command for the
+# engine that was used (from engine.attach_command) — a generic "abs attach" left
+# the human unable to reach the running session (live-demo finding).
 HANDOFF_CONFIRM = (
     "🚀 Started {label} ({mode}).\n"
     "Send it a task here, or attach at the terminal:\n"
-    "  abs attach {profile}"
+    "  abs attach {profile}\n"
+    "  {attach_cmd}"
 )
 # Sent AFTER reclaim completes (PLAN.md 4.1 — only after the token is free again).
 SESSION_ENDED_MSG = "⏹ Session ended. I'm listening again — send ABS START to begin."
-# HANDOFF failed to launch the engine session.
-HANDOFF_FAILED_MSG = "⚠️ Couldn't start the session ({err}). Nothing is running."
+# Sent when a create collides with a stale leftover engine session and the daemon
+# self-heals (kills it + retries) — states what happened and what it's doing.
+HANDOFF_STALE_RECOVER_MSG = (
+    "♻️ Found a leftover session for this profile — cleaning it up and retrying…"
+)
+# HANDOFF failed to launch the engine session — actionable next step (live-demo
+# finding: the old "(err). Nothing is running." was contradictory + unhelpful).
+HANDOFF_FAILED_MSG = (
+    "⚠️ Couldn't start the session: {err}\n"
+    "Nothing is running now. Send ABS START to try again, or check "
+    "`abs daemon logs` at the terminal."
+)
 
 # Poller session-state machine (PLAN.md 4.1). IDLE covers both real IDLE_POLLING
 # and the terminal-launch yield (which stays IDLE and yields via should_poll);
@@ -933,41 +946,30 @@ class Poller:
         # (3) handoff marker.
         self._write_handoff_marker(req.project_path, mode, req.chat_id)
 
-        # (4) launch through the engine (never reimplement the launcher — 4.2).
-        try:
-            if self.engine is None:
-                raise EngineError("no session engine configured")
-            argv = flow_mod.build_launcher_argv(
-                self._script_path(), self.profile.name, req.away
-            )
-            env = {"ABS_HOME": str(self.profile.abs_home)}
-            self.engine.create_session(
-                self.profile.name, Path(req.project_path), argv, env
-            )
-        except Exception as exc:  # EngineError or anything the engine surfaces
-            log.error("poller[%s] handoff launch failed: %s", self.profile.name, exc)
-            self._clear_handoff_marker()
-            if req.chat_id is not None:
-                try:
-                    await self.client.send_message(
-                        req.chat_id, HANDOFF_FAILED_MSG.format(err=exc)
-                    )
-                except TelegramError:
-                    pass
+        # (4) launch through the engine (never reimplement the launcher — 4.2),
+        # self-healing over a stale leftover engine session (live-demo finding:
+        # a herdr session survives claude's exit, so the next create collided).
+        if not await self._launch_session(req):
             self.session_state = STATE_IDLE
             return
 
-        # (5) confirmation with attach hint.
-        if req.chat_id is not None:
+        # (5) confirmation with the EXACT attach command for the engine used.
+        attach_cmd = ""
+        if self.engine is not None:
             try:
-                await self.client.send_message(
-                    req.chat_id,
-                    HANDOFF_CONFIRM.format(
-                        label=req.label, mode=mode, profile=self.profile.name
-                    ),
-                )
-            except TelegramError:
-                pass
+                attach_cmd = self.engine.attach_command(self.profile.name)
+            except Exception:
+                attach_cmd = ""
+        if req.chat_id is not None:
+            await self._safe_send(
+                req.chat_id,
+                HANDOFF_CONFIRM.format(
+                    label=req.label,
+                    mode=mode,
+                    profile=self.profile.name,
+                    attach_cmd=attach_cmd,
+                ),
+            )
 
         # (6) SESSION_LIVE.
         self.session_state = STATE_SESSION_LIVE
@@ -979,6 +981,92 @@ class Poller:
             self.profile.name,
             req.project_path,
         )
+
+    async def _safe_send(self, chat_id: int, text: str) -> None:
+        """send_message that never lets a Telegram hiccup abort a handoff/reclaim."""
+        try:
+            await self.client.send_message(chat_id, text)
+        except TelegramError:
+            log.debug("poller[%s] send failed", self.profile.name)
+
+    def _create_session(self, req: HandoffRequest) -> None:
+        """Build the launcher argv/env and create the engine session (4.2)."""
+        if self.engine is None:
+            raise EngineError("no session engine configured")
+        argv = flow_mod.build_launcher_argv(
+            self._script_path(), self.profile.name, req.away
+        )
+        env = {"ABS_HOME": str(self.profile.abs_home)}
+        self.engine.create_session(
+            self.profile.name, Path(req.project_path), argv, env
+        )
+
+    async def _launch_session(self, req: HandoffRequest) -> bool:
+        """Create the session, self-healing over a stale leftover (live-demo bug).
+
+        Returns True on success. On a create failure:
+          * if a **genuinely live** session exists for this profile (live
+            ``session.pid``) — do NOT clobber it: clear the marker, point the user
+            at it with the attach hint, and abort (no retry).
+          * otherwise the collision is a **stale engine leftover** (e.g. a herdr
+            session whose pane shell outlived claude): tell the user, ``kill`` the
+            stale session, and retry the create exactly ONCE. Final failure clears
+            the marker and reports an actionable message.
+        """
+        try:
+            self._create_session(req)
+            return True
+        except Exception as exc:  # EngineError or anything the engine surfaces
+            if self.profile.live_session_pid() is not None:
+                log.warning(
+                    "poller[%s] handoff aborted — a live session already exists",
+                    self.profile.name,
+                )
+                self._clear_handoff_marker()
+                if req.chat_id is not None:
+                    await self._safe_send(
+                        req.chat_id, ALREADY_LIVE_MSG.format(profile=self.profile.name)
+                    )
+                return False
+            log.warning(
+                "poller[%s] create failed (%s); no live session — cleaning stale "
+                "engine session and retrying once",
+                self.profile.name,
+                exc,
+            )
+            if req.chat_id is not None:
+                await self._safe_send(req.chat_id, HANDOFF_STALE_RECOVER_MSG)
+            self._kill_engine_session()
+            try:
+                self._create_session(req)
+                log.info("poller[%s] handoff recovered after stale cleanup", self.profile.name)
+                return True
+            except Exception as exc2:
+                log.error(
+                    "poller[%s] handoff launch failed after self-heal: %s",
+                    self.profile.name,
+                    exc2,
+                )
+                self._clear_handoff_marker()
+                if req.chat_id is not None:
+                    await self._safe_send(
+                        req.chat_id, HANDOFF_FAILED_MSG.format(err=exc2)
+                    )
+                return False
+
+    def _kill_engine_session(self) -> None:
+        """Tear down this profile's engine session (best-effort; never raises).
+
+        Used by RECLAIM (a dead session's engine artefacts must not linger — a
+        herdr session survives its command's exit) and by handoff self-heal."""
+        if self.engine is None:
+            return
+        try:
+            self.engine.kill(self.profile.name)
+        except Exception as exc:
+            log.warning(
+                "poller[%s] engine kill failed: %s", self.profile.name, exc
+            )
 
     # ---- SESSION_LIVE / RECLAIM (PLAN.md 4.1) ----------------------------
 
@@ -1022,11 +1110,18 @@ class Poller:
         return True  # still starting up
 
     async def reclaim(self, sleep: SleepFn = asyncio.sleep) -> None:
-        """RECLAIM (PLAN.md 4.1): grace delay → probe ``getUpdates(timeout=0)`` →
-        on 409 back off (2,4,8… capped) → on success clear the marker, send the
-        'session ended' note, and resume IDLE_POLLING. The probe does NOT advance
-        the offset, so any messages that arrived after the session died are
-        re-fetched and pooled by the next IDLE poll (D14 — never lost)."""
+        """RECLAIM (PLAN.md 4.1): tear down the dead session's engine artefacts →
+        grace delay → probe ``getUpdates(timeout=0)`` → on 409 back off (2,4,8…
+        capped) → on success clear the marker, send the 'session ended' note, and
+        resume IDLE_POLLING. The probe does NOT advance the offset, so any messages
+        that arrived after the session died are re-fetched and pooled by the next
+        IDLE poll (D14 — never lost).
+
+        The engine ``kill`` up front is the live-demo fix: a herdr session's pane
+        shell survives claude's exit, so without it the session stays "running" and
+        the NEXT handoff fails with "already running". Killing here (before polling
+        resumes; errors tolerated) guarantees the next ABS START starts clean."""
+        self._kill_engine_session()
         await sleep(self.cfg.reclaim_grace_s)
         backoff: float | None = None
         while not self._stop.is_set():

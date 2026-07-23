@@ -17,12 +17,13 @@ from absd.daemon import (
     ALREADY_LIVE_MSG,
     AT_CAP_MSG,
     FLOW_EXPIRED_MSG,
-    HANDOFF_FAILED_MSG,
+    HANDOFF_STALE_RECOVER_MSG,
     SESSION_ENDED_MSG,
     STATE_IDLE,
     STATE_RECLAIM,
     STATE_SESSION_LIVE,
     Extracted,
+    HandoffRequest,
     Poller,
 )
 from absd.engines.base import EngineError, SessionInfo
@@ -40,6 +41,7 @@ class FakeEngine:
     def __init__(self, fail: bool = False) -> None:
         self.created: list[dict] = []
         self._alive: dict[str, bool] = {}
+        self.kills: list[str] = []
         self.fail = fail
 
     def available(self) -> bool:
@@ -64,6 +66,7 @@ class FakeEngine:
         return self._alive.get(profile, False)
 
     def kill(self, profile) -> None:
+        self.kills.append(profile)
         self._alive[profile] = False
 
     def attach_command(self, profile) -> str:
@@ -392,12 +395,91 @@ async def test_handoff_launch_failure_reports_and_stays_idle(
 
     assert poller.session_state == STATE_IDLE
     assert engine.created == []
-    assert HANDOFF_FAILED_MSG.split("(")[0] in fake.sent_messages[-1]["text"]
+    texts = [m["text"] for m in fake.sent_messages]
+    # self-heal was attempted (stale-recover note), then an actionable failure.
+    assert HANDOFF_STALE_RECOVER_MSG in texts
+    assert "Couldn't start the session" in texts[-1]
+    assert "abs daemon logs" in texts[-1]
     # marker cleaned up on failure
     assert not (abs_home / "profiles" / "default" / "daemon-handoff.json").exists()
 
 
+# ---- HANDOFF self-heal over a stale engine session (live-demo bug 1) ---------
+
+
+async def test_handoff_self_heals_stale_session(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    # A leftover engine session exists (create would collide) but NO genuinely live
+    # session (no session.pid). Handoff must kill the stale one and retry once.
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "p"
+    proj.mkdir()
+    engine = FakeEngine()
+    engine._alive["default"] = True  # stale leftover, but no live session.pid
+    poller = make_poller(abs_home, client_factory, engine=engine)
+    poller._handoff_request = HandoffRequest(
+        chat_id=42, project_path=str(proj), label="p", away=False
+    )
+    poller.offset = 5
+
+    await poller._do_handoff()
+
+    assert poller.session_state == STATE_SESSION_LIVE
+    assert len(engine.created) == 1  # created cleanly after self-heal
+    texts = [m["text"] for m in fake.sent_messages]
+    assert HANDOFF_STALE_RECOVER_MSG in texts  # told the user it recovered
+    assert any("Started" in t for t in texts)  # then confirmed the start
+
+
+async def test_self_heal_refuses_when_genuinely_live(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    # A create collision WITH a genuinely live session.pid must NOT self-heal
+    # (never clobber a real session): refuse with the attach hint, no retry.
+    write_profile(abs_home, allow_ids=[42], session_pid=os.getpid())
+    proj = tmp_path / "p"
+    proj.mkdir()
+    engine = FakeEngine()
+    engine._alive["default"] = True
+    poller = make_poller(abs_home, client_factory, engine=engine)
+    poller._handoff_request = HandoffRequest(
+        chat_id=42, project_path=str(proj), label="p", away=False
+    )
+    poller.offset = 5
+
+    await poller._do_handoff()
+
+    assert poller.session_state == STATE_IDLE
+    assert engine.created == []  # never created a competing session
+    texts = [m["text"] for m in fake.sent_messages]
+    assert HANDOFF_STALE_RECOVER_MSG not in texts  # no self-heal attempted
+    assert texts[-1] == ALREADY_LIVE_MSG.format(profile="default")
+
+
 # ---- RECLAIM -----------------------------------------------------------------
+
+
+async def test_reclaim_kills_engine_session(
+    abs_home: Path, fake: FakeTelegram, client_factory
+) -> None:
+    # RECLAIM must engine.kill(profile) so a stale session can't linger (bug 1).
+    write_profile(abs_home, allow_ids=[42])
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine)
+    poller.session_state = STATE_RECLAIM
+    poller._handoff_chat_id = 42
+
+    async def rec(_d: float) -> None:
+        pass
+
+    await poller.reclaim(sleep=rec)
+
+    assert "default" in engine.kills  # the leftover was torn down
+    assert poller.session_state == STATE_IDLE
+
+
+# ---- RECLAIM (session death → reclaim sequence) ------------------------------
 
 
 async def test_reclaim_on_session_death(
