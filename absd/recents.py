@@ -218,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_list = sub.add_parser("list", help="print recents for a profile")
     p_list.add_argument("--profile", required=True)
+    p_list.add_argument("--json", action="store_true", help="emit a JSON array (with humanized age)")
 
     args = parser.parse_args(argv)
     recents = _recents_for(args.abs_home)
@@ -227,8 +228,26 @@ def main(argv: list[str] | None = None) -> int:
         recents.record(args.profile, args.path, label, args.mode)
         return 0
     if args.command == "list":
-        for e in recents.list(args.profile):
-            print(f"{e.label}\t{e.mode}\t{e.path}\t{e.started_at}")
+        entries = recents.list(args.profile)
+        if args.json:
+            # Age humanized by the SAME helper the Telegram flow uses (never
+            # reimplemented in bash) so terminal + phone read identically.
+            from absd.flow import humanize_age
+
+            out = [
+                {
+                    "label": e.label,
+                    "path": e.path,
+                    "mode": e.mode,
+                    "started_at": e.started_at,
+                    "age": humanize_age(e.started_at),
+                }
+                for e in entries
+            ]
+            print(json.dumps(out))
+        else:
+            for e in entries:
+                print(f"{e.label}\t{e.mode}\t{e.path}\t{e.started_at}")
         return 0
     return 2
 

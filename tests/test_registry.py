@@ -131,3 +131,43 @@ def test_cli_workspace_root_preserves_other_config(tmp_path: Path) -> None:
     cfg = config_mod.load(cfg_path)
     assert cfg.engine == "tmux" and cfg.max_sessions == 5  # untouched
     assert cfg.workspace_root == str(ws.resolve())
+
+
+# ---- targets (registered + workspace children, for the start menus) ----------
+
+
+def test_cli_targets_json(tmp_path: Path, capsys) -> None:
+    abs_home = tmp_path / "abs"
+    (abs_home / "daemon").mkdir(parents=True)
+    # a registered project + a workspace root with two children
+    reg_proj = tmp_path / "reg"
+    reg_proj.mkdir()
+    main(["--abs-home", str(abs_home), "project", "add", str(reg_proj)])
+    ws = tmp_path / "ws"
+    (ws / "alpha").mkdir(parents=True)
+    (ws / "beta").mkdir()
+    config_mod.save(
+        abs_home / "daemon" / "config.json",
+        config_mod.DaemonConfig(workspace_root=str(ws)),
+    )
+    capsys.readouterr()
+    rc = main(["--abs-home", str(abs_home), "targets", "--json"])
+    assert rc == 0
+    rows = json.loads(capsys.readouterr().out)
+    labels = [r["label"] for r in rows]
+    assert "reg" in labels and "alpha" in labels and "beta" in labels
+    # NO new-folder sentinel in the targets list
+    assert all(r.get("path") for r in rows)
+
+
+def test_cli_targets_json_empty(tmp_path: Path, capsys) -> None:
+    abs_home = tmp_path / "abs"
+    (abs_home / "daemon").mkdir(parents=True)
+    # no registry, empty workspace root → no targets
+    config_mod.save(
+        abs_home / "daemon" / "config.json",
+        config_mod.DaemonConfig(workspace_root=""),
+    )
+    rc = main(["--abs-home", str(abs_home), "targets", "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == []

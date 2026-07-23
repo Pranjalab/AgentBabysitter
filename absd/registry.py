@@ -193,6 +193,33 @@ def _cmd_workspace_root(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_targets(args: argparse.Namespace) -> int:
+    """The start targets the ABS START flow / terminal start-menu offer: registered
+    projects + direct children of the workspace root (NO new-folder here). Reuses
+    the same enumeration the daemon uses, so terminal and Telegram agree."""
+    import json as _json
+
+    from absd import config as config_mod
+    from absd import flow as flow_mod
+
+    abs_home = Path(args.abs_home)
+    entries = [(e.path, e.label) for e in _registry_for(abs_home).read()]
+    cfg = config_mod.load(abs_home / "daemon" / "config.json")
+    root = Path(cfg.workspace_root).expanduser() if cfg.workspace_root else None
+    root = root if (root is not None and root.is_dir()) else None
+    options = [
+        o
+        for o in flow_mod.enumerate_project_options(entries, root)
+        if o.kind == "project"
+    ]
+    if args.json:
+        print(_json.dumps([{"label": o.label, "path": o.path} for o in options]))
+    else:
+        for o in options:
+            print(f"{o.label}\t{o.path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m absd.registry",
@@ -210,6 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ws = sub.add_parser("workspace-root", help="get/set the daemon workspace root")
     p_ws.add_argument("dir", nargs="?", default=None, help="new workspace root")
     p_ws.add_argument("--show", action="store_true", help="print the current value")
+
+    p_tgt = sub.add_parser("targets", help="list start targets (registered + workspace children)")
+    p_tgt.add_argument("--json", action="store_true", help="emit a JSON array")
     return parser
 
 
@@ -222,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_project(args)
     if args.command == "workspace-root":
         return _cmd_workspace_root(args)
+    if args.command == "targets":
+        return _cmd_targets(args)
     return 2
 
 

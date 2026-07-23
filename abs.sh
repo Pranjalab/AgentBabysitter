@@ -1319,6 +1319,13 @@ cmd_config() {
         "")        info "Default silent: $(state_get '.default_quiet' | sed 's/^null$/false/')" ;;
         *)         die "Usage: abs config silent on|off" ;;
       esac ;;
+    start-menu)
+      case "$val" in
+        on|true)   state_set 'del(.no_start_menu)';    ok "Start menu ON — interactive 'abs' offers resume when you have recents." ;;
+        off|false) state_set '.no_start_menu = true';  ok "Start menu OFF — 'abs' launches straight away." ;;
+        "")        info "Start menu: $([ "$(state_get '.no_start_menu')" = "true" ] && echo off || echo on)" ;;
+        *)         die "Usage: abs config start-menu on|off" ;;
+      esac ;;
     statusline)
       case "$val" in
         # Stored as the ABSENCE of a disable flag, so it's on by default even for
@@ -1402,10 +1409,11 @@ cmd_config() {
       info "  instant ack    $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)"
       info "  conversation log $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)"
       info "  command guard  $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)"
+      info "  start menu     $([ "$(state_get '.no_start_menu')" = "true" ] && echo off || echo on)"
       info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
       info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  usage-refresh <min>  |  update-check on|off  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 
@@ -2424,6 +2432,129 @@ _record_recent() {
     --profile "$PROFILE" --path "$PWD" --mode "$rmode" >/dev/null 2>&1 || true
 }
 
+# FIX A guard, extracted so it runs both BEFORE the start menu (never offer choices
+# that will fail) and again just before we write session.pid (the TOCTOU window
+# while an interactive prompt was open). Dies if a session is genuinely live.
+_guard_no_live_session() {
+  local p
+  p="$(session_live_pid)"
+  [ -n "$p" ] || return 0
+  die "Profile '$PROFILE' already has a live session (pid $p).
+  Attach with:  abs attach $PROFILE
+  Or end it:    abs --profile $PROFILE exit"
+}
+
+# Apply a chosen recent (by index) from the recents JSON: launch in its recorded
+# path with --continue and its recorded mode. A vanished folder falls back to a
+# fresh session in the current folder (mkdir is trivial at a terminal).
+_start_menu_apply() {
+  local path mode
+  path="$(printf '%s' "$1" | jq -r ".[$2].path")"
+  mode="$(printf '%s' "$1" | jq -r ".[$2].mode")"
+  if [ ! -d "$path" ]; then
+    warn "That folder no longer exists: $path — launching a new session here instead."
+    return 0
+  fi
+  START_CWD="$path"
+  MENU_CONTINUE=1
+  if [ "$mode" = "away" ]; then
+    ABS_AWAY=1
+    warn "Away mode (recorded): file edits won't prompt for approval."
+  fi
+  info "${c_dim}Resuming the previous conversation in $path${c_reset}"
+}
+
+# Second-level "Another project…" picker: registered projects + workspace-root
+# children (from the absd targets CLI). NO new-folder creation here. Picks a fresh
+# session (no --continue) in the chosen path.
+_start_menu_project() {
+  local mroot="$1" mpy="$2" tj tcount i label c p
+  tj="$(env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.registry targets --json 2>/dev/null || echo '[]')"
+  tcount="$(printf '%s' "$tj" | jq 'length' 2>/dev/null || echo 0)"
+  if [ "${tcount:-0}" -eq 0 ] 2>/dev/null; then
+    warn "No registered projects or workspace-root children. Launching here."
+    return 0
+  fi
+  step "Which project?"
+  for i in $(seq 0 $((tcount - 1))); do
+    label="$(printf '%s' "$tj" | jq -r ".[$i].label")"
+    info "  $((i + 1)). $label"
+  done
+  printf '  Choice: ' >&2
+  read -r c || c=""
+  if printf '%s' "$c" | grep -qE '^[0-9]+$' && [ "$c" -ge 1 ] && [ "$c" -le "$tcount" ]; then
+    p="$(printf '%s' "$tj" | jq -r ".[$((c - 1))].path")"
+    if [ -d "$p" ]; then
+      START_CWD="$p"; MENU_CONTINUE=0
+      info "${c_dim}New session in $p${c_reset}"
+    else
+      warn "That folder no longer exists. Launching here."
+    fi
+  else
+    warn "Not a choice — launching here."
+  fi
+}
+
+# The terminal resume-first start menu. Shown ONLY for an interactive `abs` (stdin
+# is a TTY) with recents for this profile and the menu enabled — otherwise a no-op
+# and today's straight launch is unchanged. Sets START_CWD (dir to cd into before
+# exec) + MENU_CONTINUE (1 → append --continue). Reads the choice from stdin;
+# styled like pick_profile. Recents/targets + age humanization come from the absd
+# CLIs (never reimplemented in bash). Bypass flags: --new / --resume.
+_start_menu() {
+  START_CWD=""; MENU_CONTINUE=0
+  [ "${ABS_DAEMON_START:-0}" = "1" ] && return 0        # daemon launch = no menu
+  local mroot mpy
+  mroot="$(dirname "$SCRIPT_PATH")"
+  mpy="$mroot/.venv/bin/python"
+  [ -x "$mpy" ] && [ -d "$mroot/absd" ] || return 0     # v2-only install → no menu
+
+  if [ "${ABS_START_MENU_BYPASS:-}" = "resume" ]; then
+    # --resume: skip the menu, resume the top recent (fresh in cwd if none).
+    local rj0
+    rj0="$(env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.recents list --profile "$PROFILE" --json 2>/dev/null || echo '[]')"
+    [ "$(printf '%s' "$rj0" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null \
+      && _start_menu_apply "$rj0" 0
+    return 0
+  fi
+  [ "${ABS_START_MENU_BYPASS:-}" = "new" ] && return 0  # --new: fresh in cwd
+
+  [ -t 0 ] || return 0                                  # interactive stdin only
+  [ "$(state_get '.no_start_menu')" = "true" ] && return 0
+
+  local recents_json count
+  recents_json="$(env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.recents list --profile "$PROFILE" --json 2>/dev/null || echo '[]')"
+  count="$(printf '%s' "$recents_json" | jq 'length' 2>/dev/null || echo 0)"
+  [ "${count:-0}" -gt 0 ] 2>/dev/null || return 0       # no recents → straight launch
+  [ "$count" -gt 3 ] && count=3                         # same cap as the Telegram flow
+
+  step "Start a session — profile '$PROFILE':"
+  local i label age agestr
+  for i in $(seq 0 $((count - 1))); do
+    label="$(printf '%s' "$recents_json" | jq -r ".[$i].label")"
+    age="$(printf '%s' "$recents_json" | jq -r ".[$i].age")"
+    if [ "$age" = "just now" ]; then agestr="just now"; else agestr="$age ago"; fi
+    info "  $((i + 1)). ▶ Resume $label ($agestr)"
+  done
+  local new_n=$((count + 1)) proj_n=$((count + 2))
+  info "  $new_n. 🆕 New session in this folder ($PWD)"
+  info "  $proj_n. 📁 Another project…"
+  printf '  Choice [Enter=1]: ' >&2
+  local choice; read -r choice || choice=""
+  [ -n "$choice" ] || choice=1
+
+  if [ "$choice" = "$new_n" ]; then
+    return 0                                            # fresh in cwd (today's behavior)
+  elif [ "$choice" = "$proj_n" ]; then
+    _start_menu_project "$mroot" "$mpy"
+  elif printf '%s' "$choice" | grep -qE '^[0-9]+$' && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
+    _start_menu_apply "$recents_json" $((choice - 1))
+  else
+    warn "Not a choice — launching a new session here."
+  fi
+  return 0
+}
+
 cmd_run() {
   # Remember the passthrough args (claude flags like --model opus) so an
   # update-and-relaunch can reconstruct this exact invocation. A global because
@@ -2463,6 +2594,12 @@ cmd_run() {
   Telegram permits one poller per bot. Quit that session first, or use a
   different bot:  abs --profile <name>    (see: abs profiles)"
   fi
+
+  # Resume-first start menu (v3): the FIX A live-session guard runs FIRST so we
+  # never offer choices that would fail, then the picker (interactive TTY + recents
+  # only; a no-op otherwise). It may set START_CWD / MENU_CONTINUE for the launch.
+  _guard_no_live_session
+  _start_menu
 
   # Drain any backlog before the plugin starts polling — unless setup just ran,
   # in which case pairing already consumed the getUpdates stream (and the only
@@ -2559,18 +2696,16 @@ cmd_run() {
   local hook_args=()
   [ -s "$hooks_file" ] && hook_args=(--settings "$hooks_file")
 
-  # Never overwrite a LIVE session's session.pid. A terminal launch (or a second
-  # `abs`) that clobbered it made the daemon read the original session dead and
-  # reclaim (kill) a live claude — a real incident. If a session is genuinely
-  # running for this profile, stop and point the operator at it. A stale (dead)
-  # pid file is fine: we fall through and replace it. Applies to normal AND
-  # --daemon-start launches (belt-and-suspenders; the daemon already refuses).
-  local live_sess
-  live_sess="$(session_live_pid)"
-  if [ -n "$live_sess" ]; then
-    die "Profile '$PROFILE' already has a live session (pid $live_sess).
-  Attach with:  abs attach $PROFILE
-  Or end it:    abs --profile $PROFILE exit"
+  # Never overwrite a LIVE session's session.pid (belt-and-suspenders for the TOCTOU
+  # window while an interactive prompt/menu was open). The FIX A guard is extracted;
+  # it dies with the attach hint if a session is genuinely live.
+  _guard_no_live_session
+
+  # A menu "Resume"/"Another project" choice launches claude in that recorded path:
+  # cd there before recording recents (so $PWD is right) and before exec (claude's
+  # cwd). session.pid is profile-level (absolute), so the cd never affects it.
+  if [ -n "${START_CWD:-}" ]; then
+    cd "$START_CWD" || die "Can't enter $START_CWD"
   fi
 
   # v3: record this launch in the daemon's recents so a later ABS START can offer
@@ -2579,6 +2714,11 @@ cmd_run() {
   # double write; a terminal launch records here. Guarded so a missing absd never
   # breaks a plain v2-style launch.
   _record_recent
+
+  # A resumed session appends --continue so claude picks up the previous
+  # conversation in this cwd (same semantics as the Telegram resume).
+  local cont_args=()
+  [ "${MENU_CONTINUE:-0}" = "1" ] && cont_args=(--continue)
 
   # `exec` keeps this PID, so $$ recorded now IS the claude session's PID — that's
   # what `abs exit` (the ABS EXIT kill-ladder rung) signals. Clear the stale
@@ -2594,6 +2734,7 @@ cmd_run() {
     ${hook_args[@]+"${hook_args[@]}"} \
     ${model_args[@]+"${model_args[@]}"} \
     ${perm_args[@]+"${perm_args[@]}"} \
+    ${cont_args[@]+"${cont_args[@]}"} \
     "$@"
 }
 
@@ -2775,6 +2916,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config ack on|off    👀 the moment a Telegram message lands (default on)
   ${c_bold}abs${c_reset} config log on|off    Back up the conversation locally (default on)
   ${c_bold}abs${c_reset} config guard on|off  Block destructive cmds on Telegram turns (default on)
+  ${c_bold}abs${c_reset} config start-menu on|off  Resume-first picker on interactive launch (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
   ${c_bold}abs${c_reset} sessions            List engine sessions (v3; --json for scripts)
@@ -2793,6 +2935,11 @@ per bot token, so two sessions at once need two bots.
 
   abs --profile work            Use (or create) the 'work' bot
   ABS_PROFILE=work abs     Same, from the environment
+
+An interactive ${c_bold}abs${c_reset} with recent projects shows a resume-first start menu. Skip it:
+  abs --resume                  # resume the most recent session (top recent)
+  abs --new                     # skip the menu, start fresh in this folder
+  abs config start-menu off     # never show it
 
 Extra arguments are passed through to claude:
   abs --model opus
@@ -2819,6 +2966,11 @@ main() {
       # Away mode: don't prompt for file edits (acceptEdits). A flag form of the
       # existing ABS_AWAY env mechanism, honored by cmd_run's perm_args.
       --away)      ABS_AWAY=1; shift ;;
+      # v3 start-menu bypasses (interactive terminal launch): --new = skip the menu
+      # and start fresh in the current folder; --resume = skip it and resume the
+      # top recent. Both are no-ops when there is no menu (non-TTY / no recents).
+      --new)       ABS_START_MENU_BYPASS=new; shift ;;
+      --resume)    ABS_START_MENU_BYPASS=resume; shift ;;
       *)           args+=("$1"); shift ;;
     esac
   done

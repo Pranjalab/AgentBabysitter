@@ -254,3 +254,182 @@ def test_terminal_launch_proceeds_past_stale_pid(tmp_path: Path, stub_bin: Path)
     _no_leftover_launcher()
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert marker.exists()  # reached the launch (stale pid did not block)
+
+
+# ---- terminal resume-first start menu (Step 2.2 terminal) --------------------
+
+_STUB_CLAUDE_DUMP = """#!/usr/bin/env bash
+case "${1:-}" in
+  plugin) echo "telegram@claude-plugins-official"; exit 0 ;;
+esac
+for a in "$@"; do
+  if [ "$a" = "--channels" ]; then
+    [ -n "${FAKE_CLAUDE_CWD_FILE:-}" ] && pwd > "$FAKE_CLAUDE_CWD_FILE"
+    [ -n "${FAKE_CLAUDE_ARGV_FILE:-}" ] && printf '%s\\n' "$@" > "$FAKE_CLAUDE_ARGV_FILE"
+    exit 0
+  fi
+done
+exit 0
+"""
+
+
+def _dump_stub(stub_bin: Path) -> None:
+    (stub_bin / "claude").write_text(_STUB_CLAUDE_DUMP)
+    (stub_bin / "claude").chmod(0o755)
+
+
+def _seed_recent(abs_home: Path, profile: str, path: Path, mode: str = "normal") -> None:
+    from absd.recents import Recents
+
+    Recents(abs_home / "daemon" / "recents.json").record(profile, str(path), path.name, mode)
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+def test_non_tty_with_recents_shows_no_menu(tmp_path: Path, stub_bin: Path) -> None:
+    # stdin is NOT a tty (subprocess pipe) → the menu never shows, even with recents.
+    home = tmp_path / "home"; home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    (abs_home / "daemon").mkdir(parents=True, exist_ok=True)
+    recent = tmp_path / "recent"; recent.mkdir()
+    _seed_recent(abs_home, "default", recent)
+    cwd = tmp_path / "here"; cwd.mkdir()
+    _dump_stub(stub_bin)
+    cwd_file = tmp_path / "cwd"
+
+    proc = subprocess.run(
+        ["bash", str(ABS_SH), "--profile", "default"],
+        env=_env(abs_home, home, stub_bin, FAKE_CLAUDE_CWD_FILE=str(cwd_file)),
+        capture_output=True, text=True, timeout=30, cwd=str(cwd),
+    )
+    _no_leftover_launcher()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # launched in the CURRENT folder (no menu, no cd to the recent)
+    assert cwd_file.read_text().strip() == str(cwd.resolve())
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+def test_new_bypass_launches_fresh_in_cwd(tmp_path: Path, stub_bin: Path) -> None:
+    home = tmp_path / "home"; home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    (abs_home / "daemon").mkdir(parents=True, exist_ok=True)
+    recent = tmp_path / "recent"; recent.mkdir()
+    _seed_recent(abs_home, "default", recent)
+    cwd = tmp_path / "here"; cwd.mkdir()
+    _dump_stub(stub_bin)
+    cwd_file = tmp_path / "cwd"
+    argv_file = tmp_path / "argv"
+
+    proc = subprocess.run(
+        ["bash", str(ABS_SH), "--profile", "default", "--new"],
+        env=_env(abs_home, home, stub_bin,
+                 FAKE_CLAUDE_CWD_FILE=str(cwd_file), FAKE_CLAUDE_ARGV_FILE=str(argv_file)),
+        capture_output=True, text=True, timeout=30, cwd=str(cwd),
+    )
+    _no_leftover_launcher()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert cwd_file.read_text().strip() == str(cwd.resolve())  # fresh here
+    assert "--continue" not in argv_file.read_text()  # not a resume
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+def test_resume_bypass_resumes_top_recent(tmp_path: Path, stub_bin: Path) -> None:
+    home = tmp_path / "home"; home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    (abs_home / "daemon").mkdir(parents=True, exist_ok=True)
+    recent = tmp_path / "research"; recent.mkdir()
+    _seed_recent(abs_home, "default", recent, mode="away")
+    cwd = tmp_path / "here"; cwd.mkdir()
+    _dump_stub(stub_bin)
+    cwd_file = tmp_path / "cwd"
+    argv_file = tmp_path / "argv"
+
+    proc = subprocess.run(
+        ["bash", str(ABS_SH), "--profile", "default", "--resume"],
+        env=_env(abs_home, home, stub_bin,
+                 FAKE_CLAUDE_CWD_FILE=str(cwd_file), FAKE_CLAUDE_ARGV_FILE=str(argv_file)),
+        capture_output=True, text=True, timeout=30, cwd=str(cwd),
+    )
+    _no_leftover_launcher()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # cd'd to the recorded path and resumed with --continue
+    assert cwd_file.read_text().strip() == str(recent.resolve())
+    argv = argv_file.read_text()
+    assert "--continue" in argv
+    assert "acceptEdits" in argv  # recorded mode was away
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+def test_no_recents_no_menu_straight_launch(tmp_path: Path, stub_bin: Path) -> None:
+    # No recents → today's behavior exactly (no menu), even were stdin a tty.
+    home = tmp_path / "home"; home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    cwd = tmp_path / "here"; cwd.mkdir()
+    _dump_stub(stub_bin)
+    cwd_file = tmp_path / "cwd"
+    proc = subprocess.run(
+        ["bash", str(ABS_SH), "--profile", "default"],
+        env=_env(abs_home, home, stub_bin, FAKE_CLAUDE_CWD_FILE=str(cwd_file)),
+        capture_output=True, text=True, timeout=30, cwd=str(cwd),
+    )
+    _no_leftover_launcher()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert cwd_file.read_text().strip() == str(cwd.resolve())
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+def test_interactive_menu_resume_via_pty(tmp_path: Path, stub_bin: Path) -> None:
+    # The real menu: a pty makes `[ -t 0 ]` true so the picker shows; we send "1\n"
+    # (resume top recent) and assert the launch cd'd there with --continue.
+    import errno
+    import os
+    import pty
+    import select
+
+    home = tmp_path / "home"; home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    (abs_home / "daemon").mkdir(parents=True, exist_ok=True)
+    recent = tmp_path / "research"; recent.mkdir()
+    _seed_recent(abs_home, "default", recent)
+    cwd = tmp_path / "here"; cwd.mkdir()
+    _dump_stub(stub_bin)
+    cwd_file = tmp_path / "cwd"
+    argv_file = tmp_path / "argv"
+    env = _env(abs_home, home, stub_bin,
+               FAKE_CLAUDE_CWD_FILE=str(cwd_file), FAKE_CLAUDE_ARGV_FILE=str(argv_file))
+
+    pid, fd = pty.fork()
+    if pid == 0:  # child: exec bash with the pty as its controlling terminal
+        try:
+            os.chdir(str(cwd))
+            os.execvpe("bash", ["bash", str(ABS_SH), "--profile", "default"], env)
+        except Exception:
+            os._exit(127)
+    # parent: answer the prompt, drain output until EOF, reap.
+    os.write(fd, b"1\n")
+    deadline = time.time() + 25
+    out = b""
+    while time.time() < deadline:
+        r, _, _ = select.select([fd], [], [], 1.0)
+        if fd in r:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError as e:
+                if e.errno == errno.EIO:  # pty closed on child exit
+                    break
+                raise
+            if not chunk:
+                break
+            out += chunk
+        if not os.path.exists(str(cwd_file)):
+            continue
+    _pid, status = os.waitpid(pid, 0)
+    _no_leftover_launcher()
+
+    assert cwd_file.exists(), out.decode(errors="replace")
+    assert cwd_file.read_text().strip() == str(recent.resolve())
+    assert "--continue" in argv_file.read_text()

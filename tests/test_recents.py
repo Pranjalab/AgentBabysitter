@@ -132,3 +132,29 @@ def test_cli_add_and_list(tmp_path: Path, capsys) -> None:
     rc = main(["--abs-home", str(abs_home), "list", "--profile", "default"])
     assert rc == 0
     assert str(proj.resolve()) in capsys.readouterr().out
+
+
+def test_cli_list_json_includes_age(tmp_path: Path, capsys) -> None:
+    abs_home = _home(tmp_path)
+    proj = tmp_path / "web"
+    proj.mkdir()
+    main([
+        "--abs-home", str(abs_home), "add",
+        "--profile", "default", "--path", str(proj), "--mode", "away",
+    ])
+    capsys.readouterr()
+    rc = main(["--abs-home", str(abs_home), "list", "--profile", "default", "--json"])
+    assert rc == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert len(rows) == 1
+    assert rows[0]["path"] == str(proj.resolve())
+    assert rows[0]["mode"] == "away"
+    assert rows[0]["label"] == "web"
+    assert "age" in rows[0]  # humanized age present (shared helper)
+
+
+def test_cli_list_json_empty(tmp_path: Path, capsys) -> None:
+    abs_home = _home(tmp_path)
+    rc = main(["--abs-home", str(abs_home), "list", "--profile", "default", "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == []
