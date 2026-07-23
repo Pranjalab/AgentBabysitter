@@ -61,6 +61,33 @@ ask_yes() {
   case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
 }
 
+# Optional pinned herdr install (v3 session engine — nicer UI than tmux, but never
+# required: tmux is the always-available fallback). Pinned to the exact 0.7.5 asset
+# from docs/v3/herdr-recipes.md — a direct, checksum-verified download, NEVER a
+# `curl | sh`. Linux/x86_64 only (the pinned asset's platform); other platforms
+# fall back to tmux. Returns non-zero on any failure (caller warns, keeps going).
+install_herdr() {
+  local url="https://github.com/ogulcancelik/herdr/releases/download/v0.7.5/herdr-linux-x86_64"
+  local sha="3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253"
+  local dst="$HOME/.local/bin/herdr" tmp
+  mkdir -p "$(dirname "$dst")"
+  tmp="$dst.download"
+  info "  ${c_dim}Downloading herdr 0.7.5…${c_reset}"
+  curl -fL -o "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s  %s\n' "$sha" "$tmp" | sha256sum -c - >/dev/null 2>&1 \
+      || { warn "herdr checksum mismatch — refusing to install."; rm -f "$tmp"; return 1; }
+  elif command -v shasum >/dev/null 2>&1; then
+    [ "$(shasum -a 256 "$tmp" | awk '{print $1}')" = "$sha" ] \
+      || { warn "herdr checksum mismatch — refusing to install."; rm -f "$tmp"; return 1; }
+  else
+    warn "No sha256 tool found — installing herdr without checksum verification."
+  fi
+  chmod +x "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dst" || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
 if ! command -v bun >/dev/null 2>&1; then
   info "${c_bold}Agent Babysitter needs Bun${c_reset} — the Telegram plugin's server runs on it."
   info "${c_dim}Installs to ~/.bun. No sudo, nothing outside your home directory.${c_reset}"
@@ -250,6 +277,35 @@ if [ "$claude_fresh" = "1" ]; then
   info "    ${c_bold}export PATH=\"\$HOME/.local/bin:\$PATH\"${c_reset}"
   info ""
 fi
+# --- v3 always-on daemon (optional; needs the repo checkout + .venv) ---------
+# The daemon (absd) is Python and lives in the repo tree with its own .venv, so it
+# is only offered for a checkout install (not a bare `curl abs.sh`). Refreshing
+# the unit here is how existing users pick up daemon changes across releases.
+if [ -n "$here" ] && [ -d "$here/absd" ] && [ -x "$here/.venv/bin/python" ]; then
+  info ""
+  info "${c_bold}Optional — the always-on daemon (v3).${c_reset} It polls your idle bots so you"
+  info "${c_dim}can start sessions from Telegram (ABS START) even with nothing running.${c_reset}"
+  if ask_yes "Install/refresh the absd systemd unit now? [y/N]"; then
+    "$TARGET" daemon install || warn "Daemon install didn't finish — run: abs daemon install"
+    if [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ] \
+       && ! command -v herdr >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/herdr" ]; then
+      info ""
+      info "${c_dim}Optional session engine: herdr gives a nicer attach UI than tmux (tmux is${c_reset}"
+      info "${c_dim}always used if herdr is absent). Pinned 0.7.5, checksum-verified download.${c_reset}"
+      if ask_yes "Install the pinned herdr 0.7.5 session engine? [y/N]"; then
+        if install_herdr; then ok "herdr 0.7.5 installed at ~/.local/bin/herdr"; else warn "herdr not installed — tmux will be used."; fi
+      fi
+    fi
+    info ""
+    info "  ${c_bold}Daemon quickstart:${c_reset}"
+    info "    ${c_bold}systemctl --user enable --now absd${c_reset}   # start now + on login"
+    info "    ${c_bold}abs daemon status${c_reset}                    # check it"
+    info "    ${c_bold}abs doctor${c_reset}                           # full diagnosis"
+  else
+    info "  Skipped. Set it up any time with: ${c_bold}abs daemon install${c_reset}"
+  fi
+fi
+
 # --- voice (optional add-on) -------------------------------------------------
 # Local, but big (Whisper + Chatterbox, a few GB), so it's never forced — offered
 # once, here, and the actual build is handed to the abs we just installed so

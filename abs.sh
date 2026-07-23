@@ -2888,6 +2888,70 @@ cmd_project() {
   exec env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.registry project "$sub" "$@"
 }
 
+# `abs doctor` — read-only diagnosis of the v2 deps and the v3 daemon stack.
+# Clear ✓/!/✗ lines with actionable hints; never changes anything.
+cmd_doctor() {
+  local root py cfg_home unit
+  root="$(dirname "$SCRIPT_PATH")"
+  py="$root/.venv/bin/python"
+  cfg_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  unit="$cfg_home/systemd/user/absd.service"
+  local g="${c_green}✓${c_reset}" b="${c_red}✗${c_reset}" y="${c_yellow}!${c_reset}"
+
+  step "Core dependencies"
+  local c
+  for c in claude curl jq bun; do
+    if command -v "$c" >/dev/null 2>&1; then info "  $g $c"; else info "  $b $c — missing (see: abs help)"; fi
+  done
+
+  step "Daemon (v3)"
+  if [ -f "$unit" ]; then info "  $g unit installed"; else info "  $b unit not installed — run: abs daemon install"; fi
+  local en act
+  en="$(systemctl --user is-enabled absd.service 2>/dev/null || echo unknown)"
+  act="$(systemctl --user is-active absd.service 2>/dev/null || echo inactive)"
+  if [ "$en" = "enabled" ]; then info "  $g enabled (starts on login)"; else info "  $y not enabled — systemctl --user enable absd"; fi
+  if [ "$act" = "active" ]; then info "  $g active (running)"; else info "  $y not running — abs daemon start"; fi
+  local linger
+  linger="$(loginctl show-user "$USER" --property=Linger 2>/dev/null | cut -d= -f2)"
+  if [ "$linger" = "yes" ]; then info "  $g linger enabled (survives logout)"; else info "  $y linger off — sudo loginctl enable-linger $USER"; fi
+
+  step "Python & engines"
+  if [ -x "$py" ] && env PYTHONPATH="$root" "$py" -c "import absd, aiohttp" >/dev/null 2>&1; then
+    info "  $g absd package + aiohttp importable"
+  else
+    info "  $b absd/.venv not usable — reinstall (see install.sh)"
+  fi
+  if command -v tmux >/dev/null 2>&1; then info "  $g tmux ($(tmux -V 2>/dev/null))"; else info "  $y tmux not found (reference engine)"; fi
+  local herdr_bin="" herdr_v
+  command -v herdr >/dev/null 2>&1 && herdr_bin="herdr"
+  [ -z "$herdr_bin" ] && [ -x "$HOME/.local/bin/herdr" ] && herdr_bin="$HOME/.local/bin/herdr"
+  if [ -n "$herdr_bin" ]; then herdr_v="$("$herdr_bin" --version 2>/dev/null)"; info "  $g herdr ($herdr_v)"; else info "  $y herdr not installed (optional; tmux used)"; fi
+
+  step "Config & state"
+  local cfgf="$ABS_HOME/daemon/config.json"
+  if [ ! -f "$cfgf" ]; then
+    info "  $g config.json absent (defaults in effect)"
+  elif [ -x "$py" ] && env PYTHONPATH="$root" "$py" -c "import sys,pathlib,absd.config as c; c.load(pathlib.Path(sys.argv[1]))" "$cfgf" >/dev/null 2>&1; then
+    info "  $g config.json valid"
+  else
+    info "  $b config.json invalid — see: abs daemon logs"
+  fi
+  local f m bad_perm=0 checked=0
+  for f in "$ABS_HOME/daemon/events.jsonl" "$PROFILES_DIR"/*/pool.jsonl; do
+    [ -f "$f" ] || continue
+    checked=1
+    m="$(stat -c '%a' "$f" 2>/dev/null || echo '?')"
+    [ "$m" = "600" ] || { info "  $y $f is $m (expected 600)"; bad_perm=1; }
+  done
+  [ "$checked" = 1 ] && [ "$bad_perm" = 0 ] && info "  $g events/pool files are 0600"
+  local errf="$ABS_HOME/daemon/events.jsonl" last_err
+  if [ -f "$errf" ]; then
+    last_err="$(jq -rc 'select(.level=="error") | "\(.ts) \(.event) \(.where // .message // "")"' "$errf" 2>/dev/null | tail -1)"
+    if [ -n "$last_err" ]; then info "  $y last daemon error: $last_err"; else info "  $g no daemon errors logged"; fi
+  fi
+  exit 0
+}
+
 cmd_help() {
   cat <<EOF
 ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Telegram
@@ -2931,6 +2995,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config workspace-root <dir>  Root for remote 'New folder' starts (v3)
   ${c_bold}abs${c_reset} daemon install|start|stop|status|logs|run
                           Always-on daemon: polls idle bots, pools messages (v3)
+  ${c_bold}abs${c_reset} doctor              Diagnose the v2 deps + v3 daemon stack (read-only)
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} version             Print the installed version
@@ -3035,7 +3100,7 @@ main() {
       # starting point is arbitrary.
       # update only needs ABS_DIR for its version cache — resolve default rather
       # than dragging the user through the profile picker just to upgrade.
-      is-quiet|statusline|usage-glance|usage-cache|profiles|update|voice) use_profile default ;;
+      is-quiet|statusline|usage-glance|usage-cache|profiles|update|voice|doctor) use_profile default ;;
       *)                 pick_profile ;;
     esac
   fi
@@ -3059,6 +3124,7 @@ main() {
     off)       cmd_off ;;
     on)        cmd_on ;;
     update)    cmd_update || exit $? ;;
+    doctor)    cmd_doctor ;;
     exit)      cmd_exit ;;
     reset)     cmd_reset ;;
     # Anything else is a flag for claude itself: `abs --model opus`
