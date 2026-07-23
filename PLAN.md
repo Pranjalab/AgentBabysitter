@@ -370,6 +370,10 @@ version-specific CLI output as the primary signal.
 - **Critique gate:** confirm no credential file contents are ever read/logged — presence
   only.
 
+> **SHIPPED** (see `docs/v3/critique/1.6-1.7.md`): pre-launch stat-only presence+size
+> check immediately before HANDOFF (contents never read — verified); post-launch
+> `failed_start` gets the login-issue note; `error{where:login_precheck}` emitted.
+
 ### Step 1.7 — Kill ladder + pool lifecycle integration (D11, D14, G3)
 `ABS OFF` while idle: poller stops, marker set, terminal-only `abs on` re-enables.
 `ABS BLOCK` while idle: daemon-level lock. `ABS CLEAR POOL` command. Pool forwarding v1
@@ -385,6 +389,15 @@ them to the bot AFTER handoff so the plugin delivers them; verify ordering in te
   both appear in the session conversation; ABS OFF → bot goes silent → `abs on` at
   terminal revives it.
 - **Critique gate:** does OFF truly mean off (daemon poller stopped, not just muted)?
+
+> **SHIPPED with two corrections** (see `docs/v3/critique/1.6-1.7.md`): (1) pool
+> selection is a FLOW step BEFORE handoff (not "on session start" — after handoff the
+> plugin owns the token, so replies would go to the session); (2) selected messages
+> are delivered as claude's INITIAL PROMPT via one `--prompt` argv element (not
+> "re-sent to the bot" — bots never receive their own sendMessage). Kill ladder:
+> ABS OFF → access.json dmPolicy=disabled, ABS BLOCK → rc.json .blocked=true, ABS
+> CLEAR POOL → pool cleared; all text-only, allowlist-gated, event-emitting.
+> forwarded_at stamped only on successful launch (D14).
 
 ### Step 1.8 — Phase 1 hardening + docs
 Log rotation, daemon crash recovery (systemd `Restart=on-failure` + state re-derivation
