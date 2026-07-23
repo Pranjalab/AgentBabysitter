@@ -1409,6 +1409,19 @@ cmd_config() {
   esac
 }
 
+# v3 consolidated dashboard: the daemon header + per-profile state / live session /
+# pool / recents, rendered by `python -m absd.status` from the daemon's on-disk
+# trail (all read-only). Appended to `abs status` and shared by `abs daemon status`.
+# Silent on a v2-only install (no venv/absd) so nothing about v2 breaks.
+_v3_dashboard() {
+  local droot dpy
+  droot="$(dirname "$SCRIPT_PATH")"
+  dpy="$droot/.venv/bin/python"
+  [ -x "$dpy" ] && [ -d "$droot/absd" ] || return 0
+  printf '\n'
+  env PYTHONPATH="$droot" ABS_HOME="$ABS_HOME" "$dpy" -m absd.status 2>/dev/null || true
+}
+
 cmd_status() {
   require_setup
   local policy quiet pid
@@ -1438,6 +1451,8 @@ cmd_status() {
   info "  token        $TG_ENV"
   info "  allowlist    $TG_ACCESS"
   info "  state        $ABS_STATE"
+  # v3 dashboard appended below the v2 pairing block (skipped on a v2-only install).
+  _v3_dashboard
 }
 
 cmd_profiles() {
@@ -2639,14 +2654,14 @@ cmd_daemon() {
       ;;
     status)
       systemctl --user status absd --no-pager 2>/dev/null || warn "absd unit not found or not running (try: abs daemon install)."
-      # Per-profile status block (state/pool/last-poll age) rendered from the
-      # status files the daemon rewrites each cycle. Falls back to the raw
-      # offset files if the venv/absd is somehow unavailable.
-      step "Profiles:"
-      if [ -x "$py" ] && [ -d "$root/absd" ] &&
-         env PYTHONPATH="$root" "$py" -m absd --abs-home "$ABS_HOME" --print-status 2>/dev/null; then
-        :
+      # Consolidated v3 dashboard (daemon header + per-profile state / live session
+      # / pool / recents), the same renderer `abs status` appends. Falls back to the
+      # raw status/offset files if the venv/absd is somehow unavailable.
+      if [ -x "$py" ] && [ -d "$root/absd" ]; then
+        printf '\n'
+        env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.status 2>/dev/null || true
       else
+        step "Profiles:"
         local dd="$ABS_HOME/daemon" f name shown=0
         if [ -d "$dd" ]; then
           for f in "$dd"/status-*.json "$dd"/poller-*.json; do

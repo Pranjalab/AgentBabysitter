@@ -47,6 +47,22 @@ from absd import __version__
 from absd import flow as flow_mod
 from absd.config import DaemonConfig
 from absd.engines.base import Engine, EngineError, SessionHandle
+from absd.events import (
+    EVENT_COMMAND,
+    EVENT_ENGINE_KILL,
+    EVENT_ERROR,
+    EVENT_HANDOFF,
+    EVENT_MENU_SET,
+    EVENT_MESSAGE_POOLED,
+    EVENT_POLLER_STATE,
+    EVENT_RECLAIM_DONE,
+    EVENT_SESSION_END,
+    EVENT_SESSION_START,
+    END_EXITED,
+    END_FAILED_START,
+    END_FOREIGN_TAKEOVER_CLEARED,
+    EventLog,
+)
 from absd.flow import ProjectOption
 from absd.pool import Pool, PooledMessage, utc_now_iso
 from absd.profiles import Profile
@@ -441,10 +457,13 @@ class Poller:
         script_path: str | None = None,
         session_count: Callable[[], int] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        events: EventLog | None = None,
     ) -> None:
         self.profile = profile
         self.client = client
         self.cfg = cfg
+        #: Shared structured event log (observability). None → emit is a no-op.
+        self.events = events
         self.pool = Pool(profile.pool_path)
         self.state_dir = Path(state_dir)
         self.state_path = self.state_dir / f"poller-{profile.name}.json"
@@ -489,6 +508,12 @@ class Poller:
         #: One-shot guard so the "session.pid clobbered by a foreign session" warning
         #: is logged once per takeover, not every watch cycle.
         self._foreign_warned = False
+        #: Observability bookkeeping: wall-clock session start (for lived_s), the
+        #: session_end reason decided at the RECLAIM transition, and the 409 backoff
+        #: count during the current reclaim probe.
+        self._session_started_at: float = 0.0
+        self._session_end_reason: str = END_EXITED
+        self._reclaim_409s: int = 0
         #: Offset value committed by the single HANDOFF commit (test bookkeeping).
         self.handoff_committed_offset: int | None = None
         #: Per-profile status file (Step 1.4) — rewritten atomically each cycle so
@@ -653,6 +678,7 @@ class Poller:
         # ABS START (Step 1.5): begins/restarts the flow. Highest priority so a
         # user can always restart a stuck flow by re-sending it.
         if is_start(ex.text):
+            self._emit(EVENT_COMMAND, name="ABS START")
             await self._begin_flow(ex)
             return
 
@@ -673,9 +699,11 @@ class Poller:
 
         # D9 read commands: answered from local state, never pooled.
         if is_status(ex.text):
+            self._emit(EVENT_COMMAND, name="ABS STATUS")
             await self._reply_status(ex)
             return
         if is_pool_cmd(ex.text):
+            self._emit(EVENT_COMMAND, name="ABS POOL")
             await self._reply_pool(ex)
             return
 
@@ -698,6 +726,8 @@ class Poller:
         )
         count = self.pool.append(msg)
         pooled_ids.add(ex.update_id)
+        # Metadata only — the update_id, NEVER the text (content stays in the pool).
+        self._emit(EVENT_MESSAGE_POOLED, update_id=ex.update_id)
 
         template = START_ACK if is_start(ex.text) else POOL_ACK
         await self._reply(ex, template.format(n=count))
@@ -721,6 +751,27 @@ class Poller:
 
     async def _reply_pool(self, ex: Extracted) -> None:
         await self._reply(ex, render_pool(self.pool.read_all()))
+
+    # ---- observability (structured event log) ----------------------------
+
+    def _emit(self, event: str, *, level: str = "info", **fields: Any) -> None:
+        """Emit a structured event for this profile (never raises)."""
+        if self.events is None:
+            return
+        try:
+            self.events.emit(event, profile=self.profile.name, level=level, **fields)
+        except Exception:
+            log.debug("poller[%s] event emit failed", self.profile.name)
+
+    def _set_state(self, new: str) -> None:
+        """Transition the session-state, emitting a ``poller_state`` event on an
+        actual change (from_state → state)."""
+        old = self.session_state
+        if old == new:
+            self.session_state = new
+            return
+        self.session_state = new
+        self._emit(EVENT_POLLER_STATE, state=new, from_state=old)
 
     # ---- ABS START flow (Step 1.5) ---------------------------------------
 
@@ -1116,13 +1167,20 @@ class Poller:
         mode = "away" if req.away else "normal"
         # (3) handoff marker (pre-launch, for crash-safety — pane recorded below).
         self._write_handoff_marker(req.project_path, mode, req.chat_id)
+        self._emit(
+            EVENT_HANDOFF,
+            project=req.project_path,
+            mode=mode,
+            engine=(self.engine.name if self.engine is not None else None),
+            resume=req.resume,
+        )
 
         # (4) launch through the engine (never reimplement the launcher — 4.2),
         # self-healing over a stale leftover engine session (live-demo finding:
         # a herdr session survives claude's exit, so the next create collided).
         handle = await self._launch_session(req)
         if handle is None:
-            self.session_state = STATE_IDLE
+            self._set_state(STATE_IDLE)
             return
 
         # Record the launched pane (Step 2.2c precise liveness) + persist it in the
@@ -1135,6 +1193,7 @@ class Poller:
             req.project_path, mode, req.chat_id,
             pane_id=handle.pane_id, launcher_pid=handle.pid,
         )
+        self._emit(EVENT_SESSION_START, pane_id=handle.pane_id, pid=handle.pid)
 
         # (5) confirmation. The attach hint is the SAFE wrapper `abs attach` — it
         # resolves the owning engine and re-checks liveness before attaching, so it
@@ -1151,10 +1210,12 @@ class Poller:
         # (6) SESSION_LIVE. Record for resume-first ABS START, and swap the "/"
         # menu to the in-session set now the session owns the bot (Step 2.2).
         self._record_recent(req)
-        self.session_state = STATE_SESSION_LIVE
         self._handoff_chat_id = req.chat_id
         self._handoff_at = self._clock()
+        self._session_started_at = self._handoff_at
         self._session_seen_alive = False
+        self._session_end_reason = END_EXITED
+        self._set_state(STATE_SESSION_LIVE)
         await self._ensure_menu("session")
         log.info(
             "poller[%s] HANDOFF complete — session launching in %s",
@@ -1243,6 +1304,9 @@ class Poller:
                     self.profile.name,
                     exc2,
                 )
+                self._emit(
+                    EVENT_ERROR, level="error", where="handoff_launch", message=str(exc2)
+                )
                 self._clear_handoff_marker()
                 if req.chat_id is not None:
                     await self._safe_send(
@@ -1259,10 +1323,12 @@ class Poller:
             return
         try:
             self.engine.kill(self.profile.name)
+            self._emit(EVENT_ENGINE_KILL, ok=True)
         except Exception as exc:
             log.warning(
                 "poller[%s] engine kill failed: %s", self.profile.name, exc
             )
+            self._emit(EVENT_ENGINE_KILL, ok=False, level="warning")
 
     # ---- Telegram "/" menu (Step 2.2 pulled forward) ---------------------
 
@@ -1304,6 +1370,7 @@ class Poller:
             return
         self._menu_kind = kind
         self._persist_menu_kind(kind)
+        self._emit(EVENT_MENU_SET, kind=kind)
 
     # ---- SESSION_LIVE / RECLAIM (PLAN.md 4.1) ----------------------------
 
@@ -1373,6 +1440,9 @@ class Poller:
                     self.profile.session_pid_on_disk(),
                 )
                 self._foreign_warned = True
+                # A foreign takeover means the original session's clean end is no
+                # longer ours to observe — record the reason for the eventual end.
+                self._session_end_reason = END_FOREIGN_TAKEOVER_CLEARED
             self._session_seen_alive = True
             return True
 
@@ -1389,7 +1459,7 @@ class Poller:
             return True
         if self._session_seen_alive:
             log.info("poller[%s] session ended — entering RECLAIM", self.profile.name)
-            self.session_state = STATE_RECLAIM
+            self._set_state(STATE_RECLAIM)
             return False
         if (self._clock() - self._handoff_at) > self.cfg.session_start_grace_s:
             log.warning(
@@ -1397,7 +1467,8 @@ class Poller:
                 self.profile.name,
                 self.cfg.session_start_grace_s,
             )
-            self.session_state = STATE_RECLAIM
+            self._session_end_reason = END_FAILED_START
+            self._set_state(STATE_RECLAIM)
             return False
         return True  # still starting up
 
@@ -1413,13 +1484,22 @@ class Poller:
         shell survives claude's exit, so without it the session stays "running" and
         the NEXT handoff fails with "already running". Killing here (before polling
         resumes; errors tolerated) guarantees the next ABS START starts clean."""
+        # session_end: emit before the probe (the session is already gone) with the
+        # reason decided in watch_once + how long it lived (metadata only).
+        lived_s = 0
+        if self._session_started_at:
+            lived_s = max(0, int(self._clock() - self._session_started_at))
+        self._emit(EVENT_SESSION_END, reason=self._session_end_reason, lived_s=lived_s)
+
         self._kill_engine_session()
         await sleep(self.cfg.reclaim_grace_s)
         backoff: float | None = None
+        self._reclaim_409s = 0
         while not self._stop.is_set():
             try:
                 await self.client.get_updates(offset=self.offset, timeout=0)
             except Conflict409:
+                self._reclaim_409s += 1
                 backoff = (
                     BACKOFF_INITIAL_S
                     if backoff is None
@@ -1444,13 +1524,16 @@ class Poller:
                 await self.client.send_message(self._handoff_chat_id, SESSION_ENDED_MSG)
             except TelegramError:
                 pass
-        self.session_state = STATE_IDLE
+        self._emit(EVENT_RECLAIM_DONE, backoff_409s=self._reclaim_409s)
         self._session_seen_alive = False
         self._handoff_chat_id = None
         self._session_pane_id = None
         self._launched_pid = None
         self._foreign_warned = False
+        self._session_started_at = 0.0
+        self._session_end_reason = END_EXITED
         # Back to idle-polling — restore the idle "/" menu (Step 2.2).
+        self._set_state(STATE_IDLE)
         await self._ensure_menu("idle")
         log.info("poller[%s] RECLAIM complete — polling resumes", self.profile.name)
 

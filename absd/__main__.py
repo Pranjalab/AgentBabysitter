@@ -50,6 +50,11 @@ from absd import config as config_mod
 from absd.daemon import Poller, read_status_files, render_daemon_status
 from absd.engines import get_engine
 from absd.engines.base import Engine
+from absd.events import (
+    EVENT_DAEMON_START,
+    EVENT_DAEMON_STOP,
+    EventLog,
+)
 from absd.profiles import Profile, discover
 from absd.telegram import TelegramClient
 
@@ -187,6 +192,7 @@ def _build_pollers(
     base_url: str,
     engine: "Engine | None" = None,
     script_path: str | None = None,
+    events: "EventLog | None" = None,
 ) -> list[tuple[Poller, TelegramClient]]:
     """One (poller, client) per profile that has a usable token.
 
@@ -224,6 +230,7 @@ def _build_pollers(
             engine=engine,
             script_path=script_path,
             session_count=_live_session_count,
+            events=events,
         )
         built.append((poller, client))
         log.info("profile %s: poller ready (tg_dir=%s)", profile.name, profile.tg_dir)
@@ -436,13 +443,23 @@ async def _amain(args: argparse.Namespace) -> int:
         log.warning("could not select session engine (%s); ABS START disabled", exc)
         engine = None
 
-    pollers = _build_pollers(profiles, cfg, daemon_dir, base_url, engine=engine)
+    # Structured event log (observability): one shared writer for the daemon,
+    # alongside the human-readable daemon.log. Metadata only — never message text.
+    events = EventLog(daemon_dir / "events.jsonl")
+    events.emit(EVENT_DAEMON_START, version=__version__, profiles=[p.name for p in profiles])
+
+    pollers = _build_pollers(
+        profiles, cfg, daemon_dir, base_url, engine=engine, events=events
+    )
+    stop_reason = "signal"
     try:
         if args.once:
             await _run_once(pollers)
+            stop_reason = "once"
         else:
             await _run_forever(pollers, cfg)
     finally:
+        events.emit(EVENT_DAEMON_STOP, reason=stop_reason)
         for _, client in pollers:
             try:
                 await client.close()

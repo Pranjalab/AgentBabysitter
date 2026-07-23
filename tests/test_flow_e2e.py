@@ -92,6 +92,7 @@ def make_poller(
     workspace_root: str = "",
     clock=None,
     script_path: str = "/opt/abs.sh",
+    events=None,
     **cfg_kw,
 ) -> Poller:
     prof = discover(abs_home, home=abs_home)[0]
@@ -113,6 +114,7 @@ def make_poller(
         state_dir=abs_home / "daemon",
         engine=engine,
         script_path=script_path,
+        events=events,
         **kwargs,
     )
 
