@@ -70,6 +70,42 @@ def test_render_polling_no_session() -> None:
     assert "session" not in out  # no live session line
 
 
+def test_render_terminal_session_no_attach_no_age() -> None:
+    # A desk-launched session (live pid, not in any engine): show terminal (pid N),
+    # NEVER "up ?" or a misleading `abs attach` hint.
+    daemon = DaemonInfo(running=True, profiles_count=1)
+    profiles = [
+        ProfileView(
+            name="default",
+            state="yielding-to-session",
+            pool_count=0,
+            session=SessionView(kind="terminal", pid=969901),
+        )
+    ]
+    out = render_dashboard(daemon, profiles)
+    assert "session  terminal (pid 969901)" in out
+    assert "up ?" not in out
+    assert "attach" not in out  # no attach hint for a terminal session
+
+
+def test_render_engine_session_keeps_attach() -> None:
+    # Daemon-launched (engine) session keeps project/engine/age/attach.
+    daemon = DaemonInfo(running=True, profiles_count=1)
+    profiles = [
+        ProfileView(
+            name="default",
+            state="yielding-to-session",
+            session=SessionView(
+                kind="engine", engine="herdr", project="/p/llm", age_s=120,
+                attach="abs attach default",
+            ),
+        )
+    ]
+    out = render_dashboard(daemon, profiles)
+    assert "via herdr" in out and "up 2m" in out
+    assert "attach   abs attach default" in out
+
+
 def test_fmt_age() -> None:
     assert fmt_age(None) == "?"
     assert fmt_age(30) == "just now"
@@ -115,6 +151,47 @@ def test_collect_reconstructs_live_session_from_events(tmp_path: Path) -> None:
     assert p.session.project == "/p/llm"
     assert p.session.age_s == 180  # 3 minutes
     assert p.recents and p.recents[0].label == "proj"
+
+
+def test_collect_terminal_session_when_pid_but_no_trail(tmp_path: Path) -> None:
+    # Live session.pid but NO daemon handoff/session_start trail → terminal launch.
+    abs_home = tmp_path / "abs"
+    (abs_home / "daemon").mkdir(parents=True)
+    _status_file(abs_home, "default", state="yielding-to-session", session_pid=969901)
+    # events.jsonl absent / no session for this profile
+    daemon, profiles = collect(abs_home, systemd={"running": True}, now=NOW)
+    s = profiles[0].session
+    assert s is not None
+    assert s.kind == "terminal"
+    assert s.pid == 969901
+    assert s.attach is None
+    assert s.age_s is None
+    # and it renders correctly (no "up ?", no attach)
+    out = render_dashboard(daemon, profiles)
+    assert "session  terminal (pid 969901)" in out
+    assert "up ?" not in out
+
+
+def test_collect_ambiguous_daemon_launched_wins(tmp_path: Path) -> None:
+    # Live pid AND a daemon session_start trail → daemon-launched (engine) wins.
+    abs_home = tmp_path / "abs"
+    (abs_home / "daemon").mkdir(parents=True)
+    _status_file(abs_home, "default", state="yielding-to-session", session_pid=1234)
+    (abs_home / "daemon" / "events.jsonl").write_text(
+        "\n".join([
+            json.dumps({"ts": _iso(NOW), "event": "handoff", "profile": "default",
+                        "project": "/p/llm", "engine": "herdr", "mode": "normal"}),
+            json.dumps({"ts": _iso(datetime(2026, 7, 23, 14, 58, 0, tzinfo=timezone.utc)),
+                        "event": "session_start", "profile": "default",
+                        "pane_id": "w1:p1", "pid": 1234}),
+        ]) + "\n"
+    )
+    daemon, profiles = collect(abs_home, systemd={"running": True}, now=NOW)
+    s = profiles[0].session
+    assert s is not None
+    assert s.kind == "engine"
+    assert s.engine == "herdr" and s.project == "/p/llm"
+    assert s.attach == "abs attach default"
 
 
 def test_collect_dead_poller_detection(tmp_path: Path) -> None:

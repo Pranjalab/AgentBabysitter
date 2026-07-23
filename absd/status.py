@@ -46,10 +46,16 @@ STALE_POLLER_S = 180
 
 @dataclass
 class SessionView:
+    #: "engine" = daemon-launched (engine-backed: has project/engine/age + a real
+    #: `abs attach` target). "terminal" = launched at the desk (live session.pid but
+    #: NOT in any engine): show only `terminal (pid N)` — no age, no attach hint
+    #: (`abs attach` would correctly find no engine session and mislead the user).
+    kind: str = "engine"
     engine: str | None = None
     project: str | None = None
     age_s: int | None = None
     attach: str | None = None
+    pid: int | None = None
 
 
 @dataclass
@@ -123,15 +129,22 @@ def render_dashboard(daemon: DaemonInfo, profiles: list[ProfileView]) -> str:
         lines.append(f"  {p.name}: {p.state}  pool={p.pool_count}")
         if p.session is not None:
             s = p.session
-            bits = []
-            if s.project:
-                bits.append(s.project)
-            if s.engine:
-                bits.append(f"via {s.engine}")
-            bits.append(f"up {fmt_age(s.age_s)}")
-            lines.append(f"    session  {'  '.join(bits)}")
-            if s.attach:
-                lines.append(f"    attach   {s.attach}")
+            if s.kind == "terminal":
+                # A desk-launched session: not in any engine, so no age and no
+                # attach hint (both would be wrong/misleading — the earlier
+                # contradictory-message failure class).
+                pid_txt = f" (pid {s.pid})" if s.pid else ""
+                lines.append(f"    session  terminal{pid_txt}")
+            else:
+                bits = []
+                if s.project:
+                    bits.append(s.project)
+                if s.engine:
+                    bits.append(f"via {s.engine}")
+                bits.append(f"up {fmt_age(s.age_s)}")
+                lines.append(f"    session  {'  '.join(bits)}")
+                if s.attach:
+                    lines.append(f"    attach   {s.attach}")
         if p.recents:
             shown = ", ".join(f"{r.label} ({fmt_age(r.age_s)})" for r in p.recents)
             lines.append(f"    recent   {shown}")
@@ -225,12 +238,17 @@ def collect(
         pool_count = int(rec.get("pool_count") or 0)
 
         session = None
-        if rec.get("session_pid") or state == "yielding-to-session":
+        live_pid = rec.get("session_pid")
+        if live_pid or state == "yielding-to-session":
+            # Daemon-launched (engine-backed) wins if the trail shows a current
+            # session; otherwise a live pid with no daemon handoff/session_start is
+            # a terminal launch — not in any engine.
             session = _live_session_from_events(events_path, name, now)
             if session is None:
-                # status says a session is live but the trail lacks it (e.g. a
-                # terminal launch) — show a minimal live marker.
-                session = SessionView(attach=f"abs attach {name}")
+                pid = int(live_pid) if isinstance(live_pid, int) else None
+                if pid is None and isinstance(live_pid, str) and live_pid.isdigit():
+                    pid = int(live_pid)
+                session = SessionView(kind="terminal", pid=pid)
 
         recent_views = [
             RecentView(label=e.label, age_s=_age_s(e.started_at, now))
