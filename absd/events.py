@@ -69,6 +69,8 @@ EVENT_COMMAND = "command"
 EVENT_ERROR = "error"
 EVENT_MENU_SET = "menu_set"
 EVENT_ENGINE_KILL = "engine_kill"
+EVENT_PROFILE_ADDED = "profile_added"
+EVENT_PROFILE_REMOVED = "profile_removed"
 
 # session_end reasons.
 END_EXITED = "exited"

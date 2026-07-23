@@ -42,6 +42,7 @@ import logging
 import os
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -53,6 +54,8 @@ from absd.engines.base import Engine
 from absd.events import (
     EVENT_DAEMON_START,
     EVENT_DAEMON_STOP,
+    EVENT_PROFILE_ADDED,
+    EVENT_PROFILE_REMOVED,
     EventLog,
 )
 from absd.profiles import Profile, discover
@@ -190,6 +193,59 @@ def _default_script_path() -> str:
     return str(Path(__file__).resolve().parents[1] / "abs.sh")
 
 
+def _make_session_count(engine: "Engine | None"):
+    """A callable returning the daemon-wide live-session total (the max_sessions
+    cap counts across all profiles, G5). Shared by every poller a daemon builds —
+    including ones spun up by a later profile rescan — so all see the same total."""
+
+    def _live_session_count() -> int:
+        if engine is None:
+            return 0
+        try:
+            return sum(1 for s in engine.list_sessions() if s.alive)
+        except Exception:  # engine hiccup must never block a start decision
+            return 0
+
+    return _live_session_count
+
+
+def _build_one_poller(
+    profile: Profile,
+    cfg: config_mod.DaemonConfig,
+    daemon_dir: Path,
+    base_url: str,
+    *,
+    engine: "Engine | None",
+    script_path: str,
+    session_count,
+    events: "EventLog | None",
+    sandbox_mgr: object | None,
+) -> "tuple[Poller, TelegramClient] | None":
+    """Build one independent (poller, client) for ``profile``, or ``None`` if it
+    has no usable token. Own client/token/base_url, pool, offset + status files,
+    backoff, and ``poller[<name>]`` log prefix — the isolation G5 requires. Used
+    both at boot (:func:`_build_pollers`) and by the live profile rescan."""
+    token = profile.load_token()
+    if not token:
+        log.warning("profile %s has no token — skipping", profile.name)
+        return None
+    profile_base_url = _resolve_base_url(profile, base_url)
+    client = TelegramClient(token, base_url=profile_base_url)
+    poller = Poller(
+        profile,
+        client,
+        cfg,
+        state_dir=daemon_dir,
+        engine=engine,
+        script_path=script_path,
+        session_count=session_count,
+        events=events,
+        sandbox_mgr=sandbox_mgr,
+    )
+    log.info("profile %s: poller ready (tg_dir=%s)", profile.name, profile.tg_dir)
+    return poller, client
+
+
 def _build_pollers(
     profiles: list[Profile],
     cfg: config_mod.DaemonConfig,
@@ -200,47 +256,26 @@ def _build_pollers(
     events: "EventLog | None" = None,
     sandbox_mgr: object | None = None,
 ) -> list[tuple[Poller, TelegramClient]]:
-    """One (poller, client) per profile that has a usable token.
-
-    Each poller is fully independent (own client/token/base_url, own pool, own
-    offset + status files, own backoff, own ``poller[<name>]`` log prefix) — the
-    isolation G5 requires. ``base_url`` is the global default; a per-profile
-    localhost override may replace it via :func:`_resolve_base_url`.
-
-    ``engine`` is shared across pollers so ``list_sessions`` sees every profile's
-    session (the max_sessions cap counts across all profiles, G5). ``session_count``
-    on each poller therefore reports the daemon-wide live-session total."""
-    built: list[tuple[Poller, TelegramClient]] = []
+    """One (poller, client) per profile that has a usable token (see
+    :func:`_build_one_poller`). ``base_url`` is the global default; a per-profile
+    localhost override may replace it via :func:`_resolve_base_url`."""
     script_path = script_path or _default_script_path()
-
-    def _live_session_count() -> int:
-        if engine is None:
-            return 0
-        try:
-            return sum(1 for s in engine.list_sessions() if s.alive)
-        except Exception:  # engine hiccup must never block a start decision
-            return 0
-
+    session_count = _make_session_count(engine)
+    built: list[tuple[Poller, TelegramClient]] = []
     for profile in profiles:
-        token = profile.load_token()
-        if not token:
-            log.warning("profile %s has no token — skipping", profile.name)
-            continue
-        profile_base_url = _resolve_base_url(profile, base_url)
-        client = TelegramClient(token, base_url=profile_base_url)
-        poller = Poller(
+        result = _build_one_poller(
             profile,
-            client,
             cfg,
-            state_dir=daemon_dir,
+            daemon_dir,
+            base_url,
             engine=engine,
             script_path=script_path,
-            session_count=_live_session_count,
+            session_count=session_count,
             events=events,
             sandbox_mgr=sandbox_mgr,
         )
-        built.append((poller, client))
-        log.info("profile %s: poller ready (tg_dir=%s)", profile.name, profile.tg_dir)
+        if result is not None:
+            built.append(result)
     return built
 
 
@@ -384,8 +419,131 @@ async def _run_profile(
             return
 
 
+@dataclass
+class _RunCtx:
+    """Everything :func:`_run_forever` / :func:`_rescan_once` need to build a
+    poller for a profile discovered *after* boot. Assembled once in ``_amain``;
+    the same objects (engine, events, session_count) are shared with the boot
+    pollers so a rescan-added poller is indistinguishable from a boot one."""
+
+    cfg: config_mod.DaemonConfig
+    abs_home: Path
+    home: Path
+    daemon_dir: Path
+    base_url: str
+    engine: "Engine | None"
+    script_path: str
+    session_count: object
+    events: "EventLog | None"
+    sandbox_mgr: object | None
+
+
+async def _drop_poller(name: str, entry: dict) -> None:
+    """Cleanly stop and drop one live poller: request stop, cancel its supervisor
+    task, await it, and close its client (else the aiohttp session leaks). Used by
+    the rescan (profile removed) and shutdown. Never raises."""
+    poller = entry.get("poller")
+    if poller is not None:
+        try:
+            poller.stop()
+        except Exception:
+            pass
+    task = entry.get("task")
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    client = entry.get("client")
+    if client is not None:
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+
+async def _rescan_once(
+    live: dict[str, dict],
+    ctx: _RunCtx,
+    stop: asyncio.Event,
+) -> tuple[list[str], list[str]]:
+    """One profile-discovery pass against ``ctx.abs_home``, mutating ``live`` in
+    place. For each NEWLY-appeared profile with a token, build a poller and spawn
+    its (staggered) supervisor task; for each profile whose dir VANISHED, stop and
+    drop its poller. Existing pollers — and any live sessions — are never touched:
+    only the set difference is acted on. Emits ``profile_added``/``profile_removed``.
+    Returns ``(added_names, removed_names)`` for logging/tests. Never raises."""
+    try:
+        found = {p.name: p for p in discover(ctx.abs_home, home=ctx.home)}
+    except Exception:
+        log.exception("profile rescan: discovery failed — leaving pollers unchanged")
+        return [], []
+
+    existing = set(live.keys())
+    added: list[str] = []
+    removed: list[str] = []
+
+    for name in sorted(set(found) - existing):
+        if stop.is_set():
+            break
+        result = _build_one_poller(
+            found[name],
+            ctx.cfg,
+            ctx.daemon_dir,
+            ctx.base_url,
+            engine=ctx.engine,
+            script_path=ctx.script_path,
+            session_count=ctx.session_count,
+            events=ctx.events,
+            sandbox_mgr=ctx.sandbox_mgr,
+        )
+        if result is None:  # no token yet — a rescan next cycle will pick it up
+            continue
+        poller, client = result
+        task = asyncio.ensure_future(
+            _run_profile(poller, ctx.cfg.poll_stagger_s, stop)
+        )
+        live[name] = {"poller": poller, "client": client, "task": task}
+        added.append(name)
+        log.info("rescan: profile %s appeared — poller started", name)
+        if ctx.events is not None:
+            ctx.events.emit(EVENT_PROFILE_ADDED, profile=name)
+
+    for name in sorted(existing - set(found)):
+        entry = live.pop(name, None)
+        if entry is None:
+            continue
+        await _drop_poller(name, entry)
+        removed.append(name)
+        log.info("rescan: profile %s vanished — poller stopped", name)
+        if ctx.events is not None:
+            ctx.events.emit(EVENT_PROFILE_REMOVED, profile=name)
+
+    return added, removed
+
+
+async def _rescan_loop(
+    live: dict[str, dict],
+    ctx: _RunCtx,
+    stop: asyncio.Event,
+    sleep=asyncio.sleep,
+) -> None:
+    """Periodically (``cfg.profile_rescan_s``) run :func:`_rescan_once` until
+    ``stop``. A cadence of 0 disables rescanning entirely (the loop returns at
+    once). ``sleep`` is injectable so tests drive cadence without real waits."""
+    if ctx.cfg.profile_rescan_s <= 0:
+        return
+    while not stop.is_set():
+        if await _sleep_or_stop(ctx.cfg.profile_rescan_s, stop, sleep):
+            return
+        await _rescan_once(live, ctx, stop)
+
+
 async def _run_forever(
-    pollers: list[tuple[Poller, TelegramClient]], cfg: config_mod.DaemonConfig
+    pollers: list[tuple[Poller, TelegramClient]],
+    cfg: config_mod.DaemonConfig,
+    ctx: "_RunCtx | None" = None,
 ) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -395,23 +553,31 @@ async def _run_forever(
         except (NotImplementedError, RuntimeError):  # e.g. non-main thread
             pass
 
-    tasks = [
-        asyncio.ensure_future(_run_profile(poller, cfg.poll_stagger_s * i, stop))
-        for i, (poller, _) in enumerate(pollers)
-    ]
-    if not tasks:
-        log.warning("no pollers to run — idling until signalled")
+    live: dict[str, dict] = {}
+    for i, (poller, client) in enumerate(pollers):
+        task = asyncio.ensure_future(_run_profile(poller, cfg.poll_stagger_s * i, stop))
+        live[poller.profile.name] = {"poller": poller, "client": client, "task": task}
+
+    rescan_task = None
+    if ctx is not None and cfg.profile_rescan_s > 0:
+        rescan_task = asyncio.ensure_future(_rescan_loop(live, ctx, stop))
+
+    if not live and rescan_task is None:
+        log.warning("no pollers to run and rescan disabled — idling until signalled")
         await stop.wait()
         return
+
     await stop.wait()
-    log.info("shutdown signal received — stopping %d poller(s)", len(tasks))
-    for t in tasks:
-        t.cancel()
-    for t in tasks:
+    log.info("shutdown signal received — stopping %d poller(s)", len(live))
+    if rescan_task is not None:
+        rescan_task.cancel()
         try:
-            await t
-        except asyncio.CancelledError:
+            await rescan_task
+        except (asyncio.CancelledError, Exception):
             pass
+    # Snapshot: the rescan is cancelled, so `live` no longer mutates under us.
+    for name, entry in list(live.items()):
+        await _drop_poller(name, entry)
 
 
 async def _amain(args: argparse.Namespace) -> int:
@@ -472,9 +638,24 @@ async def _amain(args: argparse.Namespace) -> int:
     )
     events.emit(EVENT_DAEMON_START, version=__version__, profiles=[p.name for p in profiles])
 
-    pollers = _build_pollers(
-        profiles, cfg, daemon_dir, base_url, engine=engine, events=events,
+    script_path = _default_script_path()
+    session_count = _make_session_count(engine)
+    ctx = _RunCtx(
+        cfg=cfg,
+        abs_home=abs_home,
+        home=home,
+        daemon_dir=daemon_dir,
+        base_url=base_url,
+        engine=engine,
+        script_path=script_path,
+        session_count=session_count,
+        events=events,
         sandbox_mgr=sandbox_mgr,
+    )
+
+    pollers = _build_pollers(
+        profiles, cfg, daemon_dir, base_url, engine=engine,
+        script_path=script_path, events=events, sandbox_mgr=sandbox_mgr,
     )
     stop_reason = "signal"
     try:
@@ -482,7 +663,7 @@ async def _amain(args: argparse.Namespace) -> int:
             await _run_once(pollers)
             stop_reason = "once"
         else:
-            await _run_forever(pollers, cfg)
+            await _run_forever(pollers, cfg, ctx)
     finally:
         events.emit(EVENT_DAEMON_STOP, reason=stop_reason)
         for _, client in pollers:

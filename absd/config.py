@@ -90,6 +90,10 @@ class DaemonConfig:
     # verbatim (may contain "~"); expansion happens at use sites.
     sandbox_root: str = "~/Projects/sandboxes"
 
+    # Profile rescan cadence (new-bot provisioning): the daemon re-runs discovery
+    # this often so a bot added while it runs gets an idle poller. 0 disables it.
+    profile_rescan_s: float = 60.0
+
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping for this config."""
         return asdict(self)
@@ -146,6 +150,10 @@ def validate(cfg: DaemonConfig) -> DaemonConfig:
         raise ConfigError(f"log_max_bytes must be an int >= 1024, got {cfg.log_max_bytes!r}")
     if not isinstance(cfg.log_keep, int) or cfg.log_keep < 1:
         raise ConfigError(f"log_keep must be an int >= 1, got {cfg.log_keep!r}")
+    if cfg.profile_rescan_s < 0:
+        raise ConfigError(
+            f"profile_rescan_s must be >= 0 (0 disables), got {cfg.profile_rescan_s!r}"
+        )
     return cfg
 
 
