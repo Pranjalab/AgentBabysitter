@@ -39,17 +39,18 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from absd import __version__
 from absd import flow as flow_mod
 from absd.config import DaemonConfig
-from absd.engines.base import Engine, EngineError
+from absd.engines.base import Engine, EngineError, SessionHandle
 from absd.flow import ProjectOption
 from absd.pool import Pool, PooledMessage, utc_now_iso
 from absd.profiles import Profile
+from absd.recents import Recents, RecentEntry
 from absd.registry import Registry
 from absd.telegram import Conflict409, TelegramClient, TelegramError
 
@@ -88,14 +89,15 @@ NO_PROJECTS_MSG = (
     "or set a workspace root:\n"
     "  abs config workspace-root <dir>"
 )
-# The HANDOFF confirmation (Step 1.5). Includes the EXACT attach command for the
-# engine that was used (from engine.attach_command) — a generic "abs attach" left
-# the human unable to reach the running session (live-demo finding).
+# The HANDOFF confirmation (Step 1.5 / 2.2d). The attach hint is the SAFE wrapper
+# `abs attach <profile>` — NOT the raw engine command. `abs attach` now resolves
+# the owning engine (bug 2 fix) and re-checks liveness before exec, so it can't
+# resurrect a stopped session; a raw `herdr session attach` in the confirmation is
+# exactly what a user copy-pasted to revive a session and kill a live one.
 HANDOFF_CONFIRM = (
     "🚀 Started {label} ({mode}).\n"
     "Send it a task here, or attach at the terminal:\n"
-    "  abs attach {profile}\n"
-    "  {attach_cmd}"
+    "  abs attach {profile}"
 )
 # Sent AFTER reclaim completes (PLAN.md 4.1 — only after the token is free again).
 SESSION_ENDED_MSG = "⏹ Session ended. I'm listening again — send ABS START to begin."
@@ -111,6 +113,22 @@ HANDOFF_FAILED_MSG = (
     "Nothing is running now. Send ABS START to try again, or check "
     "`abs daemon logs` at the terminal."
 )
+
+# A resume tap whose recorded folder has since been deleted (Step 2.2 edge case).
+RECENT_GONE_MSG = "📁 That folder no longer exists — I've removed it from recents."
+
+# Telegram "/" menus (Step 2.2 pulled forward). The daemon registers the IDLE menu
+# while polling and the SESSION menu at handoff, so the "/" list always matches
+# what the bot can currently do. Debounced (only re-set when the menu changes).
+MENU_IDLE = [
+    {"command": "abs_start", "description": "Start a session"},
+    {"command": "abs_status", "description": "Daemon + pool status"},
+    {"command": "abs_pool", "description": "Show pooled messages"},
+]
+MENU_SESSION = [
+    {"command": "abs_exit", "description": "End the session"},
+    {"command": "usage", "description": "Usage report"},
+]
 
 # Poller session-state machine (PLAN.md 4.1). IDLE covers both real IDLE_POLLING
 # and the terminal-launch yield (which stays IDLE and yields via should_poll);
@@ -151,16 +169,42 @@ def normalize_command(text: str | None) -> str:
     return text.strip().upper()
 
 
+# The three "/" menu aliases (Step 2.2 pulled forward). Case-insensitive, exact
+# whole-message, with the optional ``@botname`` suffix Telegram appends in groups
+# stripped. This ONLY adds these three fixed aliases — the D9 grammar is otherwise
+# unchanged; everything else still pools.
+_SLASH_ALIASES = {
+    "/ABS_START": "ABS START",
+    "/ABS_STATUS": "ABS STATUS",
+    "/ABS_POOL": "ABS POOL",
+}
+
+
+def canonical_command(text: str | None) -> str:
+    """Normalized command with ``/abs_*`` slash aliases resolved to their ABS
+    phrase. A slash alias must be a single token (``/abs_start`` or
+    ``/abs_start@mybot``) — ``/abs_start extra`` is NOT a command (it pools, D9)."""
+    norm = normalize_command(text)
+    if norm.startswith("/"):
+        tokens = norm.split()
+        if len(tokens) == 1:
+            base = tokens[0].split("@", 1)[0]  # strip @botname
+            alias = _SLASH_ALIASES.get(base)
+            if alias is not None:
+                return alias
+    return norm
+
+
 def is_status(text: str | None) -> bool:
-    return normalize_command(text) == "ABS STATUS"
+    return canonical_command(text) == "ABS STATUS"
 
 
 def is_pool_cmd(text: str | None) -> bool:
-    return normalize_command(text) == "ABS POOL"
+    return canonical_command(text) == "ABS POOL"
 
 
 def is_start(text: str | None) -> bool:
-    return normalize_command(text) == "ABS START"
+    return canonical_command(text) == "ABS START"
 
 
 # ---- pure reply rendering -----------------------------------------------------
@@ -342,11 +386,13 @@ class Flow:
     """
 
     chat_id: int
-    step: str  # "project" | "folder" | "mode"
+    step: str  # "recents" | "project" | "folder" | "mode"
     options: list[ProjectOption]
     started_at: float
     chosen_path: str | None = None
     label: str = ""
+    #: Recents offered on the "recents" step (list of RecentEntry). Empty otherwise.
+    recents: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -357,9 +403,28 @@ class HandoffRequest:
     project_path: str
     label: str
     away: bool
+    #: True for a "▶ Resume" launch — appends ``--continue`` so claude resumes the
+    #: previous conversation in that path (Step 2.2 resume-first).
+    resume: bool = False
 
 
 # ---- offset persistence -------------------------------------------------------
+
+
+def _pid_is_alive(pid: int | None) -> bool:
+    """True if ``pid`` names a live process (``os.kill(pid, 0)``). A pid owned by
+    another user (PermissionError) counts as alive; anything else is dead."""
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class Poller:
@@ -396,6 +461,13 @@ class Poller:
         #: The project registry + workspace-root config are re-read on demand so
         #: a terminal `abs project add` shows up without a daemon restart.
         self.registry = Registry(self.state_dir / "registry.json")
+        #: Recent launches (resume-first ABS START, Step 2.2). Shared file, keyed
+        #: by profile; re-read on demand so a terminal launch shows up live.
+        self.recents = Recents(self.state_dir / "recents.json")
+        #: Last "/" menu kind set for this bot ("idle"/"session"/None), persisted
+        #: so the daemon doesn't re-call set_my_commands every cycle (debounce).
+        self._menu_path = self.state_dir / f"menu-{profile.name}.json"
+        self._menu_kind: str | None = self._load_menu_kind()
 
         #: ABS START conversation state; None when no flow is in progress.
         self.flow: Flow | None = None
@@ -407,6 +479,16 @@ class Poller:
         self._handoff_chat_id: int | None = None
         self._handoff_at: float = 0.0
         self._session_seen_alive = False
+        #: The pane the daemon launched into (Step 2.2c precise liveness) — engine
+        #: liveness is checked at THIS pane, never "first pane". None for tmux.
+        self._session_pane_id: str | None = None
+        #: The RECORDED launcher pid (our claude), for the pid liveness signal and
+        #: clobber detection — NOT the shared session.pid file, which a terminal
+        #: launch can overwrite (the incident that killed a live session).
+        self._launched_pid: int | None = None
+        #: One-shot guard so the "session.pid clobbered by a foreign session" warning
+        #: is logged once per takeover, not every watch cycle.
+        self._foreign_warned = False
         #: Offset value committed by the single HANDOFF commit (test bookkeeping).
         self.handoff_committed_offset: int | None = None
         #: Per-profile status file (Step 1.4) — rewritten atomically each cycle so
@@ -713,12 +795,18 @@ class Poller:
         except TelegramError:
             log.debug("poller[%s] flow-expiry notice failed", self.profile.name)
 
+    def _recents_for_flow(self) -> list[RecentEntry]:
+        """The recents to offer on the resume screen (most-recent-first, capped to
+        what the keyboard shows). Re-read on demand so a terminal launch appears."""
+        return self.recents.list(self.profile.name)[: flow_mod.RECENTS_SHOWN]
+
     async def _begin_flow(self, ex: Extracted) -> None:
-        """Start (or restart) the ABS START flow: send the project keyboard.
+        """Start (or restart) the ABS START flow. Resume-first (Step 2.2): if there
+        are recent launches, offer them (one-tap resume) + "🆕 New session"; with no
+        recents, go straight to the project picker (Step 1.5 behavior).
 
         Refuses up front (no flow started) when a session is already live for this
-        profile (attach hint), at the max_sessions cap, or when there is nothing
-        to start in (no registry, no workspace root)."""
+        profile (attach hint) or at the max_sessions cap."""
         chat_id = ex.chat_id
         await self._answer_if_callback(ex)
 
@@ -737,6 +825,31 @@ class Poller:
                 )
             return
 
+        recents = self._recents_for_flow()
+        if recents:
+            if chat_id is None:
+                self.flow = None
+                return
+            await self.client.send_message(
+                chat_id,
+                flow_mod.render_recents_menu(recents),
+                reply_markup=flow_mod.build_recents_keyboard(recents),
+            )
+            self.flow = Flow(
+                chat_id=chat_id,
+                step="recents",
+                options=[],
+                started_at=self._clock(),
+                recents=recents,
+            )
+            return
+
+        # No recents → the Step 1.5 project picker unchanged.
+        await self._send_project_step(chat_id)
+
+    async def _send_project_step(self, chat_id: int | None) -> None:
+        """Send the project keyboard and enter the "project" step (or explain that
+        there is nothing to start in). Shared by _begin_flow and "🆕 New session"."""
         options = flow_mod.enumerate_project_options(
             self._registered(), self._workspace_root()
         )
@@ -745,8 +858,8 @@ class Poller:
             if chat_id is not None:
                 await self.client.send_message(chat_id, NO_PROJECTS_MSG)
             return
-
         if chat_id is None:
+            self.flow = None
             return
         await self.client.send_message(
             chat_id,
@@ -776,6 +889,53 @@ class Poller:
         # plain message has no callback id and the number/name is ex.text.
         data = ex.text if ex.callback_query_id is not None else None
         text = ex.text
+
+        if flow.step == "recents":
+            choice = flow_mod.choose_recent(data, text, len(flow.recents))
+            await self._answer_if_callback(ex)
+            if choice is None:
+                await self.client.send_message(
+                    flow.chat_id,
+                    "Tap a Resume button or 🆕 New session (or reply with a number).",
+                )
+                return
+            if choice == "new":
+                await self._send_project_step(flow.chat_id)  # fresh launch, no --continue
+                return
+            entry = flow.recents[choice]
+            # The recorded folder may have been deleted since (edge case): drop it
+            # and re-show the (updated) recents, or fall to the picker if empty.
+            if not Path(entry.path).is_dir():
+                self.recents.remove(self.profile.name, entry.path)
+                await self.client.send_message(flow.chat_id, RECENT_GONE_MSG)
+                remaining = self._recents_for_flow()
+                if remaining:
+                    flow.recents = remaining
+                    await self.client.send_message(
+                        flow.chat_id,
+                        flow_mod.render_recents_menu(remaining),
+                        reply_markup=flow_mod.build_recents_keyboard(remaining),
+                    )
+                else:
+                    await self._send_project_step(flow.chat_id)
+                return
+            # A resume is a launch too — re-check the cap at tap time.
+            if self._at_session_cap():
+                self.flow = None
+                await self.client.send_message(
+                    flow.chat_id, AT_CAP_MSG.format(cap=self.cfg.max_sessions)
+                )
+                return
+            # One-tap resume: skip project + mode, use the recorded mode, --continue.
+            self._handoff_request = HandoffRequest(
+                chat_id=flow.chat_id,
+                project_path=entry.path,
+                label=entry.label,
+                away=(entry.mode == "away"),
+                resume=True,
+            )
+            self.flow = None
+            return
 
         if flow.step == "project":
             opt = flow_mod.choose_project(data, text, flow.options)
@@ -860,15 +1020,26 @@ class Poller:
     def handoff_marker_path(self) -> Path:
         return self.profile.profile_dir / "daemon-handoff.json"
 
-    def _write_handoff_marker(self, project: str, mode: str, chat_id: int | None) -> None:
+    def _write_handoff_marker(
+        self,
+        project: str,
+        mode: str,
+        chat_id: int | None,
+        pane_id: str | None = None,
+        launcher_pid: int | None = None,
+    ) -> None:
         """Write ``daemon-handoff.json`` atomically (0600). Records timestamp,
-        project, mode (PLAN.md 4.1) plus the chat id so RECLAIM knows where to send
-        the 'session ended' note."""
+        project, mode (PLAN.md 4.1), the chat id (so RECLAIM knows where to send the
+        'session ended' note), and — post-launch — the launched ``pane_id`` +
+        ``launcher_pid`` so liveness is judged at the recorded pane, not any pane
+        (Step 2.2c)."""
         record = {
             "timestamp": utc_now_iso(),
             "project": project,
             "mode": mode,
             "chat_id": chat_id,
+            "pane_id": pane_id,
+            "launcher_pid": launcher_pid,
         }
         try:
             self.profile.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -943,39 +1114,48 @@ class Poller:
             self.handoff_committed_offset = self.offset
 
         mode = "away" if req.away else "normal"
-        # (3) handoff marker.
+        # (3) handoff marker (pre-launch, for crash-safety — pane recorded below).
         self._write_handoff_marker(req.project_path, mode, req.chat_id)
 
         # (4) launch through the engine (never reimplement the launcher — 4.2),
         # self-healing over a stale leftover engine session (live-demo finding:
         # a herdr session survives claude's exit, so the next create collided).
-        if not await self._launch_session(req):
+        handle = await self._launch_session(req)
+        if handle is None:
             self.session_state = STATE_IDLE
             return
 
-        # (5) confirmation with the EXACT attach command for the engine used.
-        attach_cmd = ""
-        if self.engine is not None:
-            try:
-                attach_cmd = self.engine.attach_command(self.profile.name)
-            except Exception:
-                attach_cmd = ""
+        # Record the launched pane (Step 2.2c precise liveness) + persist it in the
+        # marker, so death is judged at THIS pane / THIS pid — never a resurrected
+        # attach pane or a clobbered session.pid.
+        self._session_pane_id = handle.pane_id
+        self._launched_pid = handle.pid
+        self._foreign_warned = False
+        self._write_handoff_marker(
+            req.project_path, mode, req.chat_id,
+            pane_id=handle.pane_id, launcher_pid=handle.pid,
+        )
+
+        # (5) confirmation. The attach hint is the SAFE wrapper `abs attach` — it
+        # resolves the owning engine and re-checks liveness before attaching, so it
+        # cannot resurrect a stopped session (unlike a raw engine attach command,
+        # which is what killed a session in the second incident — Step 2.2d).
         if req.chat_id is not None:
             await self._safe_send(
                 req.chat_id,
                 HANDOFF_CONFIRM.format(
-                    label=req.label,
-                    mode=mode,
-                    profile=self.profile.name,
-                    attach_cmd=attach_cmd,
+                    label=req.label, mode=mode, profile=self.profile.name
                 ),
             )
 
-        # (6) SESSION_LIVE.
+        # (6) SESSION_LIVE. Record for resume-first ABS START, and swap the "/"
+        # menu to the in-session set now the session owns the bot (Step 2.2).
+        self._record_recent(req)
         self.session_state = STATE_SESSION_LIVE
         self._handoff_chat_id = req.chat_id
         self._handoff_at = self._clock()
         self._session_seen_alive = False
+        await self._ensure_menu("session")
         log.info(
             "poller[%s] HANDOFF complete — session launching in %s",
             self.profile.name,
@@ -989,22 +1169,39 @@ class Poller:
         except TelegramError:
             log.debug("poller[%s] send failed", self.profile.name)
 
-    def _create_session(self, req: HandoffRequest) -> None:
-        """Build the launcher argv/env and create the engine session (4.2)."""
+    def _create_session(self, req: HandoffRequest) -> "SessionHandle":
+        """Build the launcher argv/env and create the engine session (4.2),
+        returning its :class:`SessionHandle` (the launched pane, Step 2.2c).
+        ``req.resume`` appends ``--continue`` so claude resumes the prior
+        conversation in that cwd (Step 2.2 resume-first)."""
         if self.engine is None:
             raise EngineError("no session engine configured")
         argv = flow_mod.build_launcher_argv(
-            self._script_path(), self.profile.name, req.away
+            self._script_path(), self.profile.name, req.away, resume=req.resume
         )
         env = {"ABS_HOME": str(self.profile.abs_home)}
-        self.engine.create_session(
+        return self.engine.create_session(
             self.profile.name, Path(req.project_path), argv, env
         )
 
-    async def _launch_session(self, req: HandoffRequest) -> bool:
+    def _record_recent(self, req: HandoffRequest) -> None:
+        """Record a successful launch for resume-first ABS START (Step 2.2).
+        Never raises — a recents-write failure must not disturb a live handoff."""
+        try:
+            self.recents.record(
+                self.profile.name,
+                req.project_path,
+                req.label,
+                "away" if req.away else "normal",
+            )
+        except Exception:
+            log.debug("poller[%s] recents record failed", self.profile.name)
+
+    async def _launch_session(self, req: HandoffRequest) -> "SessionHandle | None":
         """Create the session, self-healing over a stale leftover (live-demo bug).
 
-        Returns True on success. On a create failure:
+        Returns the :class:`SessionHandle` on success, ``None`` on failure. On a
+        create failure:
           * if a **genuinely live** session exists for this profile (live
             ``session.pid``) — do NOT clobber it: clear the marker, point the user
             at it with the attach hint, and abort (no retry).
@@ -1014,8 +1211,7 @@ class Poller:
             the marker and reports an actionable message.
         """
         try:
-            self._create_session(req)
-            return True
+            return self._create_session(req)
         except Exception as exc:  # EngineError or anything the engine surfaces
             if self.profile.live_session_pid() is not None:
                 log.warning(
@@ -1027,7 +1223,7 @@ class Poller:
                     await self._safe_send(
                         req.chat_id, ALREADY_LIVE_MSG.format(profile=self.profile.name)
                     )
-                return False
+                return None
             log.warning(
                 "poller[%s] create failed (%s); no live session — cleaning stale "
                 "engine session and retrying once",
@@ -1038,9 +1234,9 @@ class Poller:
                 await self._safe_send(req.chat_id, HANDOFF_STALE_RECOVER_MSG)
             self._kill_engine_session()
             try:
-                self._create_session(req)
+                handle = self._create_session(req)
                 log.info("poller[%s] handoff recovered after stale cleanup", self.profile.name)
-                return True
+                return handle
             except Exception as exc2:
                 log.error(
                     "poller[%s] handoff launch failed after self-heal: %s",
@@ -1052,7 +1248,7 @@ class Poller:
                     await self._safe_send(
                         req.chat_id, HANDOFF_FAILED_MSG.format(err=exc2)
                     )
-                return False
+                return None
 
     def _kill_engine_session(self) -> None:
         """Tear down this profile's engine session (best-effort; never raises).
@@ -1068,21 +1264,93 @@ class Poller:
                 "poller[%s] engine kill failed: %s", self.profile.name, exc
             )
 
+    # ---- Telegram "/" menu (Step 2.2 pulled forward) ---------------------
+
+    def _load_menu_kind(self) -> str | None:
+        try:
+            data = json.loads(self._menu_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        kind = data.get("kind") if isinstance(data, dict) else None
+        return kind if kind in ("idle", "session") else None
+
+    def _persist_menu_kind(self, kind: str) -> None:
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._menu_path.with_suffix(".tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, (json.dumps({"kind": kind}) + "\n").encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(str(tmp), str(self._menu_path))
+            os.chmod(self._menu_path, 0o600)
+        except OSError:
+            log.debug("poller[%s] menu-kind persist failed", self.profile.name)
+
+    async def _ensure_menu(self, kind: str) -> None:
+        """Register the ``/`` menu for ``kind`` ("idle"/"session") via
+        set_my_commands, but ONLY when it differs from the last one set (debounce —
+        never hammer the API every cycle). The last kind is persisted so a restart
+        doesn't re-register needlessly."""
+        if self._menu_kind == kind:
+            return
+        commands = MENU_IDLE if kind == "idle" else MENU_SESSION
+        try:
+            await self.client.set_my_commands(commands)
+        except TelegramError:
+            log.debug("poller[%s] set_my_commands failed", self.profile.name)
+            return
+        self._menu_kind = kind
+        self._persist_menu_kind(kind)
+
     # ---- SESSION_LIVE / RECLAIM (PLAN.md 4.1) ----------------------------
 
+    def _engine_pane_alive(self) -> bool:
+        """Engine liveness for OUR launched session — targeted at the RECORDED
+        pane (Step 2.2c), never "any pane". An attach-spawned second pane is
+        therefore never mistaken for the session."""
+        if self.engine is None:
+            return False
+        try:
+            return self.engine.is_alive(self.profile.name, pane_id=self._session_pane_id)
+        except EngineError:
+            return False
+
+    def _foreign_takeover(self) -> bool:
+        """True when a TERMINAL launch overwrote ``session.pid`` with a *different,
+        live* pid — a foreign session took over the bot (the incident's root cause).
+
+        The daemon must yield to it (like a boot-detected terminal session) and must
+        NOT reclaim/kill: our own recorded pane may still be running the original
+        session, and the foreign pid is someone else's live process. Compares the
+        on-disk ``session.pid`` against the pid we recorded at launch."""
+        if self._launched_pid is None:
+            return False
+        disk = self.profile.session_pid_on_disk()
+        if disk is None or disk == self._launched_pid:
+            return False
+        return _pid_is_alive(disk)
+
     def _session_dead(self) -> bool:
-        """Reconcile BOTH liveness signals (PLAN.md 4.1): a daemon-launched session
-        is dead only when neither ``session.pid`` is alive NOR the engine reports
-        the session alive. If either says alive, it is not (yet) dead — the safe
-        bias, so a flapping/racy single signal never triggers a premature reclaim."""
-        pid_alive = self.profile.live_session_pid() is not None
-        engine_alive = False
-        if self.engine is not None:
-            try:
-                engine_alive = self.engine.is_alive(self.profile.name)
-            except EngineError:
-                engine_alive = False
-        return not pid_alive and not engine_alive
+        """Reconcile BOTH liveness signals (PLAN.md 4.1 + Step 2.2c): the session is
+        dead only when neither our RECORDED launcher pid is alive NOR the engine
+        reports our RECORDED pane alive.
+
+        Crucially this uses the pid we *launched* (``_launched_pid``), not the shared
+        ``session.pid`` file — a terminal launch can clobber that file, and trusting
+        it made the daemon reclaim (kill) a live session. A foreign takeover is never
+        "dead" (that is handled in :meth:`watch_once`, which yields instead)."""
+        if self._foreign_takeover():
+            return False
+        # PID signal: the recorded launcher pid; fall back to the disk pid only if we
+        # never recorded one (e.g. a pre-2.2c marker with no launcher_pid).
+        if self._launched_pid is not None:
+            pid_alive = _pid_is_alive(self._launched_pid)
+        else:
+            pid_alive = self.profile.live_session_pid() is not None
+        return not pid_alive and not self._engine_pane_alive()
 
     async def watch_once(self) -> bool:
         """One SESSION_LIVE liveness check. Returns True while the session is
@@ -1092,6 +1360,30 @@ class Poller:
         A launch that never comes alive within ``session_start_grace_s`` (crash,
         not-logged-in — full login detection is Step 1.6) is treated as a failed
         start and reclaimed, so the daemon can never wedge in SESSION_LIVE."""
+        # FIX C: a foreign terminal session clobbered session.pid → yield to it, do
+        # NOT reclaim/kill. We stay SESSION_LIVE and keep watching; reclaim only when
+        # BOTH the foreign pid AND our recorded pane are dead (checked below once the
+        # foreign pid clears).
+        if self._foreign_takeover():
+            if not self._foreign_warned:
+                log.warning(
+                    "poller[%s] session.pid clobbered by a foreign (terminal) session "
+                    "(pid %s) — yielding, NOT reclaiming our recorded session",
+                    self.profile.name,
+                    self.profile.session_pid_on_disk(),
+                )
+                self._foreign_warned = True
+            self._session_seen_alive = True
+            return True
+
+        # Capture the launcher pid (for the clobber cross-check) the first time our
+        # recorded pane is alive, from the session.pid abs.sh wrote — if the engine
+        # couldn't report it at create time (herdr, before the command foregrounds).
+        if self._launched_pid is None and self._engine_pane_alive():
+            disk = self.profile.session_pid_on_disk()
+            if disk is not None:
+                self._launched_pid = disk
+
         if not self._session_dead():
             self._session_seen_alive = True
             return True
@@ -1155,6 +1447,11 @@ class Poller:
         self.session_state = STATE_IDLE
         self._session_seen_alive = False
         self._handoff_chat_id = None
+        self._session_pane_id = None
+        self._launched_pid = None
+        self._foreign_warned = False
+        # Back to idle-polling — restore the idle "/" menu (Step 2.2).
+        await self._ensure_menu("idle")
         log.info("poller[%s] RECLAIM complete — polling resumes", self.profile.name)
 
     # ---- run loop --------------------------------------------------------
@@ -1177,6 +1474,10 @@ class Poller:
         """
         # A handoff marker with no live session at startup is stale (2.3 preview).
         await self.check_stale_handoff()
+        # Register the "/" menu matching our state at boot (Step 2.2; debounced).
+        await self._ensure_menu(
+            "session" if self.session_state == STATE_SESSION_LIVE else "idle"
+        )
 
         cycles = 0
         backoff: float | None = None

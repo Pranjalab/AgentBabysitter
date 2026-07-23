@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from absd.engines.base import EngineError, SessionInfo
+from absd.engines.base import EngineError, SessionHandle, SessionInfo
 
 #: Every ABS herdr session is named with this prefix + the profile name. herdr's
 #: own always-present "default" session never carries it, so it is filtered out.
@@ -404,9 +404,11 @@ class HerdrEngine:
         cwd: Path,
         command: list[str],
         env: dict[str, str],
-    ) -> None:
+    ) -> SessionHandle:
         """Create the headless session ``abs-<profile>`` running ``command`` in
-        ``cwd`` with ``env`` overlaid. Never attaches a client.
+        ``cwd`` with ``env`` overlaid. Never attaches a client. Returns a
+        :class:`SessionHandle` naming the root pane (``w1:p1``) — the daemon
+        targets liveness at THIS pane, never "first pane" (Step 2.2c).
 
         Raises :class:`HerdrError` if a session of that name is already running —
         the daemon relies on this being loud, not a silent no-op (matches
@@ -470,17 +472,35 @@ class HerdrEngine:
             session=name,
         )
 
-    def is_alive(self, profile: str) -> bool:
+        # Best-effort launched-pid (may be None until the command foregrounds).
+        pid = launched_pid(self._process_info(name, pane_id))
+        return SessionHandle(pane_id=pane_id, pid=pid)
+
+    def is_alive(self, profile: str, pane_id: str | None = None) -> bool:
         """True iff the launched command is still running.
 
         See the module liveness note: herdr keeps the pane/session after the
         command exits, so existence is not the signal. Alive iff the session is
-        running AND a launched job holds the pane's foreground
+        running AND a launched job holds a pane's foreground
         (``fg_pgid != shell_pid``).
+
+        **Pane targeting (Step 2.2c — the liveness fix).** When ``pane_id`` is
+        given (the pane recorded at create), liveness is checked on THAT pane
+        only. This is critical: an attach that resurrects a stopped session and
+        opens a second workspace/pane with a bare ``$HOME`` shell must never be
+        read as "the session" — the "first pane" heuristic did exactly that and
+        made the daemon reclaim (kill) a live claude. A recorded pane that no
+        longer exists reads as command-dead (process-info fails → not running),
+        never a fall-back to another pane. ``pane_id=None`` keeps the legacy
+        first-pane view for callers that never recorded one (e.g. list_sessions).
         """
         name = self._session_name(profile)
         if not self._is_running(name):
             return False
+        if pane_id is not None:
+            # Target the recorded pane ONLY. A gone pane → process-info fails →
+            # command_running False; never fall back to any other pane.
+            return command_running(self._process_info(name, pane_id))
         pane = self._pane_of(name)
         if pane is None:
             # Raced with teardown, or the server is not answering: treat as gone.

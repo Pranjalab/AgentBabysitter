@@ -167,3 +167,64 @@ def test_build_launcher_argv() -> None:
     assert argv == ["bash", "/opt/abs.sh", "--profile", "work", "--daemon-start"]
     argv_away = flow.build_launcher_argv("/opt/abs.sh", "work", away=True)
     assert argv_away[-1] == "--away"
+
+
+def test_build_launcher_argv_resume_appends_continue() -> None:
+    argv = flow.build_launcher_argv("/opt/abs.sh", "work", away=False, resume=True)
+    assert argv[-1] == "--continue"
+    assert argv[:5] == ["bash", "/opt/abs.sh", "--profile", "work", "--daemon-start"]
+    both = flow.build_launcher_argv("/opt/abs.sh", "work", away=True, resume=True)
+    assert "--away" in both and both[-1] == "--continue"
+
+
+# ---- resume-first recents screen (Step 2.2) ----------------------------------
+
+
+from datetime import datetime, timezone  # noqa: E402
+
+
+def _dt(s: str) -> datetime:
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def test_humanize_age_coarse() -> None:
+    now = _dt("2026-07-23T15:00:00Z")
+    assert flow.humanize_age("2026-07-23T14:59:30Z", now) == "just now"
+    assert flow.humanize_age("2026-07-23T14:48:00Z", now) == "12m"
+    assert flow.humanize_age("2026-07-23T12:00:00Z", now) == "3h"
+    assert flow.humanize_age("2026-07-18T15:00:00Z", now) == "5d"
+    assert flow.humanize_age("garbage", now) == ""
+
+
+class _Rec:
+    def __init__(self, label: str, started_at: str = "") -> None:
+        self.label = label
+        self.started_at = started_at
+
+
+def test_recents_keyboard_and_menu() -> None:
+    recents = [_Rec("llm"), _Rec("web"), _Rec("api"), _Rec("extra")]
+    kb = flow.build_recents_keyboard(recents)
+    rows = kb["inline_keyboard"]
+    # up to RECENTS_SHOWN resume buttons + a New session row
+    assert len(rows) == flow.RECENTS_SHOWN + 1
+    assert rows[0][0]["callback_data"] == "as:r:0"
+    assert rows[-1][0]["callback_data"] == flow.CB_NEW_SESSION
+    assert "Resume llm" in rows[0][0]["text"]
+    menu = flow.render_recents_menu(recents)
+    assert "1. ▶ Resume llm" in menu
+    assert f"{flow.RECENTS_SHOWN + 1}. 🆕 New session" in menu
+
+
+def test_choose_recent_callback_and_text() -> None:
+    # callback
+    assert flow.choose_recent("as:r:0", "", 3) == 0
+    assert flow.choose_recent("as:r:2", "", 3) == 2
+    assert flow.choose_recent("as:r:9", "", 3) is None
+    assert flow.choose_recent(flow.CB_NEW_SESSION, "", 3) == "new"
+    # numbered fallback (1..count = recents, count+1 = new)
+    assert flow.choose_recent(None, "1", 3) == 0
+    assert flow.choose_recent(None, "3", 3) == 2
+    assert flow.choose_recent(None, "4", 3) == "new"
+    assert flow.choose_recent(None, "5", 3) is None
+    assert flow.choose_recent(None, "nope", 3) is None

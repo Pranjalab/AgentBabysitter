@@ -18,6 +18,9 @@ from absd.daemon import (
     AT_CAP_MSG,
     FLOW_EXPIRED_MSG,
     HANDOFF_STALE_RECOVER_MSG,
+    MENU_IDLE,
+    MENU_SESSION,
+    RECENT_GONE_MSG,
     SESSION_ENDED_MSG,
     STATE_IDLE,
     STATE_RECLAIM,
@@ -26,8 +29,9 @@ from absd.daemon import (
     HandoffRequest,
     Poller,
 )
-from absd.engines.base import EngineError, SessionInfo
+from absd.engines.base import EngineError, SessionHandle, SessionInfo
 from absd.profiles import discover
+from absd.recents import Recents
 from absd.registry import Registry
 from tests.conftest import write_profile
 from tests.harness.fake_telegram import FakeTelegram
@@ -47,7 +51,7 @@ class FakeEngine:
     def available(self) -> bool:
         return True
 
-    def create_session(self, profile, cwd, command, env) -> None:
+    def create_session(self, profile, cwd, command, env) -> SessionHandle:
         if self.fail:
             raise EngineError("simulated engine failure")
         if self._alive.get(profile):
@@ -61,8 +65,9 @@ class FakeEngine:
             }
         )
         self._alive[profile] = True
+        return SessionHandle(pane_id=f"{profile}:w1:p1", pid=None)
 
-    def is_alive(self, profile) -> bool:
+    def is_alive(self, profile, pane_id=None) -> bool:
         return self._alive.get(profile, False)
 
     def kill(self, profile) -> None:
@@ -156,9 +161,13 @@ async def test_full_callback_flow_handoff(
     ]
     assert created["env"]["ABS_HOME"] == str(abs_home)
 
-    # confirmation + attach hint
+    # confirmation + SAFE attach hint only (FIX D: no raw engine attach command —
+    # a raw `herdr session attach` in the confirmation resurrected a session and
+    # killed a live one). The confirmation ends with the `abs attach` wrapper.
     conf = fake.sent_messages[-1]["text"]
-    assert "Started" in conf and "abs attach default" in conf
+    assert "Started" in conf
+    assert conf.rstrip().endswith("abs attach default")
+    assert "session attach" not in conf  # no raw engine command
 
     # handoff marker written (timestamp, project, mode, chat)
     marker = json.loads(
@@ -597,3 +606,326 @@ async def test_stale_marker_kept_when_session_live(
 
     await poller.check_stale_handoff()
     assert marker.exists()  # a live session owns it
+
+
+# ---- resume-first ABS START (Step 2.2) ---------------------------------------
+
+
+def _seed_recent(abs_home: Path, path: Path, label: str, mode: str = "normal") -> None:
+    Recents(abs_home / "daemon" / "recents.json").record("default", str(path), label, mode)
+
+
+async def test_abs_start_offers_recents_screen(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "llm"
+    proj.mkdir()
+    _seed_recent(abs_home, proj, "llm")
+    poller = make_poller(abs_home, client_factory, engine=FakeEngine())
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+
+    assert poller.flow is not None and poller.flow.step == "recents"
+    kb = fake.sent_messages[-1]["reply_markup"]["inline_keyboard"]
+    assert kb[0][0]["callback_data"] == "as:r:0"
+    assert "Resume llm" in kb[0][0]["text"]
+    assert kb[-1][0]["callback_data"] == "as:new"
+
+
+async def test_resume_one_tap_handoff_with_continue(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "llm"
+    proj.mkdir()
+    _seed_recent(abs_home, proj, "llm", mode="away")
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine)
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    # ONE tap: resume the recent → straight to handoff (skips project + mode).
+    fake.queue_callback_query("as:r:0", from_id=42, chat_id=42)
+    await poller.poll_once()
+
+    assert poller.session_state == STATE_SESSION_LIVE
+    cmd = engine.created[0]["command"]
+    assert "--continue" in cmd  # resume threads --continue to claude
+    assert "--away" in cmd  # recorded mode honored
+    assert engine.created[0]["cwd"] == str(proj.resolve())
+
+
+async def test_resume_text_fallback(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "llm"
+    proj.mkdir()
+    _seed_recent(abs_home, proj, "llm")
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine)
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    fake.queue_message("1", from_id=42)  # numbered resume
+    await poller.poll_once()
+
+    assert poller.session_state == STATE_SESSION_LIVE
+    assert "--continue" in engine.created[0]["command"]
+
+
+async def test_new_session_from_recents_opens_picker_no_continue(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    recent = tmp_path / "llm"
+    recent.mkdir()
+    _seed_recent(abs_home, recent, "llm")
+    proj = tmp_path / "web"
+    proj.mkdir()
+    _register(abs_home, proj)
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine)
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:new", from_id=42, chat_id=42)  # New session
+    await poller.poll_once()
+    assert poller.flow.step == "project"  # back to the picker
+    # pick the registered project + normal mode → fresh launch, NO --continue
+    fake.queue_callback_query("as:p:0", from_id=42, chat_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:m:n", from_id=42, chat_id=42)
+    await poller.poll_once()
+    assert poller.session_state == STATE_SESSION_LIVE
+    assert "--continue" not in engine.created[0]["command"]
+
+
+async def test_resume_dead_path_drops_and_reshows(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    _seed_recent(abs_home, gone, "gone")
+    proj = tmp_path / "web"
+    proj.mkdir()
+    _register(abs_home, proj)
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine)
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    # delete the recorded folder, then tap its Resume button
+    import shutil
+
+    shutil.rmtree(gone)
+    fake.queue_callback_query("as:r:0", from_id=42, chat_id=42)
+    await poller.poll_once()
+
+    texts = [m["text"] for m in fake.sent_messages]
+    assert RECENT_GONE_MSG in texts
+    # dropped from recents, and (no recents left) falls through to the picker
+    assert Recents(abs_home / "daemon" / "recents.json").list("default") == []
+    assert poller.flow.step == "project"
+    assert engine.created == []  # nothing launched
+
+
+async def test_resume_at_cap_refuses(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "llm"
+    proj.mkdir()
+    _seed_recent(abs_home, proj, "llm")
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine, max_sessions=1)
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()  # recents shown (not yet at cap)
+    # another profile takes the only slot before the resume tap
+    engine._alive["other"] = True
+    fake.queue_callback_query("as:r:0", from_id=42, chat_id=42)
+    await poller.poll_once()
+
+    assert poller.flow is None
+    assert fake.sent_messages[-1]["text"] == AT_CAP_MSG.format(cap=1)
+    assert engine.created == []
+
+
+async def test_corrupt_recents_falls_to_picker(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    (abs_home / "daemon" / "recents.json").write_text("{ not json ]")
+    proj = tmp_path / "web"
+    proj.mkdir()
+    _register(abs_home, proj)
+    poller = make_poller(abs_home, client_factory, engine=FakeEngine())
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    assert poller.flow.step == "project"  # corrupt recents → treated as empty
+
+
+async def test_handoff_records_recent(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "web"
+    proj.mkdir()
+    _register(abs_home, proj)
+    poller = make_poller(abs_home, client_factory, engine=FakeEngine())
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:p:0", from_id=42, chat_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:m:n", from_id=42, chat_id=42)
+    await poller.poll_once()
+
+    recents = Recents(abs_home / "daemon" / "recents.json").list("default")
+    assert len(recents) == 1
+    assert recents[0].path == str(proj.resolve())
+    assert recents[0].mode == "normal"
+
+
+# ---- Telegram "/" menu (Step 2.2) --------------------------------------------
+
+
+async def test_run_registers_idle_menu(
+    abs_home: Path, fake: FakeTelegram, client_factory
+) -> None:
+    write_profile(abs_home, allow_ids=[42], blocked=True)  # yields, doesn't poll
+    poller = make_poller(abs_home, client_factory, engine=FakeEngine())
+
+    async def rec(_d: float) -> None:
+        pass
+
+    await poller.run(max_cycles=1, sleep=rec)
+    assert fake.commands  # set_my_commands was called
+    assert fake.commands[-1] == MENU_IDLE
+
+
+async def test_menu_debounced_across_restart(
+    abs_home: Path, fake: FakeTelegram, client_factory
+) -> None:
+    write_profile(abs_home, allow_ids=[42], blocked=True)
+
+    async def rec(_d: float) -> None:
+        pass
+
+    p1 = make_poller(abs_home, client_factory, engine=FakeEngine())
+    await p1.run(max_cycles=1, sleep=rec)
+    # a "restart": a fresh poller on the same ABS_HOME reads the persisted menu kind
+    p2 = make_poller(abs_home, client_factory, engine=FakeEngine())
+    await p2.run(max_cycles=1, sleep=rec)
+    assert len(fake.commands) == 1  # registered once, not twice (debounce)
+
+
+async def test_handoff_sets_session_menu_reclaim_restores_idle(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "web"
+    proj.mkdir()
+    _register(abs_home, proj)
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine)
+
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:p:0", from_id=42, chat_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:m:n", from_id=42, chat_id=42)
+    await poller.poll_once()
+    assert MENU_SESSION in fake.commands  # in-session menu on handoff
+
+    # session dies → reclaim restores the idle menu
+    assert await poller.watch_once() is True
+    engine.kill("default")
+    assert await poller.watch_once() is False
+
+    async def rec(_d: float) -> None:
+        pass
+
+    await poller.reclaim(sleep=rec)
+    assert fake.commands[-1] == MENU_IDLE
+
+
+# ---- session.pid clobber / foreign-takeover (Step 2.2c FIX C) -----------------
+
+
+async def test_foreign_takeover_yields_not_reclaims(
+    abs_home: Path, fake: FakeTelegram, client_factory
+) -> None:
+    # A terminal launch overwrites session.pid with a different, LIVE pid while our
+    # daemon session runs. The daemon must YIELD (not reclaim/kill) — trusting the
+    # clobbered pid is what made it kill a live claude. Only when BOTH the foreign
+    # pid and our recorded pane die does it reclaim.
+    import subprocess
+
+    write_profile(abs_home, allow_ids=[42])
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine)
+
+    ours = subprocess.Popen(["sleep", "60"])
+    foreign = subprocess.Popen(["sleep", "60"])
+    pid_file = abs_home / "profiles" / "default" / "session.pid"
+    try:
+        # simulate a live daemon session
+        poller.session_state = STATE_SESSION_LIVE
+        poller._session_pane_id = "default:w1:p1"
+        poller._launched_pid = ours.pid
+        poller._session_seen_alive = True
+        engine._alive["default"] = True
+
+        # terminal launch clobbers session.pid with a foreign LIVE pid
+        pid_file.write_text(f"{foreign.pid}\n")
+
+        assert poller._foreign_takeover() is True
+        assert poller._session_dead() is False  # never "dead" during takeover
+        assert await poller.watch_once() is True  # yields, stays SESSION_LIVE
+        assert poller.session_state == STATE_SESSION_LIVE
+        assert engine.kills == []  # did NOT kill the engine session
+
+        # now the foreign session AND our recorded session both end
+        foreign.terminate(); foreign.wait()
+        ours.terminate(); ours.wait()
+        engine._alive["default"] = False
+
+        assert poller._foreign_takeover() is False
+        assert poller._session_dead() is True
+        assert await poller.watch_once() is False
+        assert poller.session_state == STATE_RECLAIM
+    finally:
+        for p in (ours, foreign):
+            if p.poll() is None:
+                p.terminate()
+                p.wait()
+
+
+async def test_session_dead_uses_recorded_pane_not_disk_pid(
+    abs_home: Path, fake: FakeTelegram, client_factory
+) -> None:
+    # The pid signal is the RECORDED launcher pid, not the shared session.pid file.
+    # A dead session.pid on disk must NOT make _session_dead True while our recorded
+    # pid + pane are alive.
+    import subprocess
+
+    write_profile(abs_home, allow_ids=[42])
+    engine = FakeEngine()
+    poller = make_poller(abs_home, client_factory, engine=engine)
+    ours = subprocess.Popen(["sleep", "60"])
+    try:
+        poller._session_pane_id = "default:w1:p1"
+        poller._launched_pid = ours.pid
+        engine._alive["default"] = True
+        # a stale/foreign-but-DEAD session.pid on disk (e.g. clobbered then exited)
+        (abs_home / "profiles" / "default" / "session.pid").write_text("999999999\n")
+        assert poller._session_dead() is False  # recorded pane + pid still alive
+    finally:
+        ours.terminate()
+        ours.wait()

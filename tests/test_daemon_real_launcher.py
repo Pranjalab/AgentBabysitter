@@ -169,3 +169,88 @@ def test_daemon_start_away_sets_accept_edits(tmp_path: Path, stub_bin: Path) -> 
     assert argv_dump.exists(), proc.stdout + proc.stderr
     forwarded = argv_dump.read_text()
     assert "acceptEdits" in forwarded
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_terminal_launch_records_recent(tmp_path: Path, stub_bin: Path) -> None:
+    # A plain terminal launch (no --daemon-start) records the project in recents
+    # (resume-first, Step 2.2). Stub claude/curl keep it offline; the cwd is the
+    # recorded path.
+    import json as _json
+
+    home = tmp_path / "home"
+    home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    proj = tmp_path / "myproj"
+    proj.mkdir()
+    marker = tmp_path / "launch-marker"
+
+    proc = subprocess.run(
+        ["bash", str(ABS_SH), "--profile", "default"],
+        env=_env(abs_home, home, stub_bin, FAKE_CLAUDE_LAUNCH_MARKER=str(marker)),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(proj),  # the dir claude runs in == the recorded path
+    )
+    _no_leftover_launcher()
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert marker.exists(), proc.stdout + proc.stderr
+    recents_file = abs_home / "daemon" / "recents.json"
+    assert recents_file.exists(), proc.stdout + proc.stderr
+    data = _json.loads(recents_file.read_text())
+    assert data["default"][0]["path"] == str(proj.resolve())
+    assert data["default"][0]["mode"] == "normal"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_terminal_launch_refuses_when_session_live(tmp_path: Path, stub_bin: Path) -> None:
+    # FIX A: cmd_run must NOT overwrite a live session's session.pid — that clobber
+    # made the daemon reclaim (kill) a live claude. A live session.pid → die with a
+    # clear message pointing at attach/exit.
+    home = tmp_path / "home"; home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    sleeper = subprocess.Popen(["sleep", "60"])
+    try:
+        (abs_home / "profiles" / "default" / "session.pid").write_text(f"{sleeper.pid}\n")
+        proc = subprocess.run(
+            ["bash", str(ABS_SH), "--profile", "default"],
+            env=_env(abs_home, home, stub_bin),
+            capture_output=True, text=True, timeout=30, cwd=str(tmp_path),
+        )
+        combined = proc.stdout + proc.stderr
+        assert proc.returncode != 0, combined
+        assert "already has a live session" in combined
+        assert "abs attach default" in combined
+        # did NOT overwrite the live pid
+        assert (abs_home / "profiles" / "default" / "session.pid").read_text().strip() == str(sleeper.pid)
+    finally:
+        sleeper.terminate()
+        sleeper.wait()
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
+def test_terminal_launch_proceeds_past_stale_pid(tmp_path: Path, stub_bin: Path) -> None:
+    # A STALE (dead) session.pid must not block the launch — it is replaced.
+    home = tmp_path / "home"; home.mkdir()
+    abs_home = tmp_path / "abs"
+    write_profile(abs_home, "default", allow_ids=[42])
+    marker = tmp_path / "launch-marker"
+    # a reaped child pid is guaranteed dead
+    dead = subprocess.Popen(["true"]); dead.wait()
+    (abs_home / "profiles" / "default" / "session.pid").write_text(f"{dead.pid}\n")
+
+    proc = subprocess.run(
+        ["bash", str(ABS_SH), "--profile", "default"],
+        env=_env(abs_home, home, stub_bin, FAKE_CLAUDE_LAUNCH_MARKER=str(marker)),
+        capture_output=True, text=True, timeout=30, cwd=str(tmp_path),
+    )
+    _no_leftover_launcher()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert marker.exists()  # reached the launch (stale pid did not block)

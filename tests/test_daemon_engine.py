@@ -195,3 +195,45 @@ async def test_reclaim_tears_down_leftover_engine_session(
         assert _wait_until(lambda: engine.is_alive(name)), "next start must succeed"
     finally:
         engine.kill(name)
+
+
+def test_herdr_liveness_targets_recorded_pane_not_first(tmp_path: Path) -> None:
+    # FIX B: an attach that resurrects a session and opens a SECOND workspace/pane
+    # (bare $HOME shell) must NOT be mistaken for the session. is_alive targeted at
+    # the RECORDED pane (w1:p1) stays True while claude runs there, and goes False
+    # only when THAT pane's command dies — regardless of the extra pane.
+    if not _bin_ok([_HERDR, "--version"]):
+        pytest.skip("herdr not installed")
+    prefix = f"abs-test-{uuid.uuid4().hex[:8]}-"
+    engine = HerdrEngine(session_prefix=prefix)
+    abs_home = tmp_path / "abs"
+    (abs_home / "profiles" / "work").mkdir(parents=True)
+    proj = tmp_path / "proj"; proj.mkdir()
+    name = prefix + "work"
+    try:
+        handle = engine.create_session(
+            "work", proj,
+            [str(STUB), "--profile", "work", "--daemon-start"],
+            {"ABS_HOME": str(abs_home)},
+        )
+        assert handle.pane_id == "w1:p1"
+        assert _wait_until(lambda: engine.is_alive("work", pane_id="w1:p1")), "claude pane alive"
+
+        # Simulate the attach resurrection: a second workspace with a bare shell.
+        subprocess.run(
+            [_HERDR, "workspace", "create", "--cwd", str(tmp_path), "--no-focus"],
+            capture_output=True, text=True, timeout=20,
+            env={**os.environ, "HERDR_SESSION": name},
+        )
+        # Targeted liveness is UNCONFUSED by the extra pane.
+        assert engine.is_alive("work", pane_id="w1:p1") is True
+
+        # Kill ONLY the recorded pane's command (the stub wrote its pid).
+        pid = int((abs_home / "profiles" / "work" / "session.pid").read_text().strip())
+        os.kill(pid, signal.SIGTERM)
+        # Recorded pane is command-dead even though the w2 shell still exists.
+        assert _wait_until(
+            lambda: engine.is_alive("work", pane_id="w1:p1") is False
+        ), "recorded pane must read dead once its command exits"
+    finally:
+        _herdr_teardown(prefix)

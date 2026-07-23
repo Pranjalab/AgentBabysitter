@@ -256,11 +256,115 @@ def safe_join_under_root(root: Path, name: str) -> Path | None:
     return candidate
 
 
-def build_launcher_argv(script_path: str, profile: str, away: bool) -> list[str]:
+def build_launcher_argv(
+    script_path: str, profile: str, away: bool, resume: bool = False
+) -> list[str]:
     """The exact launcher the engine runs (PLAN.md 4.2): reuse ``abs.sh`` via
-    ``bash <SCRIPT_PATH> --profile <p> --daemon-start [--away]`` — never a Python
-    reimplementation of the launcher."""
+    ``bash <SCRIPT_PATH> --profile <p> --daemon-start [--away] [--continue]`` —
+    never a Python reimplementation of the launcher.
+
+    ``resume`` appends ``--continue``. ``abs.sh``'s arg parser treats
+    ``--profile``/``--daemon-start``/``--away`` as its own global flags and
+    forwards everything else (here, ``--continue``) straight to ``claude``, so
+    ``--continue`` resumes the most recent conversation in the launch cwd (claude's
+    own semantics; a cwd with no prior conversation just starts fresh)."""
     argv = ["bash", script_path, "--profile", profile, "--daemon-start"]
     if away:
         argv.append("--away")
+    if resume:
+        argv.append("--continue")
     return argv
+
+
+# --------------------------------------------------------------------------- #
+# Resume-first recents screen (Step 2.2 pulled forward)
+# --------------------------------------------------------------------------- #
+
+# Callback data for the recents screen (namespaced, well under 64 bytes).
+CB_NEW_SESSION = "as:new"
+CB_RECENT_PREFIX = "as:r:"
+
+# How many recents the resume screen offers (the store keeps up to 5).
+RECENTS_SHOWN = 3
+
+
+def humanize_age(started_at: str, now: "datetime | None" = None) -> str:
+    """Coarse human age of an ISO-8601 ``Z`` timestamp: ``just now`` / ``12m`` /
+    ``3h`` / ``5d``. Unparseable/empty → empty string."""
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    try:
+        then = _dt.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
+    except (ValueError, TypeError):
+        return ""
+    now = now or _dt.now(_tz.utc)
+    secs = int((now - then).total_seconds())
+    if secs < 0:
+        secs = 0
+    if secs < 60:
+        return "just now"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def _recent_button_label(entry: Any, now: "datetime | None" = None) -> str:
+    age = humanize_age(getattr(entry, "started_at", ""), now=now)
+    suffix = f" ({age})" if age else ""
+    return f"▶ Resume {getattr(entry, 'label', '?')}{suffix}"
+
+
+def build_recents_keyboard(
+    recents: list[Any], now: "datetime | None" = None
+) -> dict[str, Any]:
+    """Inline keyboard: up to :data:`RECENTS_SHOWN` resume buttons + New session."""
+    rows: list[list[dict[str, str]]] = []
+    for i, entry in enumerate(recents[:RECENTS_SHOWN]):
+        rows.append(
+            [{"text": _recent_button_label(entry, now), "callback_data": f"{CB_RECENT_PREFIX}{i}"}]
+        )
+    rows.append([{"text": "🆕 New session", "callback_data": CB_NEW_SESSION}])
+    return {"inline_keyboard": rows}
+
+
+def render_recents_menu(recents: list[Any], now: "datetime | None" = None) -> str:
+    """Numbered-text rendering of the resume screen (keyboard fallback)."""
+    lines = ["🔁 Resume a recent session, or start fresh — tap a button or reply with a number:"]
+    n = 0
+    for entry in recents[:RECENTS_SHOWN]:
+        n += 1
+        age = humanize_age(getattr(entry, "started_at", ""), now=now)
+        suffix = f" ({age})" if age else ""
+        lines.append(f"{n}. ▶ Resume {getattr(entry, 'label', '?')}{suffix}")
+    lines.append(f"{n + 1}. 🆕 New session")
+    return "\n".join(lines)
+
+
+def choose_recent(
+    data: str | None, text: str, count: int
+) -> "int | str | None":
+    """Resolve a recents-screen input. Returns a recent index (0-based), the
+    string ``"new"`` for New session, or ``None`` if it selects nothing.
+
+    Numbered fallback: ``1..count`` pick recents, ``count+1`` is New session."""
+    if data:
+        if data == CB_NEW_SESSION:
+            return "new"
+        if data.startswith(CB_RECENT_PREFIX):
+            idx = _parse_int(data[len(CB_RECENT_PREFIX):])
+            if idx is not None and 0 <= idx < count:
+                return idx
+        return None
+    n = _parse_int(text)
+    if n is None:
+        return None
+    if 1 <= n <= count:
+        return n - 1
+    if n == count + 1:
+        return "new"
+    return None

@@ -33,7 +33,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from absd.engines.base import EngineError, SessionInfo
+from absd.engines.base import EngineError, SessionHandle, SessionInfo
 
 #: Every ABS tmux session is named with this prefix + the profile name.
 SESSION_PREFIX = "abs-"
@@ -237,9 +237,10 @@ class TmuxEngine:
         cwd: Path,
         command: list[str],
         env: dict[str, str],
-    ) -> None:
+    ) -> SessionHandle:
         """Create the headless session ``abs-<profile>`` running ``command`` in
-        ``cwd`` with ``env`` overlaid. Never attaches a client.
+        ``cwd`` with ``env`` overlaid. Never attaches a client. Returns a
+        :class:`SessionHandle` with the launched pane's pid.
 
         Raises :class:`EngineError` if a session of that name already exists — the
         daemon relies on this being loud, not a silent no-op.
@@ -264,15 +265,27 @@ class TmuxEngine:
         args.append("--")
         args += list(command)
         self._run(args)
+        # Record the launched pane's pid. tmux is single-pane per ABS session and
+        # destroys the session when the command exits (remain-on-exit off), so
+        # pane_id targeting is unnecessary here — the pid is for the daemon's
+        # clobber cross-check (Step 2.2c). Attach to tmux does NOT spawn panes.
+        pid = None
+        for r in self._pane_records():
+            if r.session == name:
+                pid = r.pid
+                break
+        return SessionHandle(pane_id=None, pid=pid)
 
-    def is_alive(self, profile: str) -> bool:
+    def is_alive(self, profile: str, pane_id: str | None = None) -> bool:
         """True iff the session exists AND its command is still running.
 
         Primary signal: ``has-session`` (with remain-on-exit off, a dead command
         means the session is gone). Defensive: even if the session exists, treat
         it as not-alive if every pane is marked dead (guards against a future conf
-        that enabled remain-on-exit).
-        """
+        that enabled remain-on-exit). ``pane_id`` is accepted for protocol parity
+        (the daemon passes the recorded pane) but tmux needs no pane targeting: a
+        tmux ``abs-*`` session is single-pane and attach never adds panes, so the
+        whole-session view is already precise (unlike herdr — see HerdrEngine)."""
         name = self._session_name(profile)
         if not self._has_session(name):
             return False

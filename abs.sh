@@ -272,6 +272,21 @@ profile_live_pid() {
   printf '%s' "$pid"
 }
 
+# The live Claude Code session's own PID, from session.pid (written by cmd_run
+# before it execs claude), if that process is still alive — mirrors the daemon's
+# liveness check (absd/profiles.py). Empty when the file is absent or names a dead
+# (stale) pid. Guards cmd_run against overwriting a live session's session.pid: a
+# terminal launch that clobbered it made the daemon read the session dead and
+# reclaim (kill) a live claude in a real incident.
+session_live_pid() {
+  local pid_file="$ABS_DIR/session.pid" pid
+  [ -f "$pid_file" ] || return 0
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  printf '%s' "$pid"
+}
+
 # Interactive picker. Only called when no profile was named and there's a real
 # choice to make.
 pick_profile() {
@@ -1075,6 +1090,13 @@ _hook_control() {
   local prompt="$1" chat="$2" msg up
   msg="$(printf '%s' "$prompt" | sed -E 's#</?channel[^>]*>##g' | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
   up="$(printf '%s' "$msg" | tr '[:lower:]' '[:upper:]')"
+  # "/" menu alias: /abs_exit (with the optional @botname Telegram appends in
+  # groups) is the single session-side slash alias for ABS EXIT — the "/" menu the
+  # daemon registers for a live session lists it. The other kill-ladder phrases
+  # stay text-only; this only ADDS this one alias.
+  case "$up" in
+    "/ABS_EXIT"|"/ABS_EXIT@"*) up="ABS EXIT" ;;
+  esac
   case "$up" in
     "ABS MUTE")
       state_set '.quiet = true' 2>/dev/null || true
@@ -2370,6 +2392,23 @@ flood_check() {
   esac
 }
 
+# Record this launch in the v3 daemon's recents.json (resume-first ABS START).
+# Shells into the absd recents CLI. Guarded three ways so it never breaks a plain
+# launch: skipped for a daemon-started session (the daemon records those itself,
+# with the flow's label/mode), and a no-op when the venv/absd package is absent
+# (a v2-only install). Failures are swallowed — a recents write must never block a
+# launch. Uses $PWD (the project dir claude will run in) and the away/normal mode.
+_record_recent() {
+  [ "${ABS_DAEMON_START:-0}" = "1" ] && return 0
+  local rroot rpy rmode
+  rroot="$(dirname "$SCRIPT_PATH")"
+  rpy="$rroot/.venv/bin/python"
+  [ -x "$rpy" ] && [ -d "$rroot/absd" ] || return 0
+  rmode="normal"; [ "${ABS_AWAY:-0}" = "1" ] && rmode="away"
+  env PYTHONPATH="$rroot" ABS_HOME="$ABS_HOME" "$rpy" -m absd.recents add \
+    --profile "$PROFILE" --path "$PWD" --mode "$rmode" >/dev/null 2>&1 || true
+}
+
 cmd_run() {
   # Remember the passthrough args (claude flags like --model opus) so an
   # update-and-relaunch can reconstruct this exact invocation. A global because
@@ -2504,6 +2543,27 @@ cmd_run() {
   # and then the launch dies.
   local hook_args=()
   [ -s "$hooks_file" ] && hook_args=(--settings "$hooks_file")
+
+  # Never overwrite a LIVE session's session.pid. A terminal launch (or a second
+  # `abs`) that clobbered it made the daemon read the original session dead and
+  # reclaim (kill) a live claude — a real incident. If a session is genuinely
+  # running for this profile, stop and point the operator at it. A stale (dead)
+  # pid file is fine: we fall through and replace it. Applies to normal AND
+  # --daemon-start launches (belt-and-suspenders; the daemon already refuses).
+  local live_sess
+  live_sess="$(session_live_pid)"
+  if [ -n "$live_sess" ]; then
+    die "Profile '$PROFILE' already has a live session (pid $live_sess).
+  Attach with:  abs attach $PROFILE
+  Or end it:    abs --profile $PROFILE exit"
+  fi
+
+  # v3: record this launch in the daemon's recents so a later ABS START can offer
+  # a one-tap "▶ Resume" (resume-first flow). A daemon-started launch is recorded
+  # by the daemon itself (with the flow's label/mode), so skip it here to avoid a
+  # double write; a terminal launch records here. Guarded so a missing absd never
+  # breaks a plain v2-style launch.
+  _record_recent
 
   # `exec` keeps this PID, so $$ recorded now IS the claude session's PID — that's
   # what `abs exit` (the ABS EXIT kill-ladder rung) signals. Clear the stale

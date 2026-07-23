@@ -11,13 +11,14 @@ its CLI/socket — never forked, vendored, or copied (D3).
 
 from __future__ import annotations
 
-from absd.engines.base import Engine, EngineError, SessionInfo
+from absd.engines.base import Engine, EngineError, SessionHandle, SessionInfo
 from absd.engines.herdr import HerdrEngine
 from absd.engines.tmux import TmuxEngine
 
 __all__ = [
     "Engine",
     "EngineError",
+    "SessionHandle",
     "SessionInfo",
     "TmuxEngine",
     "HerdrEngine",
