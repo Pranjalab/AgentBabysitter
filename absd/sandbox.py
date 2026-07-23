@@ -33,11 +33,13 @@ from typing import Any
 from absd import flow as flow_mod
 
 #: Pinned image tag (D13-style: upgrades are explicit via --rebuild). v2 (3.2)
-#: adds bun (the Telegram plugin's MCP-server runtime) + the in-container
-#: `absd-session` launcher — an old v1 box lacks both, so a rebuild is required
-#: for sandbox SESSIONS (3.1 sandboxes on v1 still shell in fine). Migration:
-#: `abs sandbox build --rebuild` then re-create sandboxes to pick up v2.
-IMAGE_TAG = "absd-sandbox:v2"
+#: added bun + the `absd-session` launcher; v3 (Stage 3) bakes in the restricted
+#: system prompt (``/usr/local/share/absd/restricted-prompt.txt``) and extends
+#: `absd-session` to forward ``--model`` / ``--append-system-prompt`` / select the
+#: restricted prompt for ``--restricted``. An old box lacks the bundled prompt, so a
+#: rebuild is required for RESTRICTED sessions. Migration: `abs sandbox build
+#: --rebuild` then re-create sandboxes to pick up v3.
+IMAGE_TAG = "absd-sandbox:v3"
 #: Container name = this prefix + the sandbox name.
 CONTAINER_PREFIX = "absd-sbx-"
 #: The single bind-mount target inside the container.
@@ -216,6 +218,22 @@ class SandboxManager:
             SESSION_LAUNCHER, *launcher_args,
         ]
 
+    def creds_present(self, name: str) -> bool:
+        """True if Claude Code is logged in INSIDE the box — the credentials file
+        ``/home/dev/.claude/.credentials.json`` exists and is non-empty (Stage 3
+        restricted keep-alive: gate a relaunch on the box being logged in, so the
+        daemon doesn't relaunch-loop a not-logged-in session). Presence + size only
+        via ``test -s`` — the file is NEVER read, so no credential leaves the box.
+        A stopped/missing container (or docker error) reads as 'not logged in'."""
+        proc = self._run(
+            [
+                self._docker, "exec", self._container(name),
+                "test", "-s", f"{CRED_DIR}/.credentials.json",
+            ],
+            check=False,
+        )
+        return proc.returncode == 0
+
     def process_alive(self, name: str, pattern: str) -> bool:
         """Best-effort in-container liveness cross-check (3.2): ``docker exec …
         pgrep -f <pattern>``. The daemon PREFERS the engine-pane signal; this is the
@@ -285,6 +303,7 @@ class SandboxManager:
         name: str,
         ports: str | None = None,
         creds_src: Path | None = None,
+        no_creds: bool = False,
     ) -> SandboxInfo:
         ok, err = flow_mod.validate_folder_name(name)
         if not ok:
@@ -310,12 +329,18 @@ class SandboxManager:
         # copy lands at /home/dev/.claude regardless of the source dir's basename.
         # docker cp preserves uid, and `dev` matches the host uid (build arg), so the
         # copy is owned by dev.
-        src = Path(creds_src).expanduser() if creds_src else (Path.home() / ".claude")
-        if src.is_dir():
-            self._run(
-                [self._docker, "cp", str(src), f"{self._container(name)}:{CRED_DIR}"],
-                check=False,
-            )
+        #
+        # Stage 3 — ``no_creds``: a RESTRICTED sandbox gets NO host credentials. The
+        # box has no ``/home/dev/.claude`` at all, so it can never expose the host
+        # bot token, and Claude Code logs in SEPARATELY inside it (`abs restricted
+        # login`). This is the real containment layer for the restricted assistant.
+        if not no_creds:
+            src = Path(creds_src).expanduser() if creds_src else (Path.home() / ".claude")
+            if src.is_dir():
+                self._run(
+                    [self._docker, "cp", str(src), f"{self._container(name)}:{CRED_DIR}"],
+                    check=False,
+                )
 
         info = SandboxInfo(
             name=name,
@@ -402,6 +427,11 @@ def _cmd(argv: list[str] | None = None) -> int:
     p_c.add_argument("name")
     p_c.add_argument("--ports", default=None)
     p_c.add_argument("--creds", default=None, help="credentials source dir (default ~/.claude)")
+    p_c.add_argument(
+        "--no-creds",
+        action="store_true",
+        help="do NOT copy host credentials in (restricted box logs in separately)",
+    )
     sub.add_parser("list")
     for verb in ("start", "stop"):
         sub.add_parser(verb).add_argument("name")
@@ -420,12 +450,19 @@ def _cmd(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "create":
             info = mgr.create(args.name, ports=args.ports,
-                              creds_src=Path(args.creds) if args.creds else None)
+                              creds_src=Path(args.creds) if args.creds else None,
+                              no_creds=args.no_creds)
             print(f"Created sandbox '{info.name}'.")
             print(f"  workdir : {info.host_workdir}")
             if info.ports:
                 print(f"  ports   : {', '.join(info.ports)}")
-            print(_CRED_WARNING)
+            if args.no_creds:
+                print(
+                    "  no host credentials copied — Claude Code logs in separately "
+                    "inside this box."
+                )
+            else:
+                print(_CRED_WARNING)
             print(f"Start it:  abs sandbox start {info.name}")
             return 0
         if args.command == "list":

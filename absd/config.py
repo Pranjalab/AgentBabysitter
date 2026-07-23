@@ -94,6 +94,20 @@ class DaemonConfig:
     # this often so a bot added while it runs gets an idle poller. 0 disables it.
     profile_rescan_s: float = 60.0
 
+    # Restricted assistant keep-alive (Stage 3). A `keep_alive` (restricted) profile
+    # is not idle-polled: the daemon keeps its in-sandbox session alive, relaunching
+    # on death with exponential backoff. After this many CONSECUTIVE fast deaths (a
+    # session that never came alive — almost always a not-logged-in box), it stops
+    # relaunching and tells the operator to run `abs restricted login <name>`.
+    restricted_relaunch_cap: int = 3
+    # Base + cap for the relaunch backoff (seconds); grows 2^attempt from base.
+    restricted_relaunch_backoff_s: float = 5.0
+    restricted_relaunch_backoff_max_s: float = 120.0
+    # How often to re-check while a restricted session is DOWN and waiting (paused,
+    # or login-needed): the daemon polls the bot to refuse control commands and
+    # re-checks whether it may relaunch (e.g. login just completed).
+    keep_alive_check_s: float = 10.0
+
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping for this config."""
         return asdict(self)
@@ -154,7 +168,37 @@ def validate(cfg: DaemonConfig) -> DaemonConfig:
         raise ConfigError(
             f"profile_rescan_s must be >= 0 (0 disables), got {cfg.profile_rescan_s!r}"
         )
+    if not isinstance(cfg.restricted_relaunch_cap, int) or cfg.restricted_relaunch_cap < 1:
+        raise ConfigError(
+            f"restricted_relaunch_cap must be an int >= 1, got {cfg.restricted_relaunch_cap!r}"
+        )
+    if cfg.restricted_relaunch_backoff_s < 0:
+        raise ConfigError(
+            f"restricted_relaunch_backoff_s must be >= 0, got {cfg.restricted_relaunch_backoff_s!r}"
+        )
+    if cfg.restricted_relaunch_backoff_max_s < cfg.restricted_relaunch_backoff_s:
+        raise ConfigError(
+            "restricted_relaunch_backoff_max_s must be >= restricted_relaunch_backoff_s "
+            f"({cfg.restricted_relaunch_backoff_max_s!r} < {cfg.restricted_relaunch_backoff_s!r})"
+        )
+    if cfg.keep_alive_check_s <= 0:
+        raise ConfigError(f"keep_alive_check_s must be > 0, got {cfg.keep_alive_check_s!r}")
     return cfg
+
+
+def restricted_backoff(attempt: int, base: float, cap: float) -> float:
+    """Relaunch backoff for a restricted keep-alive session: ``base * 2**attempt``,
+    capped at ``cap`` (pure — the daemon's relaunch loop and its tests share it).
+
+    ``attempt`` is 0-based (0 → ``base``, 1 → ``2*base``, …). A non-positive
+    ``attempt`` or ``base`` yields ``max(0, base)`` clamped to ``cap``."""
+    if base <= 0:
+        return 0.0
+    if attempt < 0:
+        attempt = 0
+    # Guard the shift from exploding for absurd attempt counts before the min().
+    exp = min(attempt, 30)
+    return float(min(base * (2 ** exp), cap))
 
 
 def load(path: Path) -> DaemonConfig:

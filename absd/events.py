@@ -71,6 +71,9 @@ EVENT_MENU_SET = "menu_set"
 EVENT_ENGINE_KILL = "engine_kill"
 EVENT_PROFILE_ADDED = "profile_added"
 EVENT_PROFILE_REMOVED = "profile_removed"
+# Restricted assistant keep-alive (Stage 3).
+EVENT_RESTRICTED_RELAUNCH = "restricted_relaunch"
+EVENT_RESTRICTED_LOGIN_NEEDED = "restricted_login_needed"
 
 # session_end reasons.
 END_EXITED = "exited"

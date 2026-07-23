@@ -34,6 +34,14 @@ RUN npm install -g @anthropic-ai/claude-code
 COPY absd-session /usr/local/bin/absd-session
 RUN chmod 0755 /usr/local/bin/absd-session
 
+# The restricted-assistant system prompt (Stage 3). Same file absd/prompts.py reads
+# on the host — `absd-session --restricted` injects it via --append-system-prompt so
+# the model refuses to build/run code and disclaims session control. Baking it into
+# the image keeps the prompt out of the pane command's argv (no `ps` exposure) and
+# single-sources it with the host.
+COPY restricted-prompt.txt /usr/local/share/absd/restricted-prompt.txt
+RUN chmod 0644 /usr/local/share/absd/restricted-prompt.txt
+
 # ubuntu:24.04 ships a default `ubuntu` user at uid 1000; drop it so `dev` can take
 # the requested uid cleanly, then create `dev`.
 RUN userdel -r ubuntu 2>/dev/null || true; \

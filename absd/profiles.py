@@ -230,6 +230,47 @@ class Profile:
         rc = _read_json(self.rc_path) or {}
         return rc.get("blocked") is True
 
+    # ---- restricted assistant (Stage 3) ----------------------------------
+    #
+    # A restricted profile carries these extra rc.json fields (written by abs.sh
+    # `abs restricted create`): ``restricted: true``, ``keep_alive: true``,
+    # ``model: "haiku"``, ``sandbox: "<name>"``, and — when the operator ran
+    # `abs restricted stop` — ``paused: true``. The daemon reads them to run the
+    # keep-alive loop (relaunch the in-sandbox session on death) instead of
+    # idle-polling. All are re-read on demand so a terminal stop/start takes effect
+    # without a daemon restart.
+
+    def is_restricted(self) -> bool:
+        """True for a restricted-assistant profile (``restricted: true``)."""
+        rc = _read_json(self.rc_path) or {}
+        return rc.get("restricted") is True
+
+    def keep_alive(self) -> bool:
+        """True if the daemon should keep this profile's session alive (relaunch on
+        death) rather than idle-poll (``keep_alive: true``; restricted profiles)."""
+        rc = _read_json(self.rc_path) or {}
+        return rc.get("keep_alive") is True
+
+    def is_paused(self) -> bool:
+        """True if the operator paused keep-alive (`abs restricted stop` → ``paused:
+        true``): the daemon stops relaunching until `abs restricted start`."""
+        rc = _read_json(self.rc_path) or {}
+        return rc.get("paused") is True
+
+    def model(self) -> str | None:
+        """The configured model for this profile's sessions (``model``), e.g.
+        ``"haiku"`` for a restricted assistant. ``None`` if unset."""
+        rc = _read_json(self.rc_path) or {}
+        m = rc.get("model")
+        return m if isinstance(m, str) and m else None
+
+    def sandbox_name(self) -> str | None:
+        """The dedicated sandbox this profile's session runs in (``sandbox``), or
+        ``None`` for a non-sandbox profile."""
+        rc = _read_json(self.rc_path) or {}
+        s = rc.get("sandbox")
+        return s if isinstance(s, str) and s else None
+
     def is_off(self) -> bool:
         """True if inbound is switched off (``dmPolicy == "disabled"``, D11)."""
         return self.dm_policy() == "disabled"

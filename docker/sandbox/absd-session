@@ -1,29 +1,38 @@
 #!/usr/bin/env bash
 #
-# absd-session — the in-container Claude Code launcher (Phase 3.2).
+# absd-session — the in-container Claude Code launcher (Phase 3.2 + Stage 3).
 #
 # The daemon/terminal launches a sandbox session by having the engine pane run
-#   docker exec -it absd-sbx-<name> absd-session <profile> [claude args…]
+#   docker exec -it absd-sbx-<name> absd-session <profile> [session opts] [claude args…]
 # so THIS runs INSIDE the container, in the bind-mounted workdir, with the profile's
-# copied Telegram state (token + allowlist). The plugin then polls from inside the
-# box and owns the bot while the session is live.
+# Telegram state. The plugin then polls from inside the box and owns the bot while
+# the session is live.
 #
-# Minimal by design (Phase 3.2 scope): it wires the channel + credentials + workdir
-# and execs claude. It does NOT reproduce abs.sh's host-side hooks (smart-silent,
-# guard, statusline) or the injected ABS system prompt — those live on the host and
-# are a later stage. Anything after <profile> is forwarded straight to claude
-# (e.g. --permission-mode acceptEdits for Away, --continue for Resume, an initial
-# prompt positional for pool forwarding).
+# Session options THIS launcher consumes (Stage 3 — closes the 3.2 in-container gap;
+# a general capability, the restricted assistant is the first user):
+#   --restricted                 inject the bundled restricted system prompt (persona
+#                                + no-code refusal + "session control is operator-only")
+#   --model <m>                  pass --model <m> to claude (e.g. haiku)
+#   --append-system-prompt <t>   pass an extra system prompt to claude (combined with
+#                                the restricted one when --restricted is also given)
+# Everything else is forwarded straight to claude (e.g. --permission-mode acceptEdits
+# for Away, --continue for Resume, an initial prompt positional for pool forwarding).
 
 set -u
 
 PLUGIN_ID="telegram@claude-plugins-official"
+# The restricted system prompt baked into the image (single source: the same file
+# absd/prompts.py reads on the host, so the value the model sees can't drift). The
+# env override is a TEST seam (unset in production, where the baked path is used).
+RESTRICTED_PROMPT_FILE="${ABSD_RESTRICTED_PROMPT_FILE:-/usr/local/share/absd/restricted-prompt.txt}"
 
 profile="${1:-default}"
 shift || true
 
-# The copied credentials live at /home/dev/.claude (D8); the profile's Telegram
-# state dir mirrors the host layout (default → …/telegram, named → …/telegram-<p>).
+# The profile's Telegram state dir mirrors the host layout (default → …/telegram,
+# named → …/telegram-<p>). For a same-bot box the copied creds live under
+# /home/dev/.claude; for a restricted (no-creds) box the plugin state is still here
+# once the profile's token is written into it at pair time.
 if [ "$profile" = "default" ]; then
   export TELEGRAM_STATE_DIR="/home/dev/.claude/channels/telegram"
 else
@@ -32,4 +41,35 @@ fi
 
 cd /home/dev/workspace 2>/dev/null || true
 
-exec claude --channels "plugin:${PLUGIN_ID}" "$@"
+model=""
+restricted=0
+append_prompt=""
+claude_args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --restricted)            restricted=1; shift ;;
+    --model)                 model="${2:-}"; shift 2 ;;
+    --append-system-prompt)  append_prompt="${2:-}"; shift 2 ;;
+    *)                       claude_args+=("$1"); shift ;;
+  esac
+done
+
+cmd=(claude --channels "plugin:${PLUGIN_ID}")
+[ -n "$model" ] && cmd+=(--model "$model")
+
+# Assemble the system prompt: the bundled restricted prompt first (if --restricted),
+# then any explicit --append-system-prompt, joined so both take effect.
+sys=""
+if [ "$restricted" = "1" ] && [ -r "$RESTRICTED_PROMPT_FILE" ]; then
+  sys="$(cat "$RESTRICTED_PROMPT_FILE")"
+fi
+if [ -n "$append_prompt" ]; then
+  if [ -n "$sys" ]; then
+    sys="${sys}"$'\n\n'"${append_prompt}"
+  else
+    sys="$append_prompt"
+  fi
+fi
+[ -n "$sys" ] && cmd+=(--append-system-prompt "$sys")
+
+exec "${cmd[@]}" ${claude_args[@]+"${claude_args[@]}"}

@@ -294,14 +294,35 @@ def choose_sandbox(data: str | None, text: str, count: int) -> "int | str | None
 
 
 def build_sandbox_launcher_argv(
-    profile: str, away: bool, resume: bool = False, initial_prompt: str | None = None
+    profile: str,
+    away: bool,
+    resume: bool = False,
+    initial_prompt: str | None = None,
+    model: str | None = None,
+    restricted: bool = False,
+    append_system_prompt: str | None = None,
 ) -> list[str]:
     """The in-container launcher args (after ``absd-session``): the profile, then
-    the claude flags. Away → ``--permission-mode acceptEdits`` (inside the box,
-    where there is no abs.sh ABS_AWAY mechanism); resume → ``--continue``; a pool
-    initial prompt is a bare claude positional. Order: flags before the positional.
-    ``session_exec_argv`` prepends ``docker exec -it <container> absd-session``."""
+    the session options, then the claude passthrough flags.
+
+    ``absd-session`` consumes ``--restricted`` (selects the bundled restricted
+    system prompt inside the image), ``--model <m>`` and ``--append-system-prompt
+    <text>`` itself, and forwards everything else to ``claude``. Away →
+    ``--permission-mode acceptEdits`` (inside the box, no abs.sh ABS_AWAY); resume →
+    ``--continue``; a pool initial prompt is a bare claude positional (flags first).
+    ``session_exec_argv`` prepends ``docker exec -it <container> absd-session``.
+
+    3.2-gap fix / Stage 3: ``model`` + ``restricted`` + ``append_system_prompt`` are
+    the new, general capability — the restricted assistant is the first user
+    (``model="haiku", restricted=True``); a normal sandbox session passes none and
+    the argv is byte-for-byte what 3.2 built."""
     argv = [profile]
+    if restricted:
+        argv.append("--restricted")
+    if model:
+        argv += ["--model", model]
+    if append_system_prompt:
+        argv += ["--append-system-prompt", append_system_prompt]
     if away:
         argv += ["--permission-mode", "acceptEdits"]
     if resume:
