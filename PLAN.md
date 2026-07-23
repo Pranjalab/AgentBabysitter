@@ -426,6 +426,13 @@ reflects daemon state; menu registration (`abs menu`) adds the new commands to T
 > `set_my_commands`, debounced), the three `/abs_*` accepted as grammar aliases, and
 > session-side `/abs_exit` wired into the abs.sh control hook. The inline-keyboard pool
 > selection and the statusline dot remain for the full 2.2.
+>
+> **Observability also pulled forward + shipped** (see `docs/v3/critique/obs.md`):
+> a structured, metadata-only event log (`absd/events.py` → `~/.abs/daemon/events.jsonl`,
+> 12-event stable vocabulary, size-capped, corruption-tolerant reader) emitted from
+> every daemon code path, and a consolidated read-only dashboard (`absd/status.py`)
+> shared by `abs status` (appended after the v2 block) and `abs daemon status`
+> (daemon header + per-profile state/live-session/pool/recents).
 - **Agent verify:** callback-query unit tests for the keyboard state machine.
 - **Pranjal verify:** the full phone flow feels good — his subjective sign-off is the gate.
 - **Critique gate:** UX review with Pranjal; list of paper cuts → fix before Phase 3.
