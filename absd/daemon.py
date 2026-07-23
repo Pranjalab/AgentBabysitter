@@ -45,7 +45,7 @@ from typing import Any, Awaitable, Callable
 
 from absd import __version__
 from absd import flow as flow_mod
-from absd.config import DaemonConfig
+from absd.config import DaemonConfig, restricted_backoff
 from absd.engines.base import Engine, EngineError, SessionHandle
 from absd.events import (
     EVENT_COMMAND,
@@ -56,6 +56,8 @@ from absd.events import (
     EVENT_MESSAGE_POOLED,
     EVENT_POLLER_STATE,
     EVENT_RECLAIM_DONE,
+    EVENT_RESTRICTED_LOGIN_NEEDED,
+    EVENT_RESTRICTED_RELAUNCH,
     EVENT_SESSION_END,
     EVENT_SESSION_START,
     END_EXITED,
@@ -156,6 +158,30 @@ REBOOT_NOTICE = (
 # A resume tap whose recorded folder has since been deleted (Step 2.2 edge case).
 RECENT_GONE_MSG = "📁 That folder no longer exists — I've removed it from recents."
 
+# ---- restricted assistant keep-alive (Stage 3) -------------------------------
+
+# A restricted bot's user tried a session-control command (ABS START/EXIT/OFF/BLOCK):
+# session + profile control is operator-only, done from the terminal. NOT the coding
+# refusal (that happens inside the box via the injected prompt) — this is the daemon
+# refusing to hand a restricted bot's user the session controls.
+RESTRICTED_CONTROL_REFUSED = (
+    "🔒 This is a restricted assistant — starting, stopping and configuring the "
+    "session are operator-only, done from the terminal. I can't do that from here."
+)
+# A message to a restricted bot while its in-box assistant is DOWN (relaunching or
+# waiting on login). Not pooled — a restricted profile has no ABS START to flush a
+# pool with; the assistant handles new messages once it's back up.
+RESTRICTED_OFFLINE_MSG = (
+    "💤 The assistant is offline right now — the operator has been asked to bring it "
+    "back. Please try again shortly."
+)
+# Sent to the operator's chat when the restricted session can't be kept alive because
+# the box isn't logged in (initial, or expired). Once per down-transition (no spam).
+RESTRICTED_LOGIN_NEEDED_MSG = (
+    "🔐 Restricted assistant '{name}' needs login: run `abs restricted login {name}` "
+    "at the terminal, then it will come back on its own."
+)
+
 # Telegram "/" menus (Step 2.2 pulled forward). The daemon registers the IDLE menu
 # while polling and the SESSION menu at handoff, so the "/" list always matches
 # what the bot can currently do. Debounced (only re-set when the menu changes).
@@ -175,6 +201,10 @@ MENU_SESSION = [
 STATE_IDLE = "idle"
 STATE_SESSION_LIVE = "session-live"
 STATE_RECLAIM = "reclaim"
+# Restricted keep-alive (Stage 3): the in-sandbox session is not running and the
+# daemon is (re)launching it or waiting on login. Distinct from IDLE — a keep-alive
+# profile never idle-polls for a normal ABS START flow.
+STATE_KEEP_ALIVE_DOWN = "keep-alive-down"
 
 # How long to nap between engine-liveness checks while SESSION_LIVE (PLAN.md 4.1
 # "every few seconds"). Short so a finished session reclaims promptly.
@@ -478,6 +508,13 @@ class HandoffRequest:
     #: Sandbox name (3.2) — when set, the session runs INSIDE this container (the
     #: engine pane is a ``docker exec``); liveness is pane-only across the boundary.
     sandbox: str | None = None
+    #: Model override (Stage 3) — passed to the in-container launcher as ``--model``
+    #: (e.g. ``"haiku"`` for the restricted assistant). None → the account default.
+    model: str | None = None
+    #: Restricted marker (Stage 3) — the in-container launcher injects the bundled
+    #: restricted system prompt (no-code refusal + no session control) via
+    #: ``--restricted``. Only meaningful for a sandbox target.
+    restricted: bool = False
 
 
 # ---- offset persistence -------------------------------------------------------
@@ -588,6 +625,20 @@ class Poller:
         #: host session. When set, liveness is pane-only (the container-namespace pid
         #: is invisible to the host) and the FIX-C host-pid clobber check is skipped.
         self._session_sandbox: str | None = None
+        #: Restricted keep-alive bookkeeping (Stage 3). ``_restricted_launched_at`` is
+        #: when the current in-sandbox session was launched (fast-death detection);
+        #: ``_restricted_seen_alive`` flips true once it survives the start grace (a
+        #: healthy session, clears the failure streak). ``_relaunch_failures`` counts
+        #: CONSECUTIVE fast deaths (cap → stop + login-needed); ``_relaunch_attempt``
+        #: drives the backoff (reset on a healthy session). ``_login_notified`` makes
+        #: the login-needed message once-per-down-transition. ``_creds_seen`` tracks
+        #: the box's login state so a completed `abs restricted login` resets the caps.
+        self._restricted_launched_at: float = 0.0
+        self._restricted_seen_alive = False
+        self._relaunch_failures = 0
+        self._relaunch_attempt = 0
+        self._login_notified = False
+        self._creds_seen: bool | None = None
         #: Offset value committed by the single HANDOFF commit (test bookkeeping).
         self.handoff_committed_offset: int | None = None
         #: Per-profile status file (Step 1.4) — rewritten atomically each cycle so
@@ -643,9 +694,18 @@ class Poller:
         import json
         import os
 
+        state = self.profile.state_label()
+        # Restricted keep-alive profiles aren't idle-polling — reflect the keep-alive
+        # state so `abs daemon status` reads truthfully (not a misleading "polling").
+        if self.profile.keep_alive():
+            state = (
+                "restricted-live"
+                if self.session_state == STATE_SESSION_LIVE
+                else "restricted-down"
+            )
         record = {
             "profile": self.profile.name,
-            "state": self.profile.state_label(),
+            "state": state,
             "pool_count": self.pool.count(),
             "session_pid": self.profile.live_session_pid(),
             "last_poll_at": self.last_poll_at,
@@ -1508,6 +1568,7 @@ class Poller:
             launcher = flow_mod.build_sandbox_launcher_argv(
                 self.profile.name, req.away,
                 resume=req.resume, initial_prompt=req.initial_prompt,
+                model=req.model, restricted=req.restricted,
             )
             argv = self.sandbox_mgr.session_exec_argv(req.sandbox, launcher)
             # cwd is the sandbox's dedicated host folder (falls back to the marker
@@ -1863,10 +1924,13 @@ class Poller:
         return max(0.0, (datetime.now(timezone.utc) - then).total_seconds())
 
     async def _send_reboot_notice(self, chat_id: int | None, label: str) -> None:
-        """Send the reboot notice (once), suppressed for blocked/off profiles."""
+        """Send the reboot notice (once), suppressed for blocked/off profiles — and
+        for keep-alive (restricted) profiles, which the daemon auto-relaunches (a
+        'did not survive; ABS START to relaunch' note would be wrong and unactionable
+        for a bot whose user cannot start sessions)."""
         if chat_id is None:
             return
-        if self.profile.is_blocked() or self.profile.is_off():
+        if self.profile.is_blocked() or self.profile.is_off() or self.profile.keep_alive():
             return
         await self._safe_send(int(chat_id), REBOOT_NOTICE.format(label=label, n=self.pool.count()))
 
@@ -1953,6 +2017,246 @@ class Poller:
             return "stale-terminal"
         return "idle"
 
+    # ---- restricted keep-alive (Stage 3) ---------------------------------
+
+    async def _keep_alive_step(self, sleep: SleepFn) -> None:
+        """One keep-alive cycle for a ``keep_alive`` (restricted) profile.
+
+        The daemon does NOT idle-poll these — it keeps the in-sandbox session alive:
+        watch it while up (pane-only liveness, no Telegram poll — the plugin inside
+        the box owns the token); when it's down, relaunch (haiku + restricted prompt
+        + its dedicated box) with backoff, or — if the box isn't logged in / it keeps
+        dying — stop relaunching, tell the operator to log in (once), and poll the bot
+        to refuse control commands / answer with an 'offline' note until it recovers.
+        """
+        if self.session_state == STATE_SESSION_LIVE:
+            if self._restricted_alive():
+                await sleep(SESSION_WATCH_S)
+            else:
+                await self._on_restricted_death()
+            return
+
+        if self.session_state != STATE_KEEP_ALIVE_DOWN:
+            self._set_state(STATE_KEEP_ALIVE_DOWN)
+
+        sb = self.profile.sandbox_name()
+        paused = self.profile.is_paused()
+        available = (
+            self.engine is not None and self.sandbox_mgr is not None and sb is not None
+        )
+
+        creds = False
+        if available and not paused:
+            try:
+                creds = bool(self.sandbox_mgr.creds_present(sb))
+            except Exception:
+                creds = False
+            # A completed `abs restricted login` (creds absent → present) is a fresh
+            # chance: clear the fast-death cap so keep-alive resumes on its own.
+            if creds and self._creds_seen is False:
+                self._relaunch_failures = 0
+                self._relaunch_attempt = 0
+                self._login_notified = False
+            self._creds_seen = creds
+
+        under_cap = self._relaunch_failures < self.cfg.restricted_relaunch_cap
+        if available and not paused and creds and under_cap:
+            await self._relaunch_restricted(sleep)
+            return
+
+        # Waiting: notify the operator if this is a login situation (not just paused),
+        # then poll to keep the bot responsive (refuse control, offline note).
+        if available and not paused and (not creds or not under_cap):
+            await self._notify_login_needed()
+        await self._keep_alive_wait_poll(sleep)
+
+    def _restricted_alive(self) -> bool:
+        """Liveness for the current restricted session — engine PANE only (the
+        container-namespace pid is invisible to the host). Marks the session healthy
+        (clearing the failure streak + login notice) once it survives the start grace."""
+        if not self._engine_pane_alive():
+            return False
+        if (
+            not self._restricted_seen_alive
+            and (self._clock() - self._restricted_launched_at)
+            >= self.cfg.session_start_grace_s
+        ):
+            self._restricted_seen_alive = True
+            self._relaunch_failures = 0
+            self._relaunch_attempt = 0
+            self._login_notified = False
+        return True
+
+    async def _on_restricted_death(self) -> None:
+        """The restricted session's pane died. Emit session_end, clean the engine
+        leftover, count a FAST death (never came alive — the login/crash signal), and
+        drop to KEEP_ALIVE_DOWN so the next cycle relaunches or waits."""
+        lived = 0
+        if self._restricted_launched_at:
+            lived = max(0, int(self._clock() - self._restricted_launched_at))
+        reason = END_EXITED if self._restricted_seen_alive else END_FAILED_START
+        self._emit(EVENT_SESSION_END, reason=reason, lived_s=lived)
+        self._kill_engine_session()
+        if not self._restricted_seen_alive:
+            self._relaunch_failures += 1
+            log.warning(
+                "poller[%s] restricted session died fast (%ds, streak %d/%d)",
+                self.profile.name, lived, self._relaunch_failures,
+                self.cfg.restricted_relaunch_cap,
+            )
+        self._session_pane_id = None
+        self._launched_pid = None
+        self._session_sandbox = None
+        self._restricted_seen_alive = False
+        self._set_state(STATE_KEEP_ALIVE_DOWN)
+
+    def _restricted_request(self, sandbox: str) -> HandoffRequest:
+        """Build the launch decision for the restricted session: its dedicated box,
+        haiku (or the profile's configured model), and the restricted system prompt."""
+        wd = ""
+        if self.sandbox_mgr is not None:
+            try:
+                wd = self.sandbox_mgr.host_workdir(sandbox) or ""
+            except Exception:
+                wd = ""
+        return HandoffRequest(
+            chat_id=self.profile.chat_id(),
+            project_path=wd,
+            label=f"restricted {self.profile.name}",
+            away=False,
+            sandbox=sandbox,
+            model=self.profile.model() or "haiku",
+            restricted=True,
+        )
+
+    async def _relaunch_restricted(self, sleep: SleepFn) -> None:
+        """(Re)launch the restricted session into its box, with backoff between
+        consecutive attempts. On create failure, count it and stay down; on success,
+        record the pane and go SESSION_LIVE (health is judged later in the watch)."""
+        if self._relaunch_attempt > 0:
+            delay = restricted_backoff(
+                self._relaunch_attempt - 1,
+                self.cfg.restricted_relaunch_backoff_s,
+                self.cfg.restricted_relaunch_backoff_max_s,
+            )
+            if delay > 0:
+                await sleep(delay)
+                if self._stop.is_set():
+                    return
+        sb = self.profile.sandbox_name()
+        if sb is None:
+            return
+        req = self._restricted_request(sb)
+        # Pre-launch marker so a crash mid-launch recovers via the pane (sandbox).
+        self._write_handoff_marker(req.project_path, "restricted", req.chat_id, sandbox=sb)
+        try:
+            handle = self._create_session(req)
+        except Exception as exc:
+            self._relaunch_failures += 1
+            self._relaunch_attempt += 1
+            log.warning(
+                "poller[%s] restricted relaunch failed (%s); streak %d/%d",
+                self.profile.name, exc, self._relaunch_failures,
+                self.cfg.restricted_relaunch_cap,
+            )
+            self._emit(
+                EVENT_ERROR, level="error", where="restricted_relaunch", message=str(exc)
+            )
+            return
+        self._session_pane_id = handle.pane_id
+        self._launched_pid = handle.pid
+        self._session_sandbox = sb
+        self._restricted_launched_at = self._clock()
+        self._session_started_at = self._restricted_launched_at
+        self._restricted_seen_alive = False
+        self._relaunch_attempt += 1
+        self._handoff_chat_id = req.chat_id
+        self._write_handoff_marker(
+            req.project_path, "restricted", req.chat_id,
+            pane_id=handle.pane_id, launcher_pid=handle.pid, sandbox=sb,
+        )
+        self._emit(
+            EVENT_RESTRICTED_RELAUNCH,
+            sandbox=sb, model=req.model, attempt=self._relaunch_attempt,
+        )
+        self._emit(EVENT_SESSION_START, pane_id=handle.pane_id, pid=handle.pid)
+        self._set_state(STATE_SESSION_LIVE)
+        log.info("poller[%s] restricted session (re)launched in box %s", self.profile.name, sb)
+
+    async def _notify_login_needed(self) -> None:
+        """Tell the operator's chat the box needs login — once per down-transition."""
+        if self._login_notified:
+            return
+        self._login_notified = True
+        self._emit(
+            EVENT_RESTRICTED_LOGIN_NEEDED,
+            level="warning", sandbox=self.profile.sandbox_name(),
+        )
+        log.warning("poller[%s] restricted box needs login — notifying operator", self.profile.name)
+        chat = self.profile.chat_id()
+        if chat is not None:
+            await self._safe_send(int(chat), RESTRICTED_LOGIN_NEEDED_MSG.format(name=self.profile.name))
+
+    async def _keep_alive_wait_poll(self, sleep: SleepFn) -> None:
+        """While a restricted session is DOWN and not relaunching, poll the bot so it
+        stays responsive: refuse control commands, answer ABS STATUS, and reply with
+        an 'offline' note to anything else (the in-box assistant is down). Advances the
+        offset. Naps ``keep_alive_check_s`` so a login/pause change is re-evaluated."""
+        try:
+            updates = await self.client.get_updates(
+                offset=self.offset, timeout=self.cfg.poll_timeout_s
+            )
+            self.last_poll_at = utc_now_iso()
+        except Conflict409:
+            # A session grabbed the token between checks — nap and re-evaluate.
+            await sleep(self.cfg.keep_alive_check_s)
+            return
+        except TelegramError:
+            await sleep(self.cfg.keep_alive_check_s)
+            return
+        if updates:
+            await self._process_restricted_batch(updates)
+        await sleep(self.cfg.keep_alive_check_s)
+
+    async def _process_restricted_batch(self, updates: list[dict[str, Any]]) -> None:
+        """Handle a down-window batch with the restricted grammar, advancing the
+        offset last (same crash-order as _process_batch, minus pooling)."""
+        max_uid = self.offset - 1 if self.offset is not None else -1
+        for update in updates:
+            ex = extract(update)
+            if ex is None:
+                continue
+            if ex.update_id > max_uid:
+                max_uid = ex.update_id
+            await self._handle_restricted(ex)
+        if max_uid >= 0:
+            self.offset = max_uid + 1
+            self._save_offset(self.offset)
+
+    async def _handle_restricted(self, ex: Extracted) -> None:
+        """Down-window handling for a restricted bot (session control is operator-only,
+        the in-box assistant is offline). Allowlist first (D10)."""
+        if ex.from_id is None or not self.profile.is_allowed(ex.from_id):
+            return
+        norm = normalize_command(ex.text)
+        if is_start(ex.text) or is_off(ex.text) or is_block(ex.text) or norm == "ABS EXIT":
+            self._emit(EVENT_COMMAND, name="restricted-control-refused")
+            await self._reply(ex, RESTRICTED_CONTROL_REFUSED)
+            return
+        if is_status(ex.text):
+            self._emit(EVENT_COMMAND, name="ABS STATUS")
+            await self._reply(ex, self._restricted_status_text())
+            return
+        await self._reply(ex, RESTRICTED_OFFLINE_MSG)
+
+    def _restricted_status_text(self) -> str:
+        state = "live" if self.session_state == STATE_SESSION_LIVE else "starting up"
+        return (
+            f"🔒 Restricted assistant '{self.profile.name}' — {state}.\n"
+            f"Model: {self.profile.model() or 'default'}\n"
+            f"Daemon: absd {__version__}"
+        )
+
     # ---- run loop --------------------------------------------------------
 
     def stop(self) -> None:
@@ -1975,14 +2279,33 @@ class Poller:
         # surviving daemon session with FIX B/C precision, reclaim a dead one, and
         # send the reboot notice). Runs once per process; a no-op on restarts.
         await self.boot_recover_and_notify()
-        # Register the "/" menu matching our state at boot (Step 2.2; debounced).
-        await self._ensure_menu(
-            "session" if self.session_state == STATE_SESSION_LIVE else "idle"
-        )
+        if self.profile.keep_alive():
+            # Restricted keep-alive (Stage 3): a recovered LIVE session is treated as
+            # freshly healthy (watched pane-only); anything else drops to DOWN so the
+            # keep-alive loop relaunches it. No ABS "/" menu — its controls are
+            # operator-only.
+            if self.session_state == STATE_SESSION_LIVE:
+                self._restricted_launched_at = self._clock()
+                self._restricted_seen_alive = True
+                self._session_sandbox = self.profile.sandbox_name()
+            else:
+                self._set_state(STATE_KEEP_ALIVE_DOWN)
+        else:
+            # Register the "/" menu matching our state at boot (Step 2.2; debounced).
+            await self._ensure_menu(
+                "session" if self.session_state == STATE_SESSION_LIVE else "idle"
+            )
 
         cycles = 0
         backoff: float | None = None
         while not self._stop.is_set():
+            if self.profile.keep_alive():
+                await self._keep_alive_step(sleep)
+                self.write_status()
+                cycles += 1
+                if max_cycles is not None and cycles >= max_cycles:
+                    return
+                continue
             if self.session_state == STATE_SESSION_LIVE:
                 alive = await self.watch_once()
                 if alive:
