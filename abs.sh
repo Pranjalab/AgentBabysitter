@@ -2888,6 +2888,24 @@ cmd_project() {
   exec env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.registry project "$sub" "$@"
 }
 
+# `abs sandbox build|create|list|start|stop|destroy` — Docker sandbox sessions
+# (Phase 3). Shells into the Python sandbox manager (absd.sandbox). No profile and
+# no jq needed. `create` prints the credential-copy tradeoff + the workdir + ports.
+cmd_sandbox() {
+  local sub="${1:-}"; shift || true
+  local root py
+  root="$(dirname "$SCRIPT_PATH")"
+  py="$root/.venv/bin/python"
+  [ -x "$py" ] || die "abs sandbox needs $root/.venv (Python 3.11+). Not found."
+  [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root)."
+  command -v docker >/dev/null 2>&1 || die "abs sandbox needs Docker. Install it: https://docs.docker.com/engine/install/"
+  case "$sub" in
+    build|create|list|start|stop|destroy) ;;
+    *) die "Usage: abs sandbox build|create <name> [--ports a:b,c:d]|list|start <name>|stop <name>|destroy <name> [--purge]" ;;
+  esac
+  exec env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox "$sub" "$@"
+}
+
 # `abs doctor` — read-only diagnosis of the v2 deps and the v3 daemon stack.
 # Clear ✓/!/✗ lines with actionable hints; never changes anything.
 cmd_doctor() {
@@ -2996,6 +3014,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} daemon install|start|stop|status|logs|run
                           Always-on daemon: polls idle bots, pools messages (v3)
   ${c_bold}abs${c_reset} doctor              Diagnose the v2 deps + v3 daemon stack (read-only)
+  ${c_bold}abs${c_reset} sandbox build|create|list|start|stop|destroy
+                          Docker sandbox sessions — one dedicated host folder, isolated (v3)
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} version             Print the installed version
@@ -3066,6 +3086,8 @@ main() {
     sessions|attach) cmd_engine "$@" ;;
     # v3 project registry (terminal-only, 5.3): no profile, no jq.
     project) shift; cmd_project "$@" ;;
+    # Phase 3 sandbox lifecycle: no profile, no jq — execs the Python manager.
+    sandbox) shift; cmd_sandbox "$@" ;;
   esac
 
   command -v jq >/dev/null 2>&1 || die "jq is required."

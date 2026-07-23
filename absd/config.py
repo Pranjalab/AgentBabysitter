@@ -85,6 +85,11 @@ class DaemonConfig:
     log_max_bytes: int = 5 * 1024 * 1024
     log_keep: int = 3
 
+    # Sandbox root (Phase 3): each `abs sandbox create <name>` gets a dedicated host
+    # dir <sandbox_root>/<name> (0700) bind-mounted as the container workdir. Stored
+    # verbatim (may contain "~"); expansion happens at use sites.
+    sandbox_root: str = "~/Projects/sandboxes"
+
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping for this config."""
         return asdict(self)
