@@ -493,6 +493,17 @@ publishes. No `--privileged`, no host mounts beyond nothing (only `docker cp` at
   logged in (copied creds) → build a hello web app → open `localhost:3000` on host.
 - **Critique gate:** security checklist 5.6 verified against `docker inspect` output.
 
+> **BUILT** (see `docs/v3/critique/3.1.md`). **Design change (user-requested):** the
+> project lives in a DEDICATED HOST FOLDER `<sandbox_root>/<name>` (default
+> `~/Projects/sandboxes`, config `sandbox_root`, 0700) **bind-mounted** at
+> `/home/dev/workspace` — not solely inside a named volume — so work syncs live to a
+> local dir; that one folder is the only host path the container sees. `docker/sandbox/
+> Dockerfile` (ubuntu:24.04, non-root `dev` at host uid, git/curl/jq/ripgrep/build/
+> python3/Node LTS/Claude Code), `absd/sandbox.py` (`SandboxManager` + `abs sandbox
+> build|create|list|start|stop|destroy`). 5.6 verified via `docker inspect`
+> (Privileged=false, one bind, User=dev, no socket); creds copied (D8) not mounted,
+> divergence proven; destroy keeps the workdir (user data) unless `--purge`.
+
 ### Step 3.2 — Sandbox sessions through the whole stack
 Sandboxed profile sessions: engine pane runs `docker exec -it <name> abs-entry` where the
 container carries enough ABS to run `claude --channels` with a profile's telegram state
