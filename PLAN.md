@@ -416,6 +416,16 @@ Inline-keyboard pool selection (multi-select toggles + Send/Skip buttons) replac
 text protocol; `ABS STATUS` shows per-profile session/pool/usage glance; statusline dot
 reflects daemon state; menu registration (`abs menu`) adds the new commands to Telegram's
 "/" menu for daemon mode.
+
+> **Pulled forward + shipped after the 1.5 live demo** (see `docs/v3/critique/2.2a.md`):
+> **(a) resume-first ABS START** — successful launches (daemon HANDOFF *and* terminal
+> `abs`) are recorded in `~/.abs/daemon/recents.json`; the flow's first screen offers up
+> to 3 "▶ Resume <label> (<age>)" one-tap buttons (recorded mode + `--continue`) plus
+> "🆕 New session"; and **(b) the Telegram "/" menu** — the daemon registers
+> `/abs_start /abs_status /abs_pool` while idle and `/abs_exit`+`usage` in-session (via
+> `set_my_commands`, debounced), the three `/abs_*` accepted as grammar aliases, and
+> session-side `/abs_exit` wired into the abs.sh control hook. The inline-keyboard pool
+> selection and the statusline dot remain for the full 2.2.
 - **Agent verify:** callback-query unit tests for the keyboard state machine.
 - **Pranjal verify:** the full phone flow feels good — his subjective sign-off is the gate.
 - **Critique gate:** UX review with Pranjal; list of paper cuts → fix before Phase 3.
