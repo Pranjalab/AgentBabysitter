@@ -531,6 +531,26 @@ in the start confirmation. Attach/detach/kill ladder all work identically.
 > `absd-session` launcher). Same-bot creds only; dedicated-bot for untrusted work is
 > a later stage.
 
+### Stage 2 — `abs start new-bot` (provision a bot + profile from the terminal)
+
+> **BUILT** (new scope, beyond the original plan; see `docs/v3/critique/newbot.md`).
+> `abs start new-bot` creates a brand-new Telegram bot + ABS profile, pairs it, and
+> launches a session — one interactive terminal flow, no daemon restart. **Token entry
+> is terminal-only** (a token is a bearer credential; a Telegram-supplied token is the
+> compromised-phone attack). The pairing PIN is **relayed to the operator's phone via an
+> already-trusted bot** (the `default` profile's, else the first usable) as a convenience
+> — it travels only to an already-paired+allowlisted chat, is short-lived
+> (`PAIR_TIMEOUT`) and single-use, and confers nothing without the terminal-entered
+> token. Reuses the whole setup path (`read_new_token`/`save_token` factored out of
+> `prompt_token`; `do_pairing` gained optional relay args; `write_access`/`write_state`
+> shared). Profile name derived from `@username` (`absd/newbot.py`, sanitized to
+> `use_profile`'s jail). **Daemon profile rescan** added to the supervisor
+> (`profile_rescan_s`, default 60s, 0 disables): re-runs `discover()`, spins up staggered
+> pollers for new profiles, cleanly drops pollers for vanished ones, never disturbs
+> existing pollers/live sessions, emits `profile_added`/`profile_removed`. Tests: daemon
+> rescan, name derivation + relay-target selection (pure), and abs.sh guards
+> (assert_no_live_session / interactive-only / bad-token) — no real Telegram.
+
 ## 10. Global testing & critique protocol
 
 - **Never test against real Telegram/Anthropic in automated tests** (fakes from 0.3).

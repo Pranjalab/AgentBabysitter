@@ -223,6 +223,11 @@ list_profiles() {
   done
 }
 
+# True if a profile directory with an rc.json already exists (name collision).
+profile_exists() {
+  [ -n "$1" ] && [ -f "$PROFILES_DIR/$1/rc.json" ]
+}
+
 # v1 shipped as "Claude RC" and kept its profiles under ~/.claude/clauderc. Copy
 # the whole tree across on first run so an upgrade doesn't silently lose a
 # pairing and send you back through BotFather. Non-destructive by the same rule
@@ -420,8 +425,8 @@ print_welcome() {
   info ""
 }
 
-prompt_token() {
-  step "Step 1 of 2 — Create your Telegram bot"
+# The BotFather walkthrough, shared by `abs setup` and `abs start new-bot`.
+print_token_instructions() {
   info "In Telegram, open a chat with ${c_cyan}@BotFather${c_reset} ${c_dim}(the official bot-maker — the blue tick)${c_reset}:"
   info ""
   info "    ${c_bold}a.${c_reset} send  ${c_bold}/newbot${c_reset}"
@@ -434,7 +439,14 @@ prompt_token() {
   info ""
   info "  Copy the whole token and paste it here ${c_dim}(it stays hidden as you paste, and never leaves this machine)${c_reset}."
   info ""
+}
 
+# Read a bot token from the TERMINAL (never from a Telegram message — a token is a
+# bearer credential; a Telegram-supplied token is the compromised-phone attack),
+# validate its shape, and verify it with Telegram. Sets BOT_TOKEN + BOT_USERNAME.
+# Does NOT save it — the caller decides WHERE (which profile) after it knows the
+# @username, so new-bot can derive the profile name before writing anything.
+read_new_token() {
   local token=""
   # -s so the token is never echoed to the terminal or captured by scrollback.
   read -rsp "Bot token: " token < /dev/tty
@@ -454,7 +466,11 @@ prompt_token() {
   fi
   BOT_USERNAME="$(printf '%s' "$resp" | jq -r '.result.username')"
   ok "Authenticated as @${BOT_USERNAME}"
+}
 
+# Persist BOT_TOKEN to the CURRENT profile's $TG_ENV (0600, atomic). Split out of
+# prompt_token so new-bot can save AFTER it has switched to the derived profile.
+save_token() {
   mkdir -p "$TG_DIR"; chmod 700 "$TG_DIR"
   # Write via a temp file so a crash can't leave a half-written token, and so the
   # file is never briefly world-readable.
@@ -462,6 +478,13 @@ prompt_token() {
   printf 'TELEGRAM_BOT_TOKEN=%s\n' "$BOT_TOKEN" > "$tmp"
   chmod 600 "$tmp"; mv -f "$tmp" "$TG_ENV"
   ok "Token saved to $TG_ENV (permissions 600)"
+}
+
+prompt_token() {
+  step "Step 1 of 2 — Create your Telegram bot"
+  print_token_instructions
+  read_new_token
+  save_token
 }
 
 # Six crypto-random characters, minus look-alikes (I/O/0/1).
@@ -487,8 +510,16 @@ gen_pin() {
 # driven from a shell script, and it answers strangers. This direction is both
 # scriptable and tighter: unknown senders get silence, and the PIN proves the
 # person holding the terminal is the person holding the phone.
+# do_pairing <username> [relay_token] [relay_cid] [relay_bot]
+#
+# When relay_* are given (abs start new-bot), the freshly generated PIN is ALSO
+# sent to the operator's phone via an ALREADY-TRUSTED bot (relay_token/relay_cid),
+# purely as a convenience so they don't have to read it off the terminal. Security:
+# the PIN travels only to a chat already paired + allowlisted on that trusted bot,
+# it is short-lived (PAIR_TIMEOUT) and single-use, and token ENTRY stays terminal-
+# only. See docs/v3/critique/newbot.md.
 do_pairing() {
-  local username="$1"
+  local username="$1" relay_token="${2:-}" relay_cid="${3:-}" relay_bot="${4:-}"
 
   step "Step 2 of 2 — Prove the phone is yours"
 
@@ -512,6 +543,20 @@ do_pairing() {
   info "  ${c_dim}from anyone else are ignored. Send it from a private chat, not a group.${c_reset}"
   info ""
   info "  ${c_dim}Waiting up to 5 minutes… (Ctrl-C to cancel)${c_reset}"
+
+  # Relay the PIN to the operator's phone via an already-trusted bot (new-bot).
+  # Sent with the TRUSTED bot's token, restored immediately afterwards so the
+  # polling loop below still talks to the NEW bot.
+  if [ -n "$relay_token" ] && [ -n "$relay_cid" ]; then
+    local _saved_token="$BOT_TOKEN"
+    BOT_TOKEN="$relay_token"
+    if tg_send "$relay_cid" "Pairing PIN for @${username}: ${pin} — send this to @${username} to finish setup (valid 5 min)." >/dev/null 2>&1; then
+      info "  ${c_dim}(PIN also sent to your phone via @${relay_bot})${c_reset}"
+    else
+      warn "Couldn't relay the PIN to your phone — use the one shown above."
+    fi
+    BOT_TOKEN="$_saved_token"
+  fi
 
   local deadline=$((SECONDS + PAIR_TIMEOUT))
   local uid="" cid=""
@@ -2594,12 +2639,137 @@ _start_sandbox() {
   exec docker exec -it "absd-sbx-$name" absd-session "$PROFILE" "$@"
 }
 
-# `abs start …` — session-start subcommands. Currently: `abs start sandbox [name]`.
+# Where should the new bot's first session run? Offers "this folder" plus the
+# registered projects + workspace-root children (the same targets the start-menu
+# project picker uses). Echoes the chosen directory on stdout (empty = current);
+# all UI goes to stderr so the caller can capture the path.
+_newbot_pick_cwd() {
+  local root="$1" py="$2" tj tcount i label c p
+  tj="$(env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.registry targets --json 2>/dev/null || echo '[]')"
+  tcount="$(printf '%s' "$tj" | jq 'length' 2>/dev/null || echo 0)"
+  step "Where should this bot's sessions run?"
+  info "  1. 📁 This folder ($PWD)"
+  if [ "${tcount:-0}" -gt 0 ] 2>/dev/null; then
+    for i in $(seq 0 $((tcount - 1))); do
+      label="$(printf '%s' "$tj" | jq -r ".[$i].label")"
+      info "  $((i + 2)). $label"
+    done
+  fi
+  printf '  Choice [Enter=1]: ' >&2
+  read -r c < /dev/tty || c=""
+  [ -n "$c" ] || c=1
+  if [ "$c" = "1" ]; then
+    return 0                                   # this folder (empty → caller keeps PWD)
+  fi
+  if printf '%s' "$c" | grep -qE '^[0-9]+$' && [ "$c" -ge 2 ] && [ "$c" -le "$((tcount + 1))" ]; then
+    p="$(printf '%s' "$tj" | jq -r ".[$((c - 2))].path")"
+    if [ -d "$p" ]; then
+      printf '%s' "$p"
+    else
+      warn "That folder no longer exists — launching here."
+    fi
+  else
+    warn "Not a choice — launching here."
+  fi
+}
+
+# `abs start new-bot` (Stage 2 of the matrix) — provision a BRAND-NEW bot + profile
+# end to end, then launch a session on it. Terminal-only and interactive: the token
+# is typed at the terminal (never accepted from Telegram — a token is a bearer
+# credential; a Telegram-supplied token is the compromised-phone attack), and the
+# pairing PIN is RELAYED to the operator's phone via an already-trusted bot as a
+# convenience. See docs/v3/critique/newbot.md.
+cmd_new_bot() {
+  need_deps
+  # Guard first (as with every launch): don't provision while a session is live on
+  # the resolved profile — Telegram allows one poller per bot and an interactive
+  # flow here would collide with it.
+  assert_no_live_session
+  ensure_plugin
+  [ -t 0 ] || die "abs start new-bot is interactive — run it at a terminal."
+
+  local root py
+  root="$(dirname "$SCRIPT_PATH")"
+  py="$root/.venv/bin/python"
+  if [ ! -x "$py" ] || [ ! -d "$root/absd" ]; then die "abs start new-bot needs $root/.venv (Python 3.11+)."; fi
+
+  # Resolve the trusted relay target (an existing paired bot) and read its token +
+  # chat NOW, while globals still point at it — before read_new_token overwrites
+  # BOT_TOKEN with the new bot's. No trusted profile → terminal-only PIN display.
+  local relay_prof="" relay_token="" relay_cid="" relay_bot=""
+  relay_prof="$(env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.newbot relay-target --abs-home "$ABS_HOME" 2>/dev/null || true)"
+  if [ -n "$relay_prof" ]; then
+    use_profile "$relay_prof"
+    if load_token; then
+      relay_token="$BOT_TOKEN"
+      relay_cid="$(state_get '.chat_id')"; [ "$relay_cid" = "null" ] && relay_cid=""
+      relay_bot="$(state_get '.bot')"; [ "$relay_bot" = "null" ] && relay_bot=""
+    fi
+  fi
+
+  step "Add a new bot"
+  print_token_instructions
+  read_new_token                               # sets BOT_TOKEN (new) + BOT_USERNAME
+
+  # Derive the profile name from @username; prompt on empty or collision.
+  local newname
+  newname="$(env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.newbot derive-name "$BOT_USERNAME" 2>/dev/null || true)"
+  if [ -z "$newname" ] || profile_exists "$newname"; then
+    profile_exists "$newname" && warn "A profile named '$newname' already exists — pick a short name for this one."
+    while :; do
+      printf '  Short name for this bot: ' >&2
+      read -r newname < /dev/tty || newname=""
+      newname="$(printf '%s' "$newname" | tr -d '[:space:]')"
+      if ! [[ "$newname" =~ ^[A-Za-z0-9_-]+$ ]]; then warn "Letters, digits, - and _ only."; continue; fi
+      if profile_exists "$newname"; then warn "'$newname' already exists — pick another."; continue; fi
+      break
+    done
+  fi
+
+  # Switch to the new profile and persist its token there.
+  use_profile "$newname"
+  save_token
+
+  # Pair the NEW bot, relaying the PIN to the operator's phone via the trusted bot.
+  if [ -n "$relay_token" ] && [ -n "$relay_cid" ]; then
+    info "${c_dim}A pairing PIN will also be sent to your phone via @${relay_bot}.${c_reset}"
+  else
+    info "${c_dim}No trusted bot to relay through — the PIN will be shown here only.${c_reset}"
+  fi
+  do_pairing "$BOT_USERNAME" "$relay_token" "$relay_cid" "$relay_bot"
+
+  local uid="$PAIR_UID" cid="$PAIR_CID"
+  write_access "$uid"
+  write_state "$uid" "$cid" "$BOT_USERNAME"
+
+  tg_send "$cid" "Agent Babysitter paired ✅
+
+This chat is now linked to a new Claude Code bot (profile '${newname}'). You'll get a short report when a task finishes, and you can reply here to give instructions." \
+    "$(clear_keyboard)" \
+    || warn "Paired, but the confirmation message didn't send: $TG_ERR"
+  register_commands "$cid" || warn "Paired, but the command menu didn't register."
+
+  step "New bot ready"
+  ok "Bot @${BOT_USERNAME} is linked to this machine as profile '${newname}'."
+  info "${c_dim}The always-on daemon will begin polling it within ~60s (profile rescan).${c_reset}"
+
+  # Choose where its first session runs, then launch it (cmd_run handles the rest:
+  # hooks, session.pid, exec). cd first so the launch lands in the chosen folder.
+  local chosen
+  chosen="$(_newbot_pick_cwd "$root" "$py")"
+  if [ -n "$chosen" ] && [ -d "$chosen" ]; then
+    cd "$chosen" || die "Can't enter $chosen"
+  fi
+  cmd_run
+}
+
+# `abs start …` — session-start subcommands.
 cmd_start() {
   local what="${1:-}"; shift || true
   case "$what" in
     sandbox) _start_sandbox "$@" ;;
-    *) die "Usage: abs start sandbox [name]" ;;
+    new-bot) cmd_new_bot "$@" ;;
+    *) die "Usage: abs start {sandbox [name] | new-bot}" ;;
   esac
 }
 
@@ -3065,6 +3235,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} sandbox build|create|list|start|stop|destroy
                           Docker sandbox sessions — one dedicated host folder, isolated (v3)
   ${c_bold}abs${c_reset} start sandbox [name]  Run a Claude session INSIDE a sandbox container (v3)
+  ${c_bold}abs${c_reset} start new-bot        Provision a brand-new bot + profile, then launch it (v3)
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} version             Print the installed version
@@ -3172,6 +3343,10 @@ main() {
       # update only needs ABS_DIR for its version cache — resolve default rather
       # than dragging the user through the profile picker just to upgrade.
       is-quiet|statusline|usage-glance|usage-cache|profiles|update|voice|doctor) use_profile default ;;
+      # `abs start new-bot` CREATES a profile, so it must not drag the user
+      # through the picker to choose an existing one first; resolve to default
+      # (the guard/relay context). `abs start sandbox` still picks a profile.
+      start) if [ "${2:-}" = "new-bot" ]; then use_profile default; else pick_profile; fi ;;
       *)                 pick_profile ;;
     esac
   fi
