@@ -2552,17 +2552,24 @@ cmd_daemon() {
       ;;
     status)
       systemctl --user status absd --no-pager 2>/dev/null || warn "absd unit not found or not running (try: abs daemon install)."
-      # Per-profile poller offset summary, if the daemon has written any state.
-      local dd="$ABS_HOME/daemon" f name
-      if [ -d "$dd" ]; then
-        local shown=0
-        for f in "$dd"/poller-*.json; do
-          [ -f "$f" ] || continue
-          name="$(basename "$f" .json)"; name="${name#poller-}"
-          info "  poller $name: $(cat "$f" 2>/dev/null)"
-          shown=1
-        done
-        [ "$shown" = 1 ] || info "  (no per-profile poller state yet)"
+      # Per-profile status block (state/pool/last-poll age) rendered from the
+      # status files the daemon rewrites each cycle. Falls back to the raw
+      # offset files if the venv/absd is somehow unavailable.
+      step "Profiles:"
+      if [ -x "$py" ] && [ -d "$root/absd" ] &&
+         env PYTHONPATH="$root" "$py" -m absd --abs-home "$ABS_HOME" --print-status 2>/dev/null; then
+        :
+      else
+        local dd="$ABS_HOME/daemon" f name shown=0
+        if [ -d "$dd" ]; then
+          for f in "$dd"/status-*.json "$dd"/poller-*.json; do
+            [ -f "$f" ] || continue
+            name="$(basename "$f" .json)"; name="${name#status-}"; name="${name#poller-}"
+            info "  $name: $(cat "$f" 2>/dev/null)"
+            shown=1
+          done
+        fi
+        [ "$shown" = 1 ] || info "  (no per-profile poller status yet)"
       fi
       exit 0
       ;;

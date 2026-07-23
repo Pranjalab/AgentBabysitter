@@ -44,7 +44,7 @@ from absd import __version__
 from absd.config import DaemonConfig
 from absd.pool import Pool, PooledMessage, utc_now_iso
 from absd.profiles import Profile
-from absd.telegram import Conflict409, TelegramClient
+from absd.telegram import Conflict409, TelegramClient, TelegramError
 
 log = logging.getLogger("absd.poller")
 
@@ -135,6 +135,80 @@ def render_pool(messages: list[PooledMessage]) -> str:
     return "\n".join(lines)
 
 
+# ---- daemon status rendering (Step 1.4 `abs daemon status`) -------------------
+
+
+def _parse_iso(ts: str | None) -> "datetime | None":
+    from datetime import datetime, timezone
+
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_age(then: str | None, now: "datetime | None" = None) -> str:
+    """Human 'age' of a timestamp, e.g. ``12s`` / ``3m`` / ``never``."""
+    from datetime import datetime, timezone
+
+    dt = _parse_iso(then)
+    if dt is None:
+        return "never"
+    now = now or datetime.now(timezone.utc)
+    secs = int((now - dt).total_seconds())
+    if secs < 0:
+        secs = 0
+    if secs < 90:
+        return f"{secs}s"
+    mins = secs // 60
+    if mins < 90:
+        return f"{mins}m"
+    return f"{mins // 60}h"
+
+
+def read_status_files(daemon_dir: Path) -> list[dict[str, Any]]:
+    """Read every ``status-<profile>.json`` under ``daemon_dir`` (sorted by
+    profile). Malformed files are skipped, never fatal (PLAN.md 4.4)."""
+    import json
+
+    daemon_dir = Path(daemon_dir)
+    out: list[dict[str, Any]] = []
+    if not daemon_dir.is_dir():
+        return out
+    for path in sorted(daemon_dir.glob("status-*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def render_daemon_status(records: list[dict[str, Any]], now: "datetime | None" = None) -> str:
+    """Render the per-profile status block for ``abs daemon status``.
+
+    One line per profile: name, state, pool depth, and last-poll age. Reads only
+    the daemon's persisted status files — it never itself touches Telegram."""
+    if not records:
+        return "  (no per-profile poller status yet)"
+    lines: list[str] = []
+    for rec in records:
+        name = str(rec.get("profile", "?"))
+        state = str(rec.get("state", "?"))
+        pool_n = rec.get("pool_count", 0)
+        age = _fmt_age(rec.get("last_poll_at"), now=now)
+        extra = ""
+        if state == "yielding-to-session" and rec.get("session_pid"):
+            extra = f" (pid {rec['session_pid']})"
+        lines.append(
+            f"  {name}: {state}{extra}  pool={pool_n}  last-poll {age} ago"
+        )
+    return "\n".join(lines)
+
+
 # ---- update extraction --------------------------------------------------------
 
 
@@ -205,7 +279,15 @@ class Poller:
         self.client = client
         self.cfg = cfg
         self.pool = Pool(profile.pool_path)
-        self.state_path = Path(state_dir) / f"poller-{profile.name}.json"
+        self.state_dir = Path(state_dir)
+        self.state_path = self.state_dir / f"poller-{profile.name}.json"
+        #: Per-profile status file (Step 1.4) — rewritten atomically each cycle so
+        #: ``abs daemon status`` can show a per-profile line without touching the
+        #: running daemon. Distinct from the offset file above.
+        self.status_path = self.state_dir / f"status-{profile.name}.json"
+        #: ISO-8601 timestamp of the last *successful* getUpdates (drives the
+        #: "last-poll age" in status). None until the first poll returns.
+        self.last_poll_at: str | None = None
         # Next offset to request; None means "unfiltered first poll". Loaded from
         # disk so a restart resumes where it committed (crash-safety).
         self.offset: int | None = self._load_offset()
@@ -242,6 +324,38 @@ class Poller:
         os.replace(str(tmp), str(self.state_path))
         os.chmod(self.state_path, 0o600)
 
+    # ---- per-profile status file (Step 1.4) ------------------------------
+
+    def write_status(self) -> None:
+        """Write this profile's status snapshot atomically (0600) for
+        ``abs daemon status`` (PLAN.md Step 1.4). Never raises: a status-write
+        failure must never disturb the poll loop, so all errors are swallowed
+        (the file is a convenience, not a source of truth)."""
+        import json
+        import os
+
+        record = {
+            "profile": self.profile.name,
+            "state": self.profile.state_label(),
+            "pool_count": self.pool.count(),
+            "session_pid": self.profile.live_session_pid(),
+            "last_poll_at": self.last_poll_at,
+            "updated_at": utc_now_iso(),
+        }
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self.status_path.with_suffix(".tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, (json.dumps(record) + "\n").encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(str(tmp), str(self.status_path))
+            os.chmod(self.status_path, 0o600)
+        except OSError:
+            log.debug("poller[%s] status write failed", self.profile.name)
+
     # ---- one cycle -------------------------------------------------------
 
     async def poll_once(self) -> int:
@@ -260,6 +374,9 @@ class Poller:
         updates = await self.client.get_updates(
             offset=self.offset, timeout=self.cfg.poll_timeout_s
         )
+        # A returned getUpdates (empty or not) is a completed poll — stamp it so
+        # "last-poll age" in status reflects reality.
+        self.last_poll_at = utc_now_iso()
         if not updates:
             return 0
 
@@ -394,9 +511,22 @@ class Poller:
                 await sleep(backoff)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # a poll error must not kill the task
-                log.exception("poller[%s] cycle error", self.profile.name)
+            except TelegramError:
+                # An operational Bot API / network error (already retried once in
+                # the client). Stay alive — a transient outage must not kill the
+                # task or trip the supervisor's loud restart — nap and retry.
+                log.warning(
+                    "poller[%s] telegram error — retrying shortly", self.profile.name
+                )
                 await sleep(YIELD_RECHECK_S)
+            # NOTE: any OTHER exception is unexpected (a bug / corrupted state).
+            # It is deliberately NOT caught here — it propagates to the daemon's
+            # per-profile supervisor (absd.__main__._run_profile), which logs it
+            # loudly and RESTARTS this poller with backoff, in isolation from the
+            # other profiles' tasks (PLAN.md Step 1.4 supervision requirement).
+
+            # Status snapshot for `abs daemon status` (best-effort, never raises).
+            self.write_status()
 
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:

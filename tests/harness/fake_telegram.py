@@ -86,6 +86,10 @@ class FakeTelegram:
         self.getupdates_calls = 0
         self.confirmed_offset: int | None = None
         self.delivered_ids: list[int] = []  # every update_id ever returned
+        #: monotonic timestamp of the FIRST getUpdates this fake ever saw — lets a
+        #: test assert staggered poller start spacing (Step 1.4) without long real
+        #: sleeps. None until the first call.
+        self.first_getupdates_at: float | None = None
 
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -237,6 +241,10 @@ class FakeTelegram:
 
     async def _m_getUpdates(self, params: dict[str, Any]) -> web.Response:
         self.getupdates_calls += 1
+        if self.first_getupdates_at is None:
+            import time
+
+            self.first_getupdates_at = time.monotonic()
         if self._should_409():
             return web.json_response(
                 {

@@ -16,11 +16,22 @@ Command line::
                tests and for debugging — no long-poll loop, no signal wait.
   --log-level  DEBUG/INFO/WARNING/… (default: INFO).
 
-Test seam (NOT for production use): ``ABS_TELEGRAM_BASE_URL`` overrides the Bot
-API base URL for every client so the suite points at the local ``fake_telegram``
-server. Unset in production, every client talks to https://api.telegram.org.
-Automated tests ALWAYS set it (plus a temp ABS_HOME and fake tokens) so no test
-ever reaches real Telegram (PLAN.md section 10 / the Step 1.3 safety rule).
+Test seams (NOT for production use), both localhost-guarded so they can never
+silently redirect a real deployment:
+
+  * ``ABS_TELEGRAM_BASE_URL`` (env, global) — overrides the Bot API base URL for
+    every client. Unset in production, every client talks to
+    https://api.telegram.org.
+  * ``<profile_dir>/.telegram-base-url`` (file, per-profile) — points ONE profile
+    at ONE FakeTelegram instance, so a multi-profile test can give each fake bot
+    its own server (Step 1.4). Read only through :func:`_resolve_base_url`, which
+    **refuses any non-localhost value** (127.0.0.1 / localhost / ::1 only) and
+    falls back to the global base — a stray or hostile file can never redirect a
+    real deployment. Absent in production.
+
+Automated tests ALWAYS use one of these (plus a temp ABS_HOME and fake tokens)
+so no test ever reaches real Telegram (PLAN.md section 10 / the Step 1.3 safety
+rule).
 """
 
 from __future__ import annotations
@@ -32,10 +43,11 @@ import os
 import signal
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from absd import __version__
 from absd import config as config_mod
-from absd.daemon import Poller
+from absd.daemon import Poller, read_status_files, render_daemon_status
 from absd.profiles import Profile, discover
 from absd.telegram import TelegramClient
 
@@ -43,6 +55,53 @@ log = logging.getLogger("absd")
 
 # daemon.log size cap before a single ".old" roll (real rotation is Step 1.8).
 _LOG_MAX_BYTES = 2 * 1024 * 1024
+
+# Per-profile supervisor restart backoff (Step 1.4): a poller task that dies
+# unexpectedly is restarted after this delay, doubling up to the cap. A dead
+# poller is a deaf bot — the daemon's job is to never be silently deaf.
+_RESTART_BACKOFF_INITIAL_S = 1.0
+_RESTART_BACKOFF_MAX_S = 30.0
+
+# Hosts the per-profile TEST base-URL override is allowed to point at. Anything
+# else is refused so the seam cannot redirect a real deployment (Step 1.4).
+_LOCALHOST_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_localhost_url(url: str) -> bool:
+    try:
+        host = urlparse(url).hostname
+    except ValueError:
+        return False
+    return host in _LOCALHOST_HOSTS
+
+
+def _resolve_base_url(profile: Profile, global_base_url: str) -> str:
+    """Resolve the Bot API base URL for one profile.
+
+    Honors the per-profile ``.telegram-base-url`` TEST seam ONLY when it points
+    at localhost; a non-localhost (or unreadable) value is refused with a loud
+    log and the global base is used instead, so the seam can never silently
+    redirect a real deployment (Step 1.4 safety guard)."""
+    try:
+        raw = profile.test_base_url_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return global_base_url
+    if not raw:
+        return global_base_url
+    if not _is_localhost_url(raw):
+        log.error(
+            "profile %s: REFUSING non-localhost .telegram-base-url override %r "
+            "— using default base URL",
+            profile.name,
+            raw,
+        )
+        return global_base_url
+    log.warning(
+        "profile %s: using TEST base_url override %s (test-only, localhost)",
+        profile.name,
+        raw,
+    )
+    return raw
 
 
 def _default_abs_home() -> Path:
@@ -57,6 +116,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None, help="config.json path")
     parser.add_argument(
         "--once", action="store_true", help="one poll cycle per profile, then exit"
+    )
+    parser.add_argument(
+        "--print-status",
+        action="store_true",
+        help="print the per-profile status block (from persisted status files) and exit",
     )
     parser.add_argument("--log-level", default="INFO", help="log level (default INFO)")
     parser.add_argument(
@@ -109,18 +173,53 @@ def _build_pollers(
     daemon_dir: Path,
     base_url: str,
 ) -> list[tuple[Poller, TelegramClient]]:
-    """One (poller, client) per profile that has a usable token."""
+    """One (poller, client) per profile that has a usable token.
+
+    Each poller is fully independent (own client/token/base_url, own pool, own
+    offset + status files, own backoff, own ``poller[<name>]`` log prefix) — the
+    isolation G5 requires. ``base_url`` is the global default; a per-profile
+    localhost override may replace it via :func:`_resolve_base_url`."""
     built: list[tuple[Poller, TelegramClient]] = []
     for profile in profiles:
         token = profile.load_token()
         if not token:
             log.warning("profile %s has no token — skipping", profile.name)
             continue
-        client = TelegramClient(token, base_url=base_url)
+        profile_base_url = _resolve_base_url(profile, base_url)
+        client = TelegramClient(token, base_url=profile_base_url)
         poller = Poller(profile, client, cfg, state_dir=daemon_dir)
         built.append((poller, client))
         log.info("profile %s: poller ready (tg_dir=%s)", profile.name, profile.tg_dir)
     return built
+
+
+def _log_boot_state(profiles: list[Profile]) -> None:
+    """Boot-time state detection (PLAN.md 4.1): classify and LOUDLY log each
+    profile's initial state so the operator can see, at startup, which bots are
+    yielding to a live session and which are polling. A stale ``session.pid``
+    (process dead) is logged as such and treated as idle — but the pid file is
+    left untouched (deleting it is the launcher's / Step 1.5's job)."""
+    for p in profiles:
+        live = p.live_session_pid()
+        if live is not None:
+            log.info(
+                "boot: profile %s — LIVE session (pid %d); starting in yielding state",
+                p.name,
+                live,
+            )
+        elif p.has_stale_session_pid():
+            log.warning(
+                "boot: profile %s — STALE session.pid (pid %s not alive); "
+                "treating as idle, pid file left intact",
+                p.name,
+                p.session_pid_on_disk(),
+            )
+        elif p.is_blocked():
+            log.info("boot: profile %s — BLOCKED (ABS BLOCK); not polling", p.name)
+        elif p.is_off():
+            log.info("boot: profile %s — OFF (inbound disabled); not polling", p.name)
+        else:
+            log.info("boot: profile %s — idle; polling", p.name)
 
 
 async def _run_once(pollers: list[tuple[Poller, TelegramClient]]) -> None:
@@ -129,28 +228,109 @@ async def _run_once(pollers: list[tuple[Poller, TelegramClient]]) -> None:
             await poller.poll_once()
         except Exception:  # one profile's failure never aborts the sweep
             log.exception("profile %s: --once poll failed", poller.profile.name)
+        finally:
+            poller.write_status()
 
 
-async def _staggered(poller: Poller, delay: float, stop: asyncio.Event) -> None:
-    """Start a poller after ``delay`` seconds (R10 thundering-herd stagger),
-    then run until ``stop`` is set."""
-    try:
-        await asyncio.sleep(delay)
-    except asyncio.CancelledError:
-        return
-    poller_task = asyncio.ensure_future(poller.run())
+async def _cancel_and_wait(*tasks: "asyncio.Future") -> None:
+    """Cancel each pending task and await it, swallowing the fallout. Ensures a
+    supervisor never orphans a child poller task (which would leak its client
+    session)."""
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    for t in tasks:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def _sleep_or_stop(delay: float, stop: asyncio.Event, sleep) -> bool:
+    """Sleep ``delay`` seconds but wake early if ``stop`` is set. Returns True if
+    ``stop`` fired during the wait. Used for the first-cycle stagger so shutdown
+    during startup is immediate."""
+    if delay <= 0:
+        return stop.is_set()
+    sleep_task = asyncio.ensure_future(sleep(delay))
     stop_task = asyncio.ensure_future(stop.wait())
     try:
-        await asyncio.wait({poller_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({sleep_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        poller.stop()
-        poller_task.cancel()
+        sleep_task.cancel()
         stop_task.cancel()
-        for t in (poller_task, stop_task):
+        for t in (sleep_task, stop_task):
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
+    return stop.is_set()
+
+
+async def _run_profile(
+    poller: Poller,
+    stagger_delay: float,
+    stop: asyncio.Event,
+    stagger_sleep=asyncio.sleep,
+    supervise_sleep=asyncio.sleep,
+    poller_sleep=asyncio.sleep,
+) -> None:
+    """Run ONE profile's poller as an independent, supervised task.
+
+    Responsibilities (Step 1.4):
+      * **Stagger** — wait ``stagger_delay`` before the first cycle only (R10
+        thundering-herd avoidance); subsequent polls are not staggered.
+      * **Supervision** — run ``poller.run()`` to completion; if it dies with an
+        *unexpected* exception (not 409, not an operational Telegram error — those
+        stay inside the loop), log it LOUDLY and restart with exponential backoff.
+        A dead poller is a deaf bot; the daemon must never be silently deaf. One
+        profile restarting never touches another's task.
+
+    The three ``*_sleep`` seams let tests compress time without real waits.
+    """
+    name = poller.profile.name
+    if await _sleep_or_stop(stagger_delay, stop, stagger_sleep):
+        return
+    poller.write_status()  # seed the status file at (staggered) startup
+
+    backoff = _RESTART_BACKOFF_INITIAL_S
+    while not stop.is_set():
+        run_task = asyncio.ensure_future(poller.run(sleep=poller_sleep))
+        stop_task = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            # This supervisor task was cancelled directly (shutdown). Never orphan
+            # the child run_task — tear it down before re-raising, or its open
+            # client session leaks.
+            poller.stop()
+            await _cancel_and_wait(run_task, stop_task)
+            raise
+
+        if stop.is_set():
+            poller.stop()
+            await _cancel_and_wait(run_task, stop_task)
+            return
+
+        # run_task finished on its own while we were NOT asked to stop: for a
+        # long-poll loop that means it crashed (it otherwise runs forever). Keep
+        # the poller runnable (do NOT call poller.stop) so it can restart.
+        await _cancel_and_wait(stop_task)
+        exc = None if run_task.cancelled() else run_task.exception()
+        if exc is not None:
+            log.error(
+                "poller[%s] DIED unexpectedly — restarting in %.1fs",
+                name,
+                backoff,
+                exc_info=exc,
+            )
+            poller.write_status()
+            if await _sleep_or_stop(backoff, stop, supervise_sleep):
+                return
+            backoff = min(backoff * 2, _RESTART_BACKOFF_MAX_S)
+        else:
+            # Clean return without a stop (e.g. max_cycles in a test): done.
+            return
 
 
 async def _run_forever(
@@ -165,7 +345,7 @@ async def _run_forever(
             pass
 
     tasks = [
-        asyncio.ensure_future(_staggered(poller, cfg.poll_stagger_s * i, stop))
+        asyncio.ensure_future(_run_profile(poller, cfg.poll_stagger_s * i, stop))
         for i, (poller, _) in enumerate(pollers)
     ]
     if not tasks:
@@ -173,7 +353,7 @@ async def _run_forever(
         await stop.wait()
         return
     await stop.wait()
-    log.info("shutdown signal received — cancelling %d poller(s)", len(tasks))
+    log.info("shutdown signal received — stopping %d poller(s)", len(tasks))
     for t in tasks:
         t.cancel()
     for t in tasks:
@@ -188,6 +368,12 @@ async def _amain(args: argparse.Namespace) -> int:
     daemon_dir = abs_home / "daemon"
     config_path = Path(args.config) if args.config else daemon_dir / "config.json"
 
+    # --print-status is a pure read of persisted status files (for the bash
+    # `abs daemon status`): no logging setup, no discovery, no network.
+    if args.print_status:
+        print(render_daemon_status(read_status_files(daemon_dir)))
+        return 0
+
     _setup_logging(daemon_dir, args.log_level)
     log.info("absd %s starting (abs_home=%s, once=%s)", __version__, abs_home, args.once)
 
@@ -201,6 +387,7 @@ async def _amain(args: argparse.Namespace) -> int:
     home = Path(os.environ.get("HOME") or Path.home())
     profiles = discover(abs_home, home=home)
     log.info("discovered %d profile(s): %s", len(profiles), [p.name for p in profiles])
+    _log_boot_state(profiles)
 
     pollers = _build_pollers(profiles, cfg, daemon_dir, base_url)
     try:

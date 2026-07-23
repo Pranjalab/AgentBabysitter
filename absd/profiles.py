@@ -187,16 +187,26 @@ class Profile:
         """True if inbound is switched off (``dmPolicy == "disabled"``, D11)."""
         return self.dm_policy() == "disabled"
 
-    def live_session_pid(self) -> int | None:
-        """The live session PID if ``session.pid`` exists and the process is
-        alive (``os.kill(pid, 0)``), else ``None`` (PLAN.md 4.1 yield check)."""
+    def session_pid_on_disk(self) -> int | None:
+        """The PID written in ``session.pid`` (a valid decimal), *regardless of
+        whether that process is still alive*. ``None`` when the file is absent or
+        malformed. Boot-time detection uses this together with
+        :meth:`live_session_pid` to tell a live session from a stale pid file
+        (PLAN.md 4.1 "session.pid exists but process dead") — the daemon must
+        NOT be fooled by a stale pid, but must also NOT delete it (that is the
+        launcher's / Step 1.5's job)."""
         try:
             raw = self.session_pid_path.read_text(encoding="utf-8").strip()
         except OSError:
             return None
-        if not raw or not raw.isdigit():
+        return int(raw) if raw.isdigit() else None
+
+    def live_session_pid(self) -> int | None:
+        """The live session PID if ``session.pid`` exists and the process is
+        alive (``os.kill(pid, 0)``), else ``None`` (PLAN.md 4.1 yield check)."""
+        pid = self.session_pid_on_disk()
+        if pid is None:
             return None
-        pid = int(raw)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -211,6 +221,13 @@ class Profile:
 
     def has_live_session(self) -> bool:
         return self.live_session_pid() is not None
+
+    def has_stale_session_pid(self) -> bool:
+        """True when ``session.pid`` names a PID that is no longer alive — a
+        crashed/exited session whose pid file the launcher never cleaned up.
+        The daemon treats this profile as idle (polls) but logs the staleness
+        and leaves the file untouched (PLAN.md 4.1)."""
+        return self.session_pid_on_disk() is not None and self.live_session_pid() is None
 
     def should_poll(self) -> bool:
         """The IDLE_POLLING precondition (PLAN.md 4.1 + D11): poll only when no
@@ -234,6 +251,29 @@ class Profile:
         if self.is_off():
             return "inbound off"
         return None
+
+    def state_label(self) -> str:
+        """The profile's current state as one of the fixed status vocabulary
+        words (PLAN.md Step 1.4 ``abs daemon status``): ``yielding-to-session``,
+        ``blocked``, ``off``, or ``polling``. Ordered like :meth:`should_poll` so
+        the label always matches whether the poller is actually polling."""
+        if self.has_live_session():
+            return "yielding-to-session"
+        if self.is_blocked():
+            return "blocked"
+        if self.is_off():
+            return "off"
+        return "polling"
+
+    @property
+    def test_base_url_path(self) -> Path:
+        """TEST-ONLY seam. A per-profile Bot API base-URL override file
+        (``.telegram-base-url`` in the profile dir) lets the suite point
+        DIFFERENT profiles at DIFFERENT FakeTelegram instances. The daemon reads
+        it only through :func:`absd.__main__._resolve_base_url`, which refuses
+        any non-localhost value so it can never silently redirect a real
+        deployment. Absent in production."""
+        return self.profile_dir / ".telegram-base-url"
 
 
 def discover(abs_home: Path, home: Path | None = None) -> list[Profile]:
