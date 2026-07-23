@@ -2555,6 +2555,54 @@ _start_menu() {
   return 0
 }
 
+# `abs start sandbox [name]` — run a Claude Code session INSIDE a sandbox container
+# (Phase 3.2). Execs `docker exec -it absd-sbx-<name> absd-session <profile> …`, so
+# the user's terminal becomes the in-container claude TUI. Writes host session.pid
+# (= this docker-exec client's pid, a HOST pid) so the always-on daemon yields while
+# the sandbox session is live and reclaims when it ends. The container SURVIVES the
+# session — `abs sandbox stop|destroy` is separate.
+_start_sandbox() {
+  local name="${1:-}"; shift || true
+  local root py
+  root="$(dirname "$SCRIPT_PATH")"
+  py="$root/.venv/bin/python"
+  if [ ! -x "$py" ] || [ ! -d "$root/absd" ]; then die "abs start sandbox needs $root/.venv (Python 3.11+)."; fi
+  command -v docker >/dev/null 2>&1 || die "abs start sandbox needs Docker."
+  if [ -z "$name" ]; then
+    local names=() n
+    while IFS= read -r n; do names+=("$n"); done < <(env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox list 2>/dev/null | awk -F'\t' 'NF>1{print $1}')
+    if [ "${#names[@]}" -eq 0 ]; then
+      die "No sandboxes yet. Create one:  abs sandbox create <name>"
+    elif [ "${#names[@]}" -eq 1 ]; then
+      name="${names[0]}"
+    else
+      step "Which sandbox?"
+      local i=1
+      for n in "${names[@]}"; do info "  $i) 🏖 $n"; i=$((i + 1)); done
+      printf '  Choice: ' >&2
+      local c; read -r c || c=""
+      { [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le "${#names[@]}" ]; } || die "Not a choice."
+      name="${names[$((c - 1))]}"
+    fi
+  fi
+  # Refuse to clobber a live session for this profile (same guard as cmd_run).
+  _guard_no_live_session
+  env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
+  printf '%s\n' "$$" > "$ABS_DIR/session.pid" 2>/dev/null || true
+  chmod 600 "$ABS_DIR/session.pid" 2>/dev/null || true
+  info "${c_dim}Entering sandbox '$name' — Claude runs inside the container (exit to leave; the sandbox stays).${c_reset}"
+  exec docker exec -it "absd-sbx-$name" absd-session "$PROFILE" "$@"
+}
+
+# `abs start …` — session-start subcommands. Currently: `abs start sandbox [name]`.
+cmd_start() {
+  local what="${1:-}"; shift || true
+  case "$what" in
+    sandbox) _start_sandbox "$@" ;;
+    *) die "Usage: abs start sandbox [name]" ;;
+  esac
+}
+
 cmd_run() {
   # Remember the passthrough args (claude flags like --model opus) so an
   # update-and-relaunch can reconstruct this exact invocation. A global because
@@ -3016,6 +3064,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} doctor              Diagnose the v2 deps + v3 daemon stack (read-only)
   ${c_bold}abs${c_reset} sandbox build|create|list|start|stop|destroy
                           Docker sandbox sessions — one dedicated host folder, isolated (v3)
+  ${c_bold}abs${c_reset} start sandbox [name]  Run a Claude session INSIDE a sandbox container (v3)
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} version             Print the installed version
@@ -3129,6 +3178,7 @@ main() {
 
   case "$cmd" in
     run)       shift || true; cmd_run "$@" ;;
+    start)     shift; cmd_start "$@" ;;
     setup)     cmd_setup ;;
     status)    cmd_status ;;
     profiles)  cmd_profiles ;;

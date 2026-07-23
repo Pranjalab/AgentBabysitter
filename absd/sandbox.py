@@ -32,14 +32,20 @@ from typing import Any
 
 from absd import flow as flow_mod
 
-#: Pinned image tag (D13-style: upgrades are explicit via --rebuild).
-IMAGE_TAG = "absd-sandbox:v1"
+#: Pinned image tag (D13-style: upgrades are explicit via --rebuild). v2 (3.2)
+#: adds bun (the Telegram plugin's MCP-server runtime) + the in-container
+#: `absd-session` launcher — an old v1 box lacks both, so a rebuild is required
+#: for sandbox SESSIONS (3.1 sandboxes on v1 still shell in fine). Migration:
+#: `abs sandbox build --rebuild` then re-create sandboxes to pick up v2.
+IMAGE_TAG = "absd-sandbox:v2"
 #: Container name = this prefix + the sandbox name.
 CONTAINER_PREFIX = "absd-sbx-"
 #: The single bind-mount target inside the container.
 WORKDIR = "/home/dev/workspace"
 #: Where copied credentials land inside the container (D8).
 CRED_DIR = "/home/dev/.claude"
+#: The in-container launcher (baked into the image) that runs claude (3.2).
+SESSION_LAUNCHER = "absd-session"
 
 _MODE = 0o600
 _DEFAULT_TIMEOUT = 30.0
@@ -198,6 +204,28 @@ class SandboxManager:
         (used by 3.2 to launch a claude session; defined + tested now)."""
         return [self._docker, "exec", "-it", self._container(name), *command]
 
+    def session_exec_argv(self, name: str, launcher_args: list[str]) -> list[str]:
+        """The engine PANE command for a sandbox session (3.2): ``docker exec -it``
+        into the box running the in-container launcher. The docker-exec CLIENT runs
+        on the HOST (in the pane) — that host process is what the engine's liveness
+        sees. ``launcher_args`` is ``[<profile>, <claude flags…>]`` handed to
+        :data:`SESSION_LAUNCHER`. No host mounts are added here — the only bind is
+        the one from ``create`` (5.6)."""
+        return [
+            self._docker, "exec", "-it", self._container(name),
+            SESSION_LAUNCHER, *launcher_args,
+        ]
+
+    def process_alive(self, name: str, pattern: str) -> bool:
+        """Best-effort in-container liveness cross-check (3.2): ``docker exec …
+        pgrep -f <pattern>``. The daemon PREFERS the engine-pane signal; this is the
+        documented fallback if the pane signal ever proves flaky."""
+        proc = self._run(
+            [self._docker, "exec", self._container(name), "pgrep", "-f", pattern],
+            check=False,
+        )
+        return proc.returncode == 0 and bool(proc.stdout.strip())
+
     # -- image ----------------------------------------------------------------
 
     def image_present(self) -> bool:
@@ -301,8 +329,18 @@ class SandboxManager:
         self._write_meta(meta)
         return info
 
+    def host_workdir(self, name: str) -> str | None:
+        """The dedicated host folder for ``name`` (the pane cwd + start target)."""
+        row = self._read_meta().get(name)
+        return str(row.get("host_workdir")) if isinstance(row, dict) else None
+
     def start(self, name: str) -> None:
         self._run([self._docker, "start", self._container(name)])
+
+    def ensure_running(self, name: str) -> None:
+        """Start the container if it isn't already (before a session handoff)."""
+        if not self.is_running(name):
+            self.start(name)
 
     def stop(self, name: str) -> None:
         self._run([self._docker, "stop", self._container(name)], check=False)

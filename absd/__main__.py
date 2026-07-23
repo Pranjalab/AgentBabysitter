@@ -198,6 +198,7 @@ def _build_pollers(
     engine: "Engine | None" = None,
     script_path: str | None = None,
     events: "EventLog | None" = None,
+    sandbox_mgr: object | None = None,
 ) -> list[tuple[Poller, TelegramClient]]:
     """One (poller, client) per profile that has a usable token.
 
@@ -236,6 +237,7 @@ def _build_pollers(
             script_path=script_path,
             session_count=_live_session_count,
             events=events,
+            sandbox_mgr=sandbox_mgr,
         )
         built.append((poller, client))
         log.info("profile %s: poller ready (tg_dir=%s)", profile.name, profile.tg_dir)
@@ -450,6 +452,19 @@ async def _amain(args: argparse.Namespace) -> int:
         log.warning("could not select session engine (%s); ABS START disabled", exc)
         engine = None
 
+    # Sandbox manager (Phase 3.2): offered as an ABS START target only when Docker
+    # is available. None → no "🏖 Sandbox…" entry.
+    sandbox_mgr = None
+    try:
+        from absd.sandbox import SandboxManager
+
+        mgr = SandboxManager(abs_home=abs_home)
+        if mgr.docker_available():
+            sandbox_mgr = mgr
+            log.info("sandbox targets enabled (docker present)")
+    except Exception as exc:
+        log.warning("sandbox manager unavailable (%s)", exc)
+
     # Structured event log (observability): one shared writer for the daemon,
     # alongside the human-readable daemon.log. Metadata only — never message text.
     events = EventLog(
@@ -458,7 +473,8 @@ async def _amain(args: argparse.Namespace) -> int:
     events.emit(EVENT_DAEMON_START, version=__version__, profiles=[p.name for p in profiles])
 
     pollers = _build_pollers(
-        profiles, cfg, daemon_dir, base_url, engine=engine, events=events
+        profiles, cfg, daemon_dir, base_url, engine=engine, events=events,
+        sandbox_mgr=sandbox_mgr,
     )
     stop_reason = "signal"
     try:

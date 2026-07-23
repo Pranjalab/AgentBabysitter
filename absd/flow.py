@@ -38,10 +38,17 @@ CB_NEWFOLDER = "as:nf"
 CB_PROJECT_PREFIX = "as:p:"
 CB_MODE_NORMAL = "as:m:n"
 CB_MODE_AWAY = "as:m:a"
+# The "🏖 Sandbox…" project entry, and the sandbox sub-picker (3.2).
+CB_SANDBOX = "as:sbx"
+CB_SANDBOX_NEW = "as:sb:new"
+CB_SANDBOX_PREFIX = "as:sb:"
 
 # Permission modes (D5). "normal" = default prompts; "away" = acceptEdits.
 MODE_NORMAL = "normal"
 MODE_AWAY = "away"
+
+# The in-container launcher (baked into the sandbox image, 3.2).
+SANDBOX_LAUNCHER = "absd-session"
 
 
 @dataclass
@@ -102,6 +109,7 @@ def list_workspace_children(root: Path | None) -> list[Path]:
 def enumerate_project_options(
     registered: list[tuple[str, str]],
     workspace_root: Path | None,
+    with_sandbox: bool = False,
 ) -> list[ProjectOption]:
     """Build the ordered project-option list for the keyboard.
 
@@ -110,7 +118,8 @@ def enumerate_project_options(
     existing directories only), then the direct children of ``workspace_root``
     not already registered, then a single "➕ New folder" sentinel (only when a
     workspace root is configured — without one there is nowhere jail-safe to
-    create a folder, D6).
+    create a folder, D6). ``with_sandbox`` (3.2) appends a "🏖 Sandbox…" entry that
+    branches into the sandbox picker.
     """
     seen: set[str] = set()
     options: list[ProjectOption] = []
@@ -134,6 +143,9 @@ def enumerate_project_options(
     if workspace_root is not None:
         options.append(ProjectOption(kind="newfolder", label="➕ New folder", path=None))
 
+    if with_sandbox:
+        options.append(ProjectOption(kind="sandbox", label="🏖 Sandbox…", path=None))
+
     return options
 
 
@@ -142,7 +154,12 @@ def build_project_keyboard(options: list[ProjectOption]) -> dict[str, Any]:
     (project labels can be long). Callback data per the module grammar."""
     rows: list[list[dict[str, str]]] = []
     for i, opt in enumerate(options):
-        data = CB_NEWFOLDER if opt.kind == "newfolder" else f"{CB_PROJECT_PREFIX}{i}"
+        if opt.kind == "newfolder":
+            data = CB_NEWFOLDER
+        elif opt.kind == "sandbox":
+            data = CB_SANDBOX
+        else:
+            data = f"{CB_PROJECT_PREFIX}{i}"
         rows.append([{"text": opt.label, "callback_data": data}])
     return {"inline_keyboard": rows}
 
@@ -208,6 +225,11 @@ def choose_project(
                 if opt.kind == "newfolder":
                     return opt
             return None
+        if data == CB_SANDBOX:
+            for opt in options:
+                if opt.kind == "sandbox":
+                    return opt
+            return None
         if data.startswith(CB_PROJECT_PREFIX):
             idx = _parse_int(data[len(CB_PROJECT_PREFIX):])
             if idx is not None and 0 <= idx < len(options):
@@ -217,6 +239,76 @@ def choose_project(
     if n is not None and 1 <= n <= len(options):
         return options[n - 1]
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Sandbox picker + launcher (3.2)
+# --------------------------------------------------------------------------- #
+
+
+def build_sandbox_keyboard(sandboxes: list[tuple[str, str]]) -> dict[str, Any]:
+    """Inline keyboard for the sandbox sub-picker: one row per existing sandbox
+    (``[(name, state), …]``) + a "➕ New sandbox" row. Callback ``as:sb:<i>`` /
+    ``as:sb:new``."""
+    rows: list[list[dict[str, str]]] = []
+    for i, (name, state) in enumerate(sandboxes):
+        rows.append([{"text": f"🏖 {name} ({state})", "callback_data": f"{CB_SANDBOX_PREFIX}{i}"}])
+    rows.append([{"text": "➕ New sandbox", "callback_data": CB_SANDBOX_NEW}])
+    return {"inline_keyboard": rows}
+
+
+def render_sandbox_menu(sandboxes: list[tuple[str, str]]) -> str:
+    lines = ["🏖 Which sandbox? Tap a button, or reply with a number:"]
+    n = 0
+    for name, state in sandboxes:
+        n += 1
+        lines.append(f"{n}. 🏖 {name} ({state})")
+    lines.append(f"{n + 1}. ➕ New sandbox")
+    return "\n".join(lines)
+
+
+NEW_SANDBOX_PROMPT = (
+    "📝 Name the new sandbox (letters, digits, dot, underscore, hyphen; max 64).\n"
+    "A dedicated folder is created for it and Claude runs inside a container."
+)
+
+
+def choose_sandbox(data: str | None, text: str, count: int) -> "int | str | None":
+    """Resolve a sandbox-picker input: a 0-based index, ``"new"``, or ``None``."""
+    if data:
+        if data == CB_SANDBOX_NEW:
+            return "new"
+        if data.startswith(CB_SANDBOX_PREFIX):
+            idx = _parse_int(data[len(CB_SANDBOX_PREFIX):])
+            if idx is not None and 0 <= idx < count:
+                return idx
+        return None
+    n = _parse_int(text)
+    if n is None:
+        return None
+    if 1 <= n <= count:
+        return n - 1
+    if n == count + 1:
+        return "new"
+    return None
+
+
+def build_sandbox_launcher_argv(
+    profile: str, away: bool, resume: bool = False, initial_prompt: str | None = None
+) -> list[str]:
+    """The in-container launcher args (after ``absd-session``): the profile, then
+    the claude flags. Away → ``--permission-mode acceptEdits`` (inside the box,
+    where there is no abs.sh ABS_AWAY mechanism); resume → ``--continue``; a pool
+    initial prompt is a bare claude positional. Order: flags before the positional.
+    ``session_exec_argv`` prepends ``docker exec -it <container> absd-session``."""
+    argv = [profile]
+    if away:
+        argv += ["--permission-mode", "acceptEdits"]
+    if resume:
+        argv.append("--continue")
+    if initial_prompt:
+        argv.append(initial_prompt)
+    return argv
 
 
 def choose_mode(data: str | None, text: str) -> str | None:

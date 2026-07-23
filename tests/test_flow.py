@@ -272,3 +272,49 @@ def test_choose_recent_callback_and_text() -> None:
     assert flow.choose_recent(None, "4", 3) == "new"
     assert flow.choose_recent(None, "5", 3) is None
     assert flow.choose_recent(None, "nope", 3) is None
+
+
+# ---- sandbox (3.2) -----------------------------------------------------------
+
+
+def test_build_sandbox_launcher_argv() -> None:
+    assert flow.build_sandbox_launcher_argv("default", away=False) == ["default"]
+    away = flow.build_sandbox_launcher_argv("work", away=True)
+    assert away == ["work", "--permission-mode", "acceptEdits"]
+    full = flow.build_sandbox_launcher_argv("default", away=True, resume=True, initial_prompt="hi\nthere")
+    assert full == ["default", "--permission-mode", "acceptEdits", "--continue", "hi\nthere"]
+
+
+def test_enumerate_with_sandbox_adds_entry(tmp_path: Path) -> None:
+    reg = tmp_path / "reg"; reg.mkdir()
+    opts = flow.enumerate_project_options([(str(reg), "reg")], None, with_sandbox=True)
+    kinds = [o.kind for o in opts]
+    assert kinds[-1] == "sandbox"
+    # without the flag, no sandbox entry
+    opts2 = flow.enumerate_project_options([(str(reg), "reg")], None)
+    assert "sandbox" not in [o.kind for o in opts2]
+
+
+def test_choose_project_sandbox_entry() -> None:
+    opts = flow.enumerate_project_options([], None, with_sandbox=True)
+    got = flow.choose_project(flow.CB_SANDBOX, "", opts)
+    assert got is not None and got.kind == "sandbox"
+
+
+def test_choose_sandbox() -> None:
+    assert flow.choose_sandbox("as:sb:0", "", 2) == 0
+    assert flow.choose_sandbox("as:sb:1", "", 2) == 1
+    assert flow.choose_sandbox("as:sb:9", "", 2) is None
+    assert flow.choose_sandbox(flow.CB_SANDBOX_NEW, "", 2) == "new"
+    assert flow.choose_sandbox(None, "1", 2) == 0
+    assert flow.choose_sandbox(None, "3", 2) == "new"  # count+1 = new
+    assert flow.choose_sandbox(None, "9", 2) is None
+
+
+def test_sandbox_keyboard_and_menu() -> None:
+    kb = flow.build_sandbox_keyboard([("web", "running"), ("api", "stopped")])
+    rows = kb["inline_keyboard"]
+    assert rows[0][0]["callback_data"] == "as:sb:0"
+    assert rows[-1][0]["callback_data"] == flow.CB_SANDBOX_NEW
+    menu = flow.render_sandbox_menu([("web", "running")])
+    assert "1. 🏖 web (running)" in menu and "2. ➕ New sandbox" in menu

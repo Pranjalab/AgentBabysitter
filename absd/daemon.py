@@ -452,6 +452,10 @@ class Flow:
     pending: "HandoffRequest | None" = None
     #: The unforwarded pooled messages offered on the "pool" step.
     pool_msgs: list[Any] = field(default_factory=list)
+    #: The sandboxes offered on the "sandbox" step (list of (name, state)).
+    sandboxes: list[Any] = field(default_factory=list)
+    #: Chosen sandbox name (3.2) — the session runs INSIDE this container.
+    sandbox: str | None = None
 
 
 @dataclass
@@ -471,6 +475,9 @@ class HandoffRequest:
     #: update_ids of the forwarded pooled messages — marked forwarded_at ONLY after
     #: create_session succeeds (D14: skip/failed launch keeps them unforwarded).
     forward_ids: list[int] = field(default_factory=list)
+    #: Sandbox name (3.2) — when set, the session runs INSIDE this container (the
+    #: engine pane is a ``docker exec``); liveness is pane-only across the boundary.
+    sandbox: str | None = None
 
 
 # ---- offset persistence -------------------------------------------------------
@@ -508,6 +515,7 @@ class Poller:
         clock: Callable[[], float] = time.monotonic,
         events: EventLog | None = None,
         creds_path: Path | None = None,
+        sandbox_mgr: Any | None = None,
     ) -> None:
         self.profile = profile
         self.client = client
@@ -573,6 +581,13 @@ class Poller:
         #: One-shot boot recovery guard (Step 1.8) — recovery + reboot notice run
         #: exactly once per process boot, never on an in-process supervisor restart.
         self._booted = False
+        #: Sandbox manager (3.2) for sandbox-target sessions; None → no sandbox
+        #: targets offered. Injectable (a fake in tests).
+        self.sandbox_mgr = sandbox_mgr
+        #: The sandbox name of the CURRENT live session (3.2), or None for a normal
+        #: host session. When set, liveness is pane-only (the container-namespace pid
+        #: is invisible to the host) and the FIX-C host-pid clobber check is skipped.
+        self._session_sandbox: str | None = None
         #: Offset value committed by the single HANDOFF commit (test bookkeeping).
         self.handoff_committed_offset: int | None = None
         #: Per-profile status file (Step 1.4) — rewritten atomically each cycle so
@@ -981,7 +996,8 @@ class Poller:
         """Send the project keyboard and enter the "project" step (or explain that
         there is nothing to start in). Shared by _begin_flow and "🆕 New session"."""
         options = flow_mod.enumerate_project_options(
-            self._registered(), self._workspace_root()
+            self._registered(), self._workspace_root(),
+            with_sandbox=(self.sandbox_mgr is not None),
         )
         if not options:
             self.flow = None
@@ -1011,6 +1027,36 @@ class Poller:
             reply_markup=flow_mod.build_mode_keyboard(),
         )
 
+    async def _send_sandbox_step(self, flow: Flow) -> None:
+        """Sandbox sub-picker (3.2): existing sandboxes (name + state) + New."""
+        sandboxes: list[Any] = []
+        if self.sandbox_mgr is not None:
+            try:
+                sandboxes = [(s.name, s.state) for s in self.sandbox_mgr.list()]
+            except Exception:
+                sandboxes = []
+        flow.sandboxes = sandboxes
+        flow.step = "sandbox"
+        await self.client.send_message(
+            flow.chat_id,
+            flow_mod.render_sandbox_menu(sandboxes),
+            reply_markup=flow_mod.build_sandbox_keyboard(sandboxes),
+        )
+
+    async def _choose_sandbox_target(self, flow: Flow, name: str) -> None:
+        """A sandbox was picked/created — the session will run inside it; the pane
+        cwd is the sandbox's dedicated host folder. Then the mode step."""
+        flow.sandbox = name
+        wd = None
+        if self.sandbox_mgr is not None:
+            try:
+                wd = self.sandbox_mgr.host_workdir(name)
+            except Exception:
+                wd = None
+        flow.chosen_path = wd or ""
+        flow.label = f"🏖 {name}"
+        await self._send_mode_step(flow)
+
     def _credentials_present(self) -> bool:
         """Login precheck (Step 1.6): the credentials file exists and is non-empty.
         PRESENCE + SIZE ONLY via ``stat`` — the file is NEVER opened for read, so
@@ -1029,7 +1075,7 @@ class Poller:
         the user's replies would go to the session, not the daemon)."""
         decision = HandoffRequest(
             chat_id=flow.chat_id, project_path=project_path, label=label,
-            away=away, resume=resume,
+            away=away, resume=resume, sandbox=flow.sandbox,
         )
         unforwarded = self.pool.unforwarded()
         if unforwarded:
@@ -1110,9 +1156,58 @@ class Poller:
                 flow.step = "folder"
                 await self.client.send_message(flow.chat_id, flow_mod.NEW_FOLDER_PROMPT)
                 return
+            if opt.kind == "sandbox":
+                await self._send_sandbox_step(flow)  # 3.2 — the sandbox sub-picker
+                return
             flow.chosen_path = opt.path
             flow.label = opt.label
             await self._send_mode_step(flow)
+            return
+
+        if flow.step == "sandbox":
+            choice = flow_mod.choose_sandbox(data, text, len(flow.sandboxes))
+            await self._answer_if_callback(ex)
+            if choice is None:
+                await self.client.send_message(
+                    flow.chat_id, "Pick a sandbox by tapping a button or its number."
+                )
+                return
+            if choice == "new":
+                flow.step = "sandbox_name"
+                await self.client.send_message(flow.chat_id, flow_mod.NEW_SANDBOX_PROMPT)
+                return
+            name = flow.sandboxes[choice][0]
+            await self._choose_sandbox_target(flow, name)
+            return
+
+        if flow.step == "sandbox_name":
+            if ex.callback_query_id is not None:
+                await self._answer_if_callback(ex)
+                await self.client.send_message(flow.chat_id, flow_mod.NEW_SANDBOX_PROMPT)
+                return
+            valid, verr = flow_mod.validate_folder_name(text)
+            if not valid:
+                await self.client.send_message(
+                    flow.chat_id, f"❌ {verr}\n\n{flow_mod.NEW_SANDBOX_PROMPT}"
+                )
+                return
+            name = text.strip()
+            try:
+                if not self.sandbox_mgr.image_present():
+                    self.flow = None
+                    await self.client.send_message(
+                        flow.chat_id,
+                        "⚠️ The sandbox image isn't built. From the terminal: abs sandbox build",
+                    )
+                    return
+                self.sandbox_mgr.create(name)
+            except Exception as exc:
+                self.flow = None
+                await self.client.send_message(
+                    flow.chat_id, f"⚠️ Couldn't create sandbox {name!r}: {exc}"
+                )
+                return
+            await self._choose_sandbox_target(flow, name)
             return
 
         if flow.step == "folder":
@@ -1216,12 +1311,14 @@ class Poller:
         chat_id: int | None,
         pane_id: str | None = None,
         launcher_pid: int | None = None,
+        sandbox: str | None = None,
     ) -> None:
         """Write ``daemon-handoff.json`` atomically (0600). Records timestamp,
         project, mode (PLAN.md 4.1), the chat id (so RECLAIM knows where to send the
-        'session ended' note), and — post-launch — the launched ``pane_id`` +
-        ``launcher_pid`` so liveness is judged at the recorded pane, not any pane
-        (Step 2.2c)."""
+        'session ended' note), the launched ``pane_id`` + ``launcher_pid`` for
+        precise liveness (Step 2.2c), and — for a sandbox target (3.2) — the
+        ``sandbox`` name so recovery uses PANE-ONLY liveness for it (the
+        container-namespace pid is invisible to the host daemon)."""
         record = {
             "timestamp": utc_now_iso(),
             "project": project,
@@ -1229,6 +1326,7 @@ class Poller:
             "chat_id": chat_id,
             "pane_id": pane_id,
             "launcher_pid": launcher_pid,
+            "sandbox": sandbox,
         }
         try:
             self.profile.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -1315,8 +1413,14 @@ class Poller:
             self.handoff_committed_offset = self.offset
 
         mode = "away" if req.away else "normal"
+        # 3.2: a sandbox target runs the session inside the container — track it so
+        # liveness is pane-only across the boundary (set BEFORE launch so watch/
+        # recovery see it immediately).
+        self._session_sandbox = req.sandbox
         # (3) handoff marker (pre-launch, for crash-safety — pane recorded below).
-        self._write_handoff_marker(req.project_path, mode, req.chat_id)
+        self._write_handoff_marker(
+            req.project_path, mode, req.chat_id, sandbox=req.sandbox
+        )
         self._emit(
             EVENT_HANDOFF,
             project=req.project_path,
@@ -1341,7 +1445,7 @@ class Poller:
         self._foreign_warned = False
         self._write_handoff_marker(
             req.project_path, mode, req.chat_id,
-            pane_id=handle.pane_id, launcher_pid=handle.pid,
+            pane_id=handle.pane_id, launcher_pid=handle.pid, sandbox=req.sandbox,
         )
         self._emit(EVENT_SESSION_START, pane_id=handle.pane_id, pid=handle.pid)
 
@@ -1389,10 +1493,27 @@ class Poller:
     def _create_session(self, req: HandoffRequest) -> "SessionHandle":
         """Build the launcher argv/env and create the engine session (4.2),
         returning its :class:`SessionHandle` (the launched pane, Step 2.2c).
-        ``req.resume`` appends ``--continue`` so claude resumes the prior
-        conversation in that cwd (Step 2.2 resume-first)."""
+
+        For a SANDBOX target (3.2) the pane command is ``docker exec -it
+        absd-sbx-<name> absd-session <profile> [flags]`` — claude runs INSIDE the
+        box (the plugin polls from there), and the docker-exec CLIENT is the host
+        process the engine watches. Otherwise the pane runs the host abs.sh launcher.
+        """
         if self.engine is None:
             raise EngineError("no session engine configured")
+        if req.sandbox is not None:
+            if self.sandbox_mgr is None:
+                raise EngineError("no sandbox manager configured")
+            self.sandbox_mgr.ensure_running(req.sandbox)  # container must be up
+            launcher = flow_mod.build_sandbox_launcher_argv(
+                self.profile.name, req.away,
+                resume=req.resume, initial_prompt=req.initial_prompt,
+            )
+            argv = self.sandbox_mgr.session_exec_argv(req.sandbox, launcher)
+            # cwd is the sandbox's dedicated host folder (falls back to the marker
+            # project path); env is unused inside the box (absd-session sets its own).
+            cwd = Path(req.project_path) if req.project_path else Path.home()
+            return self.engine.create_session(self.profile.name, cwd, argv, {})
         argv = flow_mod.build_launcher_argv(
             self._script_path(), self.profile.name, req.away,
             resume=req.resume, initial_prompt=req.initial_prompt,
@@ -1549,7 +1670,14 @@ class Poller:
         The daemon must yield to it (like a boot-detected terminal session) and must
         NOT reclaim/kill: our own recorded pane may still be running the original
         session, and the foreign pid is someone else's live process. Compares the
-        on-disk ``session.pid`` against the pid we recorded at launch."""
+        on-disk ``session.pid`` against the pid we recorded at launch.
+
+        3.2: for a SANDBOX session there is no host ``session.pid`` to clobber (the
+        launcher runs in the container namespace), and a terminal ``abs`` cannot take
+        over a container session's bot the same way — so this is always False, and
+        liveness falls to the pane signal only."""
+        if self._session_sandbox is not None:
+            return False
         if self._launched_pid is None:
             return False
         disk = self.profile.session_pid_on_disk()
@@ -1562,10 +1690,16 @@ class Poller:
         dead only when neither our RECORDED launcher pid is alive NOR the engine
         reports our RECORDED pane alive.
 
-        Crucially this uses the pid we *launched* (``_launched_pid``), not the shared
+        3.2: a SANDBOX session's pid lives in the CONTAINER namespace — the host
+        daemon cannot ``kill -0`` it — so its liveness is the ENGINE PANE ONLY (the
+        host-side ``docker exec`` client: when claude exits inside the box, that
+        client exits and the pane command ends). Host session.pid is meaningless here.
+
+        Otherwise this uses the pid we *launched* (``_launched_pid``), not the shared
         ``session.pid`` file — a terminal launch can clobber that file, and trusting
-        it made the daemon reclaim (kill) a live session. A foreign takeover is never
-        "dead" (that is handled in :meth:`watch_once`, which yields instead)."""
+        it made the daemon reclaim (kill) a live session."""
+        if self._session_sandbox is not None:
+            return not self._engine_pane_alive()
         if self._foreign_takeover():
             return False
         # PID signal: the recorded launcher pid; fall back to the disk pid only if we
@@ -1606,7 +1740,13 @@ class Poller:
         # Capture the launcher pid (for the clobber cross-check) the first time our
         # recorded pane is alive, from the session.pid abs.sh wrote — if the engine
         # couldn't report it at create time (herdr, before the command foregrounds).
-        if self._launched_pid is None and self._engine_pane_alive():
+        # Skipped for a sandbox session: there is no host session.pid to capture (the
+        # pid lives in the container namespace), and liveness is pane-only anyway.
+        if (
+            self._session_sandbox is None
+            and self._launched_pid is None
+            and self._engine_pane_alive()
+        ):
             disk = self.profile.session_pid_on_disk()
             if disk is not None:
                 self._launched_pid = disk
@@ -1703,6 +1843,7 @@ class Poller:
         self._foreign_warned = False
         self._session_started_at = 0.0
         self._session_end_reason = END_EXITED
+        self._session_sandbox = None  # 3.2: sandbox session ended (container survives)
         self._set_state(STATE_IDLE)
 
     # ---- boot recovery + reboot notification (Step 1.8) ------------------
@@ -1756,6 +1897,7 @@ class Poller:
             chat_id = marker.get("chat_id")
             project = str(marker.get("project") or "")
             label = Path(project).name or self.profile.name
+            sandbox = marker.get("sandbox") if isinstance(marker.get("sandbox"), str) else None
 
             pane_alive = False
             if pane_id and self.engine is not None:
@@ -1763,12 +1905,18 @@ class Poller:
                     pane_alive = self.engine.is_alive(self.profile.name, pane_id=pane_id)
                 except EngineError:
                     pane_alive = False
-            pid_alive = _pid_is_alive(launcher_pid) if isinstance(launcher_pid, int) else False
+            # 3.2: a sandbox session's pid is container-namespace — NOT a host-alive
+            # signal. Recover its liveness from the pane only.
+            pid_alive = (
+                False if sandbox is not None
+                else (_pid_is_alive(launcher_pid) if isinstance(launcher_pid, int) else False)
+            )
 
             if pane_alive or pid_alive:
                 # Survived the restart → resume SESSION_LIVE, full precision.
                 self._session_pane_id = pane_id if isinstance(pane_id, str) else None
                 self._launched_pid = launcher_pid if isinstance(launcher_pid, int) else None
+                self._session_sandbox = sandbox
                 self._handoff_chat_id = chat_id
                 self._session_started_at = self._clock() - self._marker_age_s(marker)
                 self._session_seen_alive = True

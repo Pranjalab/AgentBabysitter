@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# absd-session — the in-container Claude Code launcher (Phase 3.2).
+#
+# The daemon/terminal launches a sandbox session by having the engine pane run
+#   docker exec -it absd-sbx-<name> absd-session <profile> [claude args…]
+# so THIS runs INSIDE the container, in the bind-mounted workdir, with the profile's
+# copied Telegram state (token + allowlist). The plugin then polls from inside the
+# box and owns the bot while the session is live.
+#
+# Minimal by design (Phase 3.2 scope): it wires the channel + credentials + workdir
+# and execs claude. It does NOT reproduce abs.sh's host-side hooks (smart-silent,
+# guard, statusline) or the injected ABS system prompt — those live on the host and
+# are a later stage. Anything after <profile> is forwarded straight to claude
+# (e.g. --permission-mode acceptEdits for Away, --continue for Resume, an initial
+# prompt positional for pool forwarding).
+
+set -u
+
+PLUGIN_ID="telegram@claude-plugins-official"
+
+profile="${1:-default}"
+shift || true
+
+# The copied credentials live at /home/dev/.claude (D8); the profile's Telegram
+# state dir mirrors the host layout (default → …/telegram, named → …/telegram-<p>).
+if [ "$profile" = "default" ]; then
+  export TELEGRAM_STATE_DIR="/home/dev/.claude/channels/telegram"
+else
+  export TELEGRAM_STATE_DIR="/home/dev/.claude/channels/telegram-$profile"
+fi
+
+cd /home/dev/workspace 2>/dev/null || true
+
+exec claude --channels "plugin:${PLUGIN_ID}" "$@"

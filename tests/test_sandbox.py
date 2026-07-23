@@ -103,6 +103,16 @@ def test_exec_argv_shape(tmp_path: Path) -> None:
     assert argv[-2:] == ["claude", "--help"]
 
 
+def test_session_exec_argv_shape(tmp_path: Path) -> None:
+    # 3.2: docker exec -it into the box running the in-container launcher; NO host
+    # mounts added here (the only bind is from create).
+    argv = _mgr(tmp_path).session_exec_argv("box", ["default", "--continue", "the prompt"])
+    assert argv[:4] == [argv[0], "exec", "-it", f"{CONTAINER_PREFIX}box"]
+    assert argv[4] == "absd-session"
+    assert argv[5:] == ["default", "--continue", "the prompt"]
+    assert "-v" not in argv and "--mount" not in argv  # no new mounts
+
+
 def test_build_argv_shape(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     argv = mgr.build_argv()

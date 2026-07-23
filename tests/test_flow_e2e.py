@@ -94,6 +94,7 @@ def make_poller(
     script_path: str = "/opt/abs.sh",
     events=None,
     creds_path=None,
+    sandbox_mgr=None,
     **cfg_kw,
 ) -> Poller:
     prof = discover(abs_home, home=abs_home)[0]
@@ -123,6 +124,7 @@ def make_poller(
         script_path=script_path,
         events=events,
         creds_path=creds_path,
+        sandbox_mgr=sandbox_mgr,
         **kwargs,
     )
 
