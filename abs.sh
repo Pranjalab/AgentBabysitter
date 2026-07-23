@@ -2507,7 +2507,7 @@ cmd_run() {
 # survive logout). start/stop/status/logs are thin `systemctl --user` wrappers;
 # run is a foreground debug launch (no systemd).
 cmd_daemon() {
-  local sub="${1:-status}"; shift || true
+  local sub="${1:-}"; shift || true
   local root py unit_src unit_dst cfg_home
   root="$(dirname "$SCRIPT_PATH")"
   py="$root/.venv/bin/python"
@@ -2543,11 +2543,11 @@ cmd_daemon() {
       exit 0
       ;;
     start)
-      systemctl --user start absd && ok "absd started." || die "Could not start absd."
+      if systemctl --user start absd; then ok "absd started."; else die "Could not start absd."; fi
       exit 0
       ;;
     stop)
-      systemctl --user stop absd && ok "absd stopped." || die "Could not stop absd."
+      if systemctl --user stop absd; then ok "absd stopped."; else die "Could not stop absd."; fi
       exit 0
       ;;
     status)
