@@ -247,6 +247,48 @@ You can also just say it in chat — "mute the reports", "what's my usage" — a
 runs the same commands. For voice setup, profiles, servers, and troubleshooting,
 see the **[full guide](docs/GUIDE.md)**.
 
+## 🛰 Always-on daemon (v3)
+
+Without the daemon, `abs` is a passenger: when Claude Code isn't running, the bot
+is deaf and nothing can be started remotely. **`absd`** is a small background
+daemon (a systemd user service) that polls every one of your idle bots, so you can
+**start a session from your phone** and pick it up at the desk later.
+
+- **`ABS START`** from Telegram → pick a project (or ▶ **Resume** a recent one) →
+  pick Normal / Away → the daemon launches Claude Code in a persistent, attachable
+  session (herdr if installed, else tmux). It confirms with `abs attach <profile>`.
+- **Messages while nothing runs are pooled**, never dropped; when you start a
+  session they're offered to forward as its opening prompt.
+- **The terminal keeps working unchanged** — plain `abs` still launches at the
+  desk, and now shows the same resume-first picker.
+
+Setup (a checkout install):
+
+```sh
+abs daemon install                    # render + install the systemd user unit
+systemctl --user enable --now absd    # start it, and on login
+sudo loginctl enable-linger $USER     # survive logout (once)
+abs project add ~/Projects/myrepo     # projects ABS START can offer
+abs config workspace-root ~/Projects  # root for remote "New folder" starts
+abs doctor                            # diagnose the whole stack
+```
+
+| Command | What it does |
+| --- | --- |
+| 🛰 `abs daemon install\|start\|stop\|status\|logs` | Manage the always-on daemon |
+| 🩺 `abs doctor` | Diagnose the v2 deps + v3 daemon stack (read-only) |
+| 📂 `abs project add\|list\|rm <dir>` | Projects the ABS START flow offers |
+| 🌱 `abs config workspace-root <dir>` | Root for remote "New folder" starts |
+| ⚙️ `abs config start-menu on\|off` | Resume-first picker on interactive launch |
+| 🖥 `abs sessions` / `abs attach [profile]` | List / attach engine sessions |
+| ▶️ `abs --resume` / `abs --new` | Skip the terminal start menu (resume top / fresh) |
+
+From **Telegram** (daemon-mode grammar, whole-message):
+`ABS START` · `ABS STATUS` · `ABS POOL` · `ABS CLEAR POOL` · `ABS OFF` · `ABS BLOCK`
+(also the `/abs_start`, `/abs_status`, `/abs_pool`, `/abs_exit` "/" menu aliases).
+`ABS OFF`/`ABS BLOCK` stop the daemon for that bot; recover only at the terminal
+(`abs on` / `abs setup`).
+
 ## 🏗 Architecture
 
 Telegram polls *outbound*, so nothing listens on a port and no webhook is needed —

@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v3: the always-on daemon
+
+The big v3 story: `abs` was a passenger — when Claude Code wasn't running, the bot
+was deaf. v3 adds **`absd`**, a background systemd user daemon that polls every
+idle bot so you can start, resume, and manage sessions entirely from Telegram, and
+picks them up at the desk. Built in Python (asyncio, stdlib + aiohttp); the CLI
+stays bash. All behind a small fixed grammar with the security model unchanged.
+
+### Added
+- **Always-on daemon (`absd`)** — one systemd user service manages every profile;
+  polls idle bots, enforces the profile allowlist itself, and answers a small
+  fixed command grammar. `abs daemon install|start|stop|status|logs`.
+- **Remote session start — `ABS START`.** From Telegram: pick a project (registered
+  projects + workspace-root children + "➕ New folder", jailed under one configured
+  root) → pick Normal / Away → the daemon launches Claude Code in a persistent,
+  attachable session and confirms with `abs attach <profile>`.
+- **Session engines** — herdr (preferred) or tmux (reference), interchangeable
+  behind one adapter; `abs sessions` / `abs attach [profile]` (searches both).
+  Precise per-pane liveness so an attach can never be mistaken for the session.
+- **Message pool** — messages that arrive while nothing runs are kept per profile
+  (never dropped), acknowledged, and offered to **forward** as a starting
+  session's opening prompt (`send all` / `send 1,3` / `skip`). `ABS POOL`,
+  `ABS CLEAR POOL`.
+- **Resume-first start**, both doors: Telegram `ABS START` offers up to 3 one-tap
+  "▶ Resume" buttons; interactive `abs` at the terminal shows the same picker
+  (`--resume` / `--new` to skip, `abs config start-menu off`).
+- **Telegram "/" menu** — `/abs_start /abs_status /abs_pool` while idle, `/abs_exit`
+  + `/usage` in-session (auto-switched by the daemon).
+- **Kill ladder while idle** — `ABS OFF` / `ABS BLOCK` stop the daemon for that bot
+  (recover only from the terminal), `ABS CLEAR POOL`.
+- **Login detection** — a stat-only credentials presence check before launch
+  (contents never read); a session that dies immediately reports a likely login
+  issue.
+- **Crash/restart recovery** — on boot the daemon re-derives full state from disk:
+  a surviving daemon session resumes with precise pane/pid tracking, a dead one is
+  reclaimed with a reboot notice; sessions that didn't survive a restart notify you
+  and the pool is kept.
+- **Observability** — a structured, metadata-only event log
+  (`~/.abs/daemon/events.jsonl`, never message text) and a consolidated dashboard
+  in `abs status` / `abs daemon status`; `abs doctor` diagnoses the whole stack.
+- **Real log rotation** for `daemon.log` and `events.jsonl` (size-based, N
+  generations); the installer refreshes the unit and can install a pinned herdr.
+
 ## [2.6.0] — 2026-07-22
 
 ### Added

@@ -293,6 +293,13 @@ or Anthropic traffic in automated tests, ever.**
 
 ## 7. Phase 1 — Daemon core (the product)
 
+> **STATUS: Phase 1 COMPLETE.** All steps DONE (0.1–0.3 groundwork, 1.1–1.8),
+> plus pulled-forward Step 2.2 (resume-first start + Telegram "/" menu) and
+> observability (event log + dashboard). Per-step critiques in
+> `docs/v3/critique/`; the Phase-1 retrospective + carried-to-Phase-2 gaps are in
+> `docs/v3/critique/1.8.md`. `ABS_VERSION` intentionally not yet bumped (release is
+> Pranjal's call).
+
 ### Step 1.1 — Engine adapter with TmuxEngine
 Implement `Engine` protocol + TmuxEngine + tuned conf + `abs attach <profile>` /
 `abs sessions` bash commands (they shell into the adapter via `python -m absd.engine ...`).
@@ -410,6 +417,15 @@ updates, CHANGELOG, `install.sh` installs daemon unit + optional pinned herdr.
   phone → ABS START works. Fresh-machine dry-run of `install.sh` in a container.
 - **Critique gate:** Phase-1 retrospective; update this PLAN.md with any drift before
   Phase 2.
+
+> **SHIPPED** (see `docs/v3/critique/1.8.md`): full boot-time state re-derivation
+> from disk (recovery matrix — surviving daemon session resumes with FIX B/C
+> precision, dead one reclaims; lived_s from the marker timestamp); real N-generation
+> size rotation for daemon.log + events.jsonl (reader spans rotated files); per-boot
+> reboot notice; new `abs doctor`; installer refreshes the unit + optional pinned
+> herdr; README/GUIDE/CHANGELOG. 50-iteration seeded chaos-recovery test. Carried to
+> Phase 2: crash-vs-clean session_end (2.3), blocked-session pings (2.1), pool/flow
+> keyboard polish (2.2), true SIGKILL fuzz (2.3).
 
 ## 8. Phase 2 — Status events & UX polish
 

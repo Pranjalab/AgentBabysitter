@@ -142,6 +142,62 @@ the laptop. Two things change when nobody's at that terminal:
 - **Voice output wants a GPU.** On a CPU-only VPS, `speak.py --cpu` works but is
   slow. Transcription is CPU-only by design and is fine anywhere.
 
+## The always-on daemon (v3)
+
+The `tmux` trick above keeps a session alive, but you still have to *start* it at
+the terminal. The v3 daemon removes that last tie: **`absd`** runs in the
+background and polls your idle bots, so you can start, resume, and manage sessions
+entirely from your phone.
+
+### Setup
+
+From a repo checkout (the daemon is Python and lives in the tree with its `.venv`):
+
+```sh
+abs daemon install                    # render + install the systemd user unit
+systemctl --user enable --now absd    # start now, and on every login
+sudo loginctl enable-linger $USER     # keep it running after you log out (once)
+abs daemon status                     # unit health + a per-profile dashboard
+abs doctor                            # diagnose deps, engine, config, perms
+```
+
+`install.sh` on a checkout offers all of this (and an optional pinned herdr) for
+you. The daemon needs nothing open to the network — like the rest of ABS it only
+makes outbound Telegram calls.
+
+### Starting a session from Telegram
+
+1. Register the projects you want to be able to start in (terminal-only — a
+   compromised phone can never name a path):
+
+   ```sh
+   abs project add ~/Projects/myrepo
+   abs config workspace-root ~/Projects   # root for remote "New folder" starts
+   ```
+
+2. From the phone, with no session running, send **`ABS START`** → pick a project
+   (or **▶ Resume** a recent one) → **Normal** or **Away**. The daemon launches
+   Claude Code in a persistent session and replies with `abs attach <profile>`.
+3. Walk to the desk and `abs attach <profile>` to take over; detach (tmux
+   `Ctrl-b d` / herdr `Ctrl-b q`) and it keeps running. `ABS EXIT` (or `/abs_exit`)
+   ends it, and the bot goes back to listening.
+
+Messages you send while nothing is running are **pooled** (never lost); when you
+start a session they're offered to forward as its first prompt.
+
+### The engine (herdr vs tmux)
+
+Sessions run inside a session engine so they survive detach/reattach. **herdr** is
+preferred (nicer attach UI); **tmux** is the always-available fallback — everything
+works on tmux alone. Which one is used is `~/.abs/daemon/config.json`'s `engine`
+(`auto` → herdr if present, else tmux). `abs sessions` lists across both.
+
+### Kill ladder, still terminal-recoverable
+
+`ABS OFF` and `ABS BLOCK` now stop the *daemon* for that bot too — "off means off".
+Both are recoverable only at the terminal (`abs on` / `abs setup`), so a stolen
+phone can silence a bot but never quietly re-enable it.
+
 ## Where things live
 
 Nothing in the repo holds state or secrets — it's all safe to fork. State lives
