@@ -48,6 +48,8 @@ from urllib.parse import urlparse
 from absd import __version__
 from absd import config as config_mod
 from absd.daemon import Poller, read_status_files, render_daemon_status
+from absd.engines import get_engine
+from absd.engines.base import Engine
 from absd.profiles import Profile, discover
 from absd.telegram import TelegramClient
 
@@ -167,19 +169,46 @@ def _setup_logging(daemon_dir: Path, level: str) -> None:
         log.warning("could not open daemon.log for writing")
 
 
+def _default_script_path() -> str:
+    """Absolute path to abs.sh (the launcher the engine runs at HANDOFF, 4.2).
+
+    Beside the ``absd`` package (repo root) in a dev checkout / the daemon's own
+    tree. Overridable by ``ABS_SCRIPT_PATH`` (tests point it at a stub launcher)."""
+    override = os.environ.get("ABS_SCRIPT_PATH")
+    if override:
+        return override
+    return str(Path(__file__).resolve().parents[1] / "abs.sh")
+
+
 def _build_pollers(
     profiles: list[Profile],
     cfg: config_mod.DaemonConfig,
     daemon_dir: Path,
     base_url: str,
+    engine: "Engine | None" = None,
+    script_path: str | None = None,
 ) -> list[tuple[Poller, TelegramClient]]:
     """One (poller, client) per profile that has a usable token.
 
     Each poller is fully independent (own client/token/base_url, own pool, own
     offset + status files, own backoff, own ``poller[<name>]`` log prefix) — the
     isolation G5 requires. ``base_url`` is the global default; a per-profile
-    localhost override may replace it via :func:`_resolve_base_url`."""
+    localhost override may replace it via :func:`_resolve_base_url`.
+
+    ``engine`` is shared across pollers so ``list_sessions`` sees every profile's
+    session (the max_sessions cap counts across all profiles, G5). ``session_count``
+    on each poller therefore reports the daemon-wide live-session total."""
     built: list[tuple[Poller, TelegramClient]] = []
+    script_path = script_path or _default_script_path()
+
+    def _live_session_count() -> int:
+        if engine is None:
+            return 0
+        try:
+            return sum(1 for s in engine.list_sessions() if s.alive)
+        except Exception:  # engine hiccup must never block a start decision
+            return 0
+
     for profile in profiles:
         token = profile.load_token()
         if not token:
@@ -187,7 +216,15 @@ def _build_pollers(
             continue
         profile_base_url = _resolve_base_url(profile, base_url)
         client = TelegramClient(token, base_url=profile_base_url)
-        poller = Poller(profile, client, cfg, state_dir=daemon_dir)
+        poller = Poller(
+            profile,
+            client,
+            cfg,
+            state_dir=daemon_dir,
+            engine=engine,
+            script_path=script_path,
+            session_count=_live_session_count,
+        )
         built.append((poller, client))
         log.info("profile %s: poller ready (tg_dir=%s)", profile.name, profile.tg_dir)
     return built
@@ -389,7 +426,17 @@ async def _amain(args: argparse.Namespace) -> int:
     log.info("discovered %d profile(s): %s", len(profiles), [p.name for p in profiles])
     _log_boot_state(profiles)
 
-    pollers = _build_pollers(profiles, cfg, daemon_dir, base_url)
+    # One shared session engine for the whole daemon (PLAN.md 4.2): the ABS START
+    # HANDOFF launches through it, and list_sessions counts sessions across all
+    # profiles for the max_sessions cap (G5).
+    try:
+        engine = get_engine(cfg.engine)
+        log.info("session engine: %s", engine.name)
+    except Exception as exc:  # never let engine selection abort daemon startup
+        log.warning("could not select session engine (%s); ABS START disabled", exc)
+        engine = None
+
+    pollers = _build_pollers(profiles, cfg, daemon_dir, base_url, engine=engine)
     try:
         if args.once:
             await _run_once(pollers)

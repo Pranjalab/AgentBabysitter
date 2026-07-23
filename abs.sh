@@ -1259,6 +1259,20 @@ cmd_log() {
 #   model          — passed as --model at launch (an explicit CLI --model wins)
 #   default_quiet  — the mute state each new session opens in
 cmd_config() {
+  # workspace-root is a DAEMON-global setting (v3), not a per-profile launch
+  # default: it lives in ~/.abs/daemon/config.json and is the ONLY directory under
+  # which the ABS START flow may create new folders (D6). Terminal-only (5.3), and
+  # needs no paired profile — intercept it before require_setup and shell into the
+  # Python config writer (keeps the logic out of bash, PLAN.md 4.4).
+  if [ "${1:-}" = "workspace-root" ]; then
+    shift
+    local proot ppy
+    proot="$(dirname "$SCRIPT_PATH")"
+    ppy="$proot/.venv/bin/python"
+    [ -x "$ppy" ] || die "abs config workspace-root needs $proot/.venv (Python 3.11+). Not found."
+    [ -d "$proot/absd" ] || die "absd/ not found next to abs.sh ($proot)."
+    exec env PYTHONPATH="$proot" ABS_HOME="$ABS_HOME" "$ppy" -m absd.registry workspace-root "$@"
+  fi
   require_setup
   local key="${1:-}" val="${2:-}"
   case "$key" in
@@ -2366,6 +2380,13 @@ cmd_run() {
 
   local did_setup=0
   if ! load_token || [ ! -f "$ABS_STATE" ]; then
+    # A daemon-started session runs headless in an engine pane — it must never
+    # drop into interactive setup/pairing. Die loudly instead so the daemon's
+    # HANDOFF fails visibly and the operator pairs at the terminal (PLAN.md 1.5).
+    if [ "${ABS_DAEMON_START:-0}" = "1" ]; then
+      die "Profile '$PROFILE' is not paired — a daemon-started session cannot run setup.
+  Pair it at the terminal first:  abs --profile $PROFILE setup"
+    fi
     info "${c_dim}No pairing for profile '$PROFILE' — running setup.${c_reset}"
     cmd_setup
     load_token || die "Setup did not complete."
@@ -2392,7 +2413,11 @@ cmd_run() {
   # Drain any backlog before the plugin starts polling — unless setup just ran,
   # in which case pairing already consumed the getUpdates stream (and the only
   # pending message would be the PIN we just handled).
-  if [ "$did_setup" = "0" ] && [ "$policy" != "disabled" ]; then
+  # A daemon-started session skips the interactive flood prompt: the daemon owns
+  # the backlog/offset (it committed the offset at HANDOFF and pooled anything that
+  # arrived while idle), so there is nothing for abs.sh to drain, and the pane's
+  # tty must never block on a prompt.
+  if [ "$did_setup" = "0" ] && [ "$policy" != "disabled" ] && [ "${ABS_DAEMON_START:-0}" != "1" ]; then
     flood_check
   fi
 
@@ -2463,7 +2488,9 @@ cmd_run() {
   # before we commit to this launch. Placed ahead of the background warm-ups so a
   # "yes" re-execs without having spawned throwaway work first. Never blocks past
   # a ~3s network timeout; declines (the default) fall straight through to launch.
-  update_prompt
+  # Skipped entirely for a daemon-started session: the engine pane HAS a tty, so
+  # the prompt would block a headless launch (PLAN.md 1.5).
+  [ "${ABS_DAEMON_START:-0}" = "1" ] || update_prompt
 
   # Warm the usage-glance cache in the background so the first status-bar reading
   # isn't blank. Detached; it forks before exec and outlives it, so the launch is
@@ -2620,6 +2647,25 @@ cmd_engine() {
   exec env PYTHONPATH="$root" "$py" -m absd.engines.cli "$sub" "$@"
 }
 
+# `abs project add|list|rm <dir>` — the v3 project registry the ABS START flow
+# offers as start targets. TERMINAL-ONLY registration (5.3 / D6): a compromised
+# phone can never name a path, so this write surface exists only here, at the desk.
+# Like `daemon`/`sessions`, it needs no jq and no profile — it shells into the
+# Python registry CLI, which owns registry.json.
+cmd_project() {
+  local sub="${1:-}"; shift || true
+  local root py
+  root="$(dirname "$SCRIPT_PATH")"
+  py="$root/.venv/bin/python"
+  [ -x "$py" ] || die "abs project needs $root/.venv (Python 3.11+). Not found."
+  [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root)."
+  case "$sub" in
+    add|list|rm) ;;
+    *) die "Usage: abs project add|list|rm <dir>" ;;
+  esac
+  exec env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.registry project "$sub" "$@"
+}
+
 cmd_help() {
   cat <<EOF
 ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Telegram
@@ -2658,6 +2704,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
 
   ${c_bold}abs${c_reset} sessions            List engine sessions (v3; --json for scripts)
   ${c_bold}abs${c_reset} attach [profile]    Attach to a running session (v3)
+  ${c_bold}abs${c_reset} project add|list|rm <dir>  Register projects the ABS START flow offers (v3)
+  ${c_bold}abs${c_reset} config workspace-root <dir>  Root for remote 'New folder' starts (v3)
   ${c_bold}abs${c_reset} daemon install|start|stop|status|logs|run
                           Always-on daemon: polls idle bots, pools messages (v3)
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
@@ -2689,6 +2737,13 @@ main() {
     case "$1" in
       --profile)   want_profile="${2:-}"; [ -n "$want_profile" ] || die "--profile needs a name"; shift 2 ;;
       --profile=*) want_profile="${1#*=}"; shift ;;
+      # v3 daemon-launch flag: the engine runs `abs --profile P --daemon-start` at
+      # HANDOFF. It makes cmd_run non-interactive (no update/pairing prompts, die
+      # loudly if unpaired) and otherwise behaves exactly like a terminal launch.
+      --daemon-start) ABS_DAEMON_START=1; shift ;;
+      # Away mode: don't prompt for file edits (acceptEdits). A flag form of the
+      # existing ABS_AWAY env mechanism, honored by cmd_run's perm_args.
+      --away)      ABS_AWAY=1; shift ;;
       *)           args+=("$1"); shift ;;
     esac
   done
@@ -2706,6 +2761,8 @@ main() {
     daemon) shift; cmd_daemon "$@" ;;
     # v3 engine shims: no profile, no jq — they exec the Python adapter.
     sessions|attach) cmd_engine "$@" ;;
+    # v3 project registry (terminal-only, 5.3): no profile, no jq.
+    project) shift; cmd_project "$@" ;;
   esac
 
   command -v jq >/dev/null 2>&1 || die "jq is required."

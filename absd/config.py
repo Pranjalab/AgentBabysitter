@@ -70,6 +70,16 @@ class DaemonConfig:
     # Upper bound on the exponential 409 backoff during RECLAIM (PLAN.md 4.1).
     reclaim_backoff_max_s: float = 60.0
 
+    # ABS START flow inactivity timeout (PLAN.md Step 1.5): a half-finished flow
+    # (project/mode not yet chosen) expires after this many seconds.
+    flow_timeout_s: float = 300.0
+
+    # HANDOFF startup grace (PLAN.md Step 1.5 / 4.1): after the daemon launches a
+    # session, how long to wait for it to come alive (engine/pid) before treating
+    # a never-alive launch as a failed start and reclaiming. Guards the launch
+    # window so a session that is still booting is not mistaken for a dead one.
+    session_start_grace_s: float = 30.0
+
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping for this config."""
         return asdict(self)
@@ -97,6 +107,7 @@ def validate(cfg: DaemonConfig) -> DaemonConfig:
       - ``reclaim_grace_s`` >= 0.
       - ``reclaim_backoff_max_s`` >= ``reclaim_grace_s`` (the cap must not sit
         below the initial grace, or backoff maths is nonsense).
+      - ``flow_timeout_s`` >= 0 and ``session_start_grace_s`` >= 0 (Step 1.5).
     """
     if cfg.engine not in ENGINE_CHOICES:
         raise ConfigError(
@@ -114,6 +125,12 @@ def validate(cfg: DaemonConfig) -> DaemonConfig:
         raise ConfigError(
             "reclaim_backoff_max_s must be >= reclaim_grace_s "
             f"({cfg.reclaim_backoff_max_s!r} < {cfg.reclaim_grace_s!r})"
+        )
+    if cfg.flow_timeout_s < 0:
+        raise ConfigError(f"flow_timeout_s must be >= 0, got {cfg.flow_timeout_s!r}")
+    if cfg.session_start_grace_s < 0:
+        raise ConfigError(
+            f"session_start_grace_s must be >= 0, got {cfg.session_start_grace_s!r}"
         )
     return cfg
 

@@ -1,0 +1,139 @@
+"""HANDOFF through a REAL engine (tmux/herdr) with a stub launcher.
+
+Proves the daemon's launch path (create/liveness/kill) works on both engines
+(D4), driving the full ABS START flow against FakeTelegram but letting a real
+TmuxEngine / HerdrEngine actually create the session. The launched command is the
+stub launcher (stands in for abs.sh --daemon-start): it writes session.pid and
+stays alive — no claude, no network. Skips cleanly where the engine is absent.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import shutil
+import subprocess
+import time
+import uuid
+from collections.abc import Callable, Iterator
+from pathlib import Path
+
+import pytest
+
+from absd.config import DaemonConfig
+from absd.daemon import STATE_SESSION_LIVE, Poller
+from absd.engines import HerdrEngine, TmuxEngine
+from absd.profiles import discover
+from absd.registry import Registry
+from tests.conftest import write_profile
+from tests.harness.fake_telegram import FakeTelegram
+
+STUB = Path(__file__).parent / "harness" / "stub-launcher"
+_TMUX = "tmux"
+_HERDR = shutil.which("herdr") or os.path.expanduser("~/.local/bin/herdr")
+
+
+def _bin_ok(argv: list[str]) -> bool:
+    try:
+        return subprocess.run(argv, capture_output=True, timeout=10).returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _wait_until(pred: Callable[[], bool], timeout: float = 8.0, interval: float = 0.05) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(interval)
+    return pred()
+
+
+def _tmux_teardown(sock: str) -> None:
+    subprocess.run([_TMUX, "-L", sock, "kill-server"], capture_output=True, timeout=10)
+    tmpdir = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    with contextlib.suppress(OSError):
+        os.unlink(os.path.join(tmpdir, f"tmux-{os.getuid()}", sock))
+
+
+def _herdr_teardown(prefix: str) -> None:
+    import json as _json
+
+    proc = subprocess.run(
+        [_HERDR, "session", "list", "--json"], capture_output=True, text=True, timeout=20
+    )
+    try:
+        data = _json.loads(proc.stdout or "{}")
+    except (ValueError, _json.JSONDecodeError):
+        return
+    for s in data.get("sessions", []) or []:
+        name = s.get("name") if isinstance(s, dict) else None
+        if not isinstance(name, str) or not name.startswith(prefix):
+            continue
+        env = {**os.environ, "HERDR_SESSION": name}
+        subprocess.run([_HERDR, "pane", "close", "w1:p1"], capture_output=True, timeout=20, env=env)
+        subprocess.run([_HERDR, "session", "stop", name], capture_output=True, timeout=20, env=env)
+        subprocess.run([_HERDR, "session", "delete", name], capture_output=True, timeout=20, env=env)
+
+
+@pytest.fixture(params=["tmux", "herdr"])
+def engine(request: pytest.FixtureRequest) -> Iterator[object]:
+    backend = request.param
+    if backend == "tmux":
+        if not _bin_ok([_TMUX, "-V"]):
+            pytest.skip("tmux not installed")
+        sock = f"abs-test-{uuid.uuid4().hex[:8]}"
+        try:
+            yield TmuxEngine(socket_name=sock)
+        finally:
+            _tmux_teardown(sock)
+    else:
+        if not _bin_ok([_HERDR, "--version"]):
+            pytest.skip("herdr not installed")
+        prefix = f"abs-test-{uuid.uuid4().hex[:8]}-"
+        try:
+            yield HerdrEngine(session_prefix=prefix)
+        finally:
+            _herdr_teardown(prefix)
+
+
+async def test_handoff_launches_real_session_then_reclaim_detects_death(
+    engine, abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    write_profile(abs_home, allow_ids=[42])
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    Registry(abs_home / "daemon" / "registry.json").add(proj)
+
+    prof = discover(abs_home, home=abs_home)[0]
+    client = client_factory(prof.load_token())
+    cfg = DaemonConfig(poll_timeout_s=0, workspace_root="")
+    poller = Poller(
+        prof, client, cfg, state_dir=abs_home / "daemon",
+        engine=engine, script_path=str(STUB),
+    )
+    # keep engine session names unique per run so we can find the created one.
+    profile_name = prof.name
+
+    # Drive the flow to HANDOFF.
+    fake.queue_message("ABS START", from_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:p:0", from_id=42, chat_id=42)
+    await poller.poll_once()
+    fake.queue_callback_query("as:m:n", from_id=42, chat_id=42)
+    await poller.poll_once()
+
+    assert poller.session_state == STATE_SESSION_LIVE
+
+    try:
+        # The REAL engine created a live session running the stub launcher.
+        assert _wait_until(lambda: engine.is_alive(profile_name)), "session should be alive"
+        # The stub wrote session.pid under ABS_HOME → both liveness signals agree.
+        assert _wait_until(lambda: prof.live_session_pid() is not None)
+        assert poller._session_dead() is False
+
+        # Kill it → both signals go dead (reconciled), so _session_dead() is True.
+        engine.kill(profile_name)
+        assert _wait_until(lambda: poller._session_dead()), "death must reconcile both signals"
+    finally:
+        engine.kill(profile_name)

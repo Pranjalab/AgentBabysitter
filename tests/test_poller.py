@@ -9,8 +9,9 @@ import pytest
 
 from absd.config import DaemonConfig
 from absd.daemon import (
+    NO_PROJECTS_MSG,
     POOL_ACK,
-    START_ACK,
+    STALE_MENU_ANSWER,
     Poller,
     is_status,
     normalize_command,
@@ -138,32 +139,39 @@ async def test_near_miss_pools_not_executes(
     assert fake.sent_messages[0]["text"] == POOL_ACK.format(n=1)
 
 
-async def test_abs_start_distinct_ack_and_pools(
+async def test_abs_start_launches_flow_not_pooled(
     abs_home: Path, fake: FakeTelegram, client_factory
 ) -> None:
+    # Step 1.5: ABS START now begins the flow instead of pooling. With no
+    # registered projects and no workspace root, it explains that (and pools
+    # nothing). The full flow is exercised in test_flow.py.
     write_profile(abs_home, allow_ids=[42])
     fake.queue_message("ABS START", from_id=42)
-    poller = build_poller(abs_home, client_factory)
+    # Empty workspace_root + no registry ⇒ nothing to start in (hermetic: never
+    # reach the real ~/Projects).
+    cfg = DaemonConfig(poll_timeout_s=0, workspace_root="")
+    poller = build_poller(abs_home, client_factory, cfg=cfg)
     await poller.poll_once()
 
-    assert len(poller.pool.read_all()) == 1  # still pooled (1.5 wires the flow)
-    ack = fake.sent_messages[0]["text"]
-    assert ack == START_ACK.format(n=1)
-    assert "isn't wired up yet" in ack
+    assert poller.pool.read_all() == []  # ABS START never pools
+    assert fake.sent_messages[0]["text"] == NO_PROJECTS_MSG
+    assert poller.flow is None  # no flow started (nothing to start)
 
 
-async def test_callback_query_pools_and_answers(
+async def test_stray_callback_answered_not_pooled(
     abs_home: Path, fake: FakeTelegram, client_factory
 ) -> None:
+    # Step 1.5: a callback tap with no active flow (an expired menu) is answered
+    # so the phone stops spinning, but raw callback data is never pooled.
     write_profile(abs_home, allow_ids=[42])
-    fake.queue_callback_query("proj:foo", from_id=42, chat_id=42)
+    fake.queue_callback_query("as:p:0", from_id=42, chat_id=42)
     poller = build_poller(abs_home, client_factory)
     await poller.poll_once()
 
-    # callback_query is not a command — it pools + acks + answers the callback.
-    assert len(poller.pool.read_all()) == 1
+    assert poller.pool.read_all() == []  # not pooled
+    assert fake.sent_messages == []  # no chat message
     assert fake.answered_callbacks  # spinner cleared
-    assert fake.sent_messages[0]["text"] == POOL_ACK.format(n=1)
+    assert fake.answered_callbacks[-1]["text"] == STALE_MENU_ANSWER
 
 
 # ---- dedupe / D14 ------------------------------------------------------------

@@ -35,15 +35,22 @@ Pure rendering/parsing helpers are module-level so they unit-test without I/O
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from absd import __version__
+from absd import flow as flow_mod
 from absd.config import DaemonConfig
+from absd.engines.base import Engine, EngineError
+from absd.flow import ProjectOption
 from absd.pool import Pool, PooledMessage, utc_now_iso
 from absd.profiles import Profile
+from absd.registry import Registry
 from absd.telegram import Conflict409, TelegramClient, TelegramError
 
 log = logging.getLogger("absd.poller")
@@ -51,10 +58,57 @@ log = logging.getLogger("absd.poller")
 # Exact ack a pooled message earns (PLAN.md Step 1.3 — verbatim, do not reword).
 POOL_ACK = "🗂 No session running — message saved to pool ({n}). Send ABS START to begin."
 # ABS START is not wired until Step 1.5; it still pools, with a distinct note.
+# Retained for backward compatibility; the flow (Step 1.5) intercepts ABS START
+# before it can pool, so this template is now used only if the flow is disabled.
 START_ACK = (
     "🗂 ABS START isn't wired up yet — that lands in a later update. "
     "Your message is saved to the pool ({n}) for when a session begins."
 )
+
+# ---- ABS START flow / handoff / reclaim messages (Step 1.5) ------------------
+
+# A stray inline-keyboard tap with no active flow (e.g. an expired menu). Answer
+# the callback so the phone UI stops spinning; never pool raw callback data.
+STALE_MENU_ANSWER = "That menu has expired — send ABS START to begin again."
+# A half-finished flow that timed out (PLAN.md Step 1.5 flow timeout).
+FLOW_EXPIRED_MSG = "⌛ ABS START timed out. Send ABS START again to begin."
+# ABS START while a session is already live for this profile (attach, don't flow).
+ALREADY_LIVE_MSG = (
+    "▶️ A session is already running for this profile. Attach at the terminal:\n"
+    "  abs attach {profile}"
+)
+# At the configured max_sessions cap (across all profiles).
+AT_CAP_MSG = (
+    "🛑 At the session limit ({cap}). End a running session before starting another."
+)
+# No project options at all (no registry, no workspace root).
+NO_PROJECTS_MSG = (
+    "No projects to start in. From the terminal, register one:\n"
+    "  abs project add <dir>\n"
+    "or set a workspace root:\n"
+    "  abs config workspace-root <dir>"
+)
+# The HANDOFF confirmation (Step 1.5). Attach hint per the plan.
+HANDOFF_CONFIRM = (
+    "🚀 Started {label} ({mode}).\n"
+    "Send it a task here, or attach at the terminal:\n"
+    "  abs attach {profile}"
+)
+# Sent AFTER reclaim completes (PLAN.md 4.1 — only after the token is free again).
+SESSION_ENDED_MSG = "⏹ Session ended. I'm listening again — send ABS START to begin."
+# HANDOFF failed to launch the engine session.
+HANDOFF_FAILED_MSG = "⚠️ Couldn't start the session ({err}). Nothing is running."
+
+# Poller session-state machine (PLAN.md 4.1). IDLE covers both real IDLE_POLLING
+# and the terminal-launch yield (which stays IDLE and yields via should_poll);
+# SESSION_LIVE / RECLAIM are the daemon-initiated handoff states.
+STATE_IDLE = "idle"
+STATE_SESSION_LIVE = "session-live"
+STATE_RECLAIM = "reclaim"
+
+# How long to nap between engine-liveness checks while SESSION_LIVE (PLAN.md 4.1
+# "every few seconds"). Short so a finished session reclaims promptly.
+SESSION_WATCH_S = 3.0
 
 # Backoff schedule for a getUpdates 409 (plugin owns the token): 2s, 4s, 8s…
 # capped at cfg.reclaim_backoff_max_s (PLAN.md 4.1).
@@ -262,11 +316,42 @@ def extract(update: dict[str, Any]) -> Extracted | None:
     return Extracted(update_id=uid, from_id=None, chat_id=None, text="")
 
 
+# ---- ABS START flow state (Step 1.5) -----------------------------------------
+
+
+@dataclass
+class Flow:
+    """In-memory, per-profile ABS START conversation state (PLAN.md Step 1.5).
+
+    Not persisted: a half-finished flow that outlives ``flow_timeout_s`` is
+    dropped (a new ABS START restarts from scratch). ``started_at`` is a
+    monotonic timestamp so the timeout is immune to wall-clock jumps.
+    """
+
+    chat_id: int
+    step: str  # "project" | "folder" | "mode"
+    options: list[ProjectOption]
+    started_at: float
+    chosen_path: str | None = None
+    label: str = ""
+
+
+@dataclass
+class HandoffRequest:
+    """A completed flow's decision, handed to :meth:`Poller._do_handoff`."""
+
+    chat_id: int
+    project_path: str
+    label: str
+    away: bool
+
+
 # ---- offset persistence -------------------------------------------------------
 
 
 class Poller:
-    """IDLE_POLLING state machine for one profile (PLAN.md 4.1)."""
+    """Per-profile state machine (PLAN.md 4.1): IDLE_POLLING, plus the Step 1.5
+    HANDOFF → SESSION_LIVE → RECLAIM path for daemon-initiated sessions."""
 
     def __init__(
         self,
@@ -274,6 +359,10 @@ class Poller:
         client: TelegramClient,
         cfg: DaemonConfig,
         state_dir: Path,
+        engine: Engine | None = None,
+        script_path: str | None = None,
+        session_count: Callable[[], int] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.profile = profile
         self.client = client
@@ -281,6 +370,32 @@ class Poller:
         self.pool = Pool(profile.pool_path)
         self.state_dir = Path(state_dir)
         self.state_path = self.state_dir / f"poller-{profile.name}.json"
+        #: Session engine (tmux/herdr) used to launch/kill/watch a handoff session.
+        #: None until wired (unit tests that never hand off leave it None).
+        self.engine = engine
+        #: Absolute path to abs.sh — the launcher the engine runs (PLAN.md 4.2).
+        self.script_path = script_path
+        #: Returns the current count of live sessions across ALL profiles, for the
+        #: max_sessions cap (G5). Defaults to "just this engine's alive sessions".
+        self._session_count_fn = session_count
+        #: Injected monotonic clock (tests compress the flow timeout / grace).
+        self._clock = clock
+        #: The project registry + workspace-root config are re-read on demand so
+        #: a terminal `abs project add` shows up without a daemon restart.
+        self.registry = Registry(self.state_dir / "registry.json")
+
+        #: ABS START conversation state; None when no flow is in progress.
+        self.flow: Flow | None = None
+        #: Set by the mode step; consumed by poll_once → _do_handoff.
+        self._handoff_request: HandoffRequest | None = None
+        #: Coarse session-state (STATE_*); drives run()'s dispatch.
+        self.session_state = STATE_IDLE
+        #: Handoff bookkeeping (set at HANDOFF, used by SESSION_LIVE / RECLAIM).
+        self._handoff_chat_id: int | None = None
+        self._handoff_at: float = 0.0
+        self._session_seen_alive = False
+        #: Offset value committed by the single HANDOFF commit (test bookkeeping).
+        self.handoff_committed_offset: int | None = None
         #: Per-profile status file (Step 1.4) — rewritten atomically each cycle so
         #: ``abs daemon status`` can show a per-profile line without touching the
         #: running daemon. Distinct from the offset file above.
@@ -366,6 +481,15 @@ class Poller:
         (live session / blocked / off) — the caller distinguishes that from an
         empty poll to decide how long to sleep.
         """
+        # SESSION_LIVE / RECLAIM are driven by run() (or watch_once/reclaim called
+        # directly in tests) — poll_once is the IDLE_POLLING primitive only.
+        if self.session_state != STATE_IDLE:
+            return -1
+
+        # A half-finished ABS START flow that timed out is dropped here, once per
+        # cycle, with a notice (Step 1.5 flow timeout).
+        await self._expire_flow_if_needed()
+
         reason = self.profile.yield_reason()
         if reason is not None:
             log.debug("poller[%s] yielding: %s", self.profile.name, reason)
@@ -381,6 +505,11 @@ class Poller:
             return 0
 
         await self._process_batch(updates)
+        # A flow that completed in this batch (mode chosen) requested a HANDOFF.
+        # Run it now, after the batch — this is the "leave the poll loop" step of
+        # 4.1: it commits the offset once and flips us to SESSION_LIVE.
+        if self._handoff_request is not None:
+            await self._do_handoff()
         return len(updates)
 
     async def _process_batch(self, updates: list[dict[str, Any]]) -> None:
@@ -424,6 +553,27 @@ class Poller:
                 self.profile.name,
                 ex.update_id,
             )
+            return
+
+        # ABS START (Step 1.5): begins/restarts the flow. Highest priority so a
+        # user can always restart a stuck flow by re-sending it.
+        if is_start(ex.text):
+            await self._begin_flow(ex)
+            return
+
+        # An in-progress flow owns the conversation: route this update to it
+        # (callback tap or numbered/folder-name text). A stray callback with no
+        # active flow (expired menu) is answered but never pooled.
+        if self.flow is not None:
+            await self._advance_flow(ex)
+            return
+        if ex.callback_query_id is not None:
+            try:
+                await self.client.answer_callback_query(
+                    ex.callback_query_id, text=STALE_MENU_ANSWER
+                )
+            except Exception:
+                log.debug("poller[%s] stale-callback answer failed", self.profile.name)
             return
 
         # D9 read commands: answered from local state, never pooled.
@@ -477,6 +627,441 @@ class Poller:
     async def _reply_pool(self, ex: Extracted) -> None:
         await self._reply(ex, render_pool(self.pool.read_all()))
 
+    # ---- ABS START flow (Step 1.5) ---------------------------------------
+
+    async def _answer_if_callback(self, ex: Extracted) -> None:
+        """Answer a callback query so the phone UI stops spinning (best-effort)."""
+        if ex.callback_query_id is None:
+            return
+        try:
+            await self.client.answer_callback_query(ex.callback_query_id)
+        except Exception:
+            log.debug("poller[%s] answer_callback_query failed", self.profile.name)
+
+    def _script_path(self) -> str:
+        """Absolute path to abs.sh (the launcher the engine runs, PLAN.md 4.2).
+        Defaults to the abs.sh beside the ``absd`` package (repo root)."""
+        if self.script_path:
+            return self.script_path
+        return str(Path(__file__).resolve().parents[1] / "abs.sh")
+
+    def _registered(self) -> list[tuple[str, str]]:
+        """Registered projects as ``(path, label)`` tuples (re-read on demand so a
+        terminal ``abs project add`` shows up with no daemon restart)."""
+        return [(e.path, e.label) for e in self.registry.read()]
+
+    def _workspace_root(self) -> Path | None:
+        """The configured workspace root (D6), expanded — or ``None`` if unset or
+        not an existing directory. Read fresh from ``config.json`` on demand so a
+        terminal ``abs config workspace-root`` takes effect without a restart."""
+        raw = self.cfg.workspace_root
+        cfg_path = self.state_dir / "config.json"
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("workspace_root"), str):
+                raw = data["workspace_root"]
+        except (OSError, ValueError):
+            pass
+        if not raw:
+            return None
+        root = Path(raw).expanduser()
+        return root if root.is_dir() else None
+
+    def _session_count(self) -> int:
+        """Live sessions across ALL profiles (for the max_sessions cap, G5)."""
+        if self._session_count_fn is not None:
+            return self._session_count_fn()
+        if self.engine is not None:
+            try:
+                return sum(1 for s in self.engine.list_sessions() if s.alive)
+            except EngineError:
+                return 0
+        return 0
+
+    def _at_session_cap(self) -> bool:
+        return self._session_count() >= self.cfg.max_sessions
+
+    def _flow_expired(self) -> bool:
+        return (
+            self.flow is not None
+            and (self._clock() - self.flow.started_at) > self.cfg.flow_timeout_s
+        )
+
+    async def _expire_flow_if_needed(self) -> None:
+        """Drop a half-finished flow that outlived ``flow_timeout_s`` and tell the
+        user (PLAN.md Step 1.5). Called once per poll cycle."""
+        if not self._flow_expired():
+            return
+        assert self.flow is not None
+        chat_id = self.flow.chat_id
+        self.flow = None
+        try:
+            await self.client.send_message(chat_id, FLOW_EXPIRED_MSG)
+        except TelegramError:
+            log.debug("poller[%s] flow-expiry notice failed", self.profile.name)
+
+    async def _begin_flow(self, ex: Extracted) -> None:
+        """Start (or restart) the ABS START flow: send the project keyboard.
+
+        Refuses up front (no flow started) when a session is already live for this
+        profile (attach hint), at the max_sessions cap, or when there is nothing
+        to start in (no registry, no workspace root)."""
+        chat_id = ex.chat_id
+        await self._answer_if_callback(ex)
+
+        if self.profile.live_session_pid() is not None or self.session_state != STATE_IDLE:
+            self.flow = None
+            if chat_id is not None:
+                await self.client.send_message(
+                    chat_id, ALREADY_LIVE_MSG.format(profile=self.profile.name)
+                )
+            return
+        if self._at_session_cap():
+            self.flow = None
+            if chat_id is not None:
+                await self.client.send_message(
+                    chat_id, AT_CAP_MSG.format(cap=self.cfg.max_sessions)
+                )
+            return
+
+        options = flow_mod.enumerate_project_options(
+            self._registered(), self._workspace_root()
+        )
+        if not options:
+            self.flow = None
+            if chat_id is not None:
+                await self.client.send_message(chat_id, NO_PROJECTS_MSG)
+            return
+
+        if chat_id is None:
+            return
+        await self.client.send_message(
+            chat_id,
+            flow_mod.render_project_menu(options),
+            reply_markup=flow_mod.build_project_keyboard(options),
+        )
+        self.flow = Flow(
+            chat_id=chat_id,
+            step="project",
+            options=options,
+            started_at=self._clock(),
+        )
+
+    async def _send_mode_step(self, flow: Flow) -> None:
+        flow.step = "mode"
+        await self.client.send_message(
+            flow.chat_id,
+            flow_mod.MODE_MENU_TEXT,
+            reply_markup=flow_mod.build_mode_keyboard(),
+        )
+
+    async def _advance_flow(self, ex: Extracted) -> None:
+        """Drive one step of the active flow from an update (callback or text)."""
+        flow = self.flow
+        assert flow is not None
+        # For a callback update, extract() put the callback data in ex.text; a
+        # plain message has no callback id and the number/name is ex.text.
+        data = ex.text if ex.callback_query_id is not None else None
+        text = ex.text
+
+        if flow.step == "project":
+            opt = flow_mod.choose_project(data, text, flow.options)
+            await self._answer_if_callback(ex)
+            if opt is None:
+                await self.client.send_message(
+                    flow.chat_id,
+                    "Pick a project by tapping a button or replying with its number.",
+                )
+                return
+            if opt.kind == "newfolder":
+                flow.step = "folder"
+                await self.client.send_message(flow.chat_id, flow_mod.NEW_FOLDER_PROMPT)
+                return
+            flow.chosen_path = opt.path
+            flow.label = opt.label
+            await self._send_mode_step(flow)
+            return
+
+        if flow.step == "folder":
+            if ex.callback_query_id is not None:
+                await self._answer_if_callback(ex)
+                await self.client.send_message(flow.chat_id, flow_mod.NEW_FOLDER_PROMPT)
+                return
+            ok, err = flow_mod.validate_folder_name(text)
+            if not ok:
+                await self.client.send_message(
+                    flow.chat_id, f"❌ {err}\n\n{flow_mod.NEW_FOLDER_PROMPT}"
+                )
+                return
+            root = self._workspace_root()
+            if root is None:
+                self.flow = None
+                await self.client.send_message(flow.chat_id, NO_PROJECTS_MSG)
+                return
+            target = flow_mod.safe_join_under_root(root, text.strip())
+            if target is None:
+                # Regex passed but the structural jail refused it (D6). Never happens
+                # for a valid single segment; this is the belt-and-suspenders guard.
+                await self.client.send_message(
+                    flow.chat_id, "❌ That folder name isn't allowed here."
+                )
+                return
+            try:
+                target.mkdir(mode=0o700, exist_ok=True)
+            except OSError as exc:
+                self.flow = None
+                await self.client.send_message(
+                    flow.chat_id, f"⚠️ Couldn't create the folder: {exc}"
+                )
+                return
+            flow.chosen_path = str(target)
+            flow.label = target.name
+            await self._send_mode_step(flow)
+            return
+
+        if flow.step == "mode":
+            mode = flow_mod.choose_mode(data, text)
+            await self._answer_if_callback(ex)
+            if mode is None:
+                await self.client.send_message(
+                    flow.chat_id,
+                    flow_mod.MODE_MENU_TEXT,
+                    reply_markup=flow_mod.build_mode_keyboard(),
+                )
+                return
+            # Flow complete: record the decision and clear the flow. The actual
+            # HANDOFF (offset commit → marker → launch → confirm) runs in poll_once
+            # right after this batch, so it happens outside the poll (PLAN.md 4.1).
+            self._handoff_request = HandoffRequest(
+                chat_id=flow.chat_id,
+                project_path=flow.chosen_path or "",
+                label=flow.label or Path(flow.chosen_path or "").name,
+                away=(mode == flow_mod.MODE_AWAY),
+            )
+            self.flow = None
+            return
+
+    # ---- HANDOFF marker (PLAN.md 4.1 / 4.3) ------------------------------
+
+    @property
+    def handoff_marker_path(self) -> Path:
+        return self.profile.profile_dir / "daemon-handoff.json"
+
+    def _write_handoff_marker(self, project: str, mode: str, chat_id: int | None) -> None:
+        """Write ``daemon-handoff.json`` atomically (0600). Records timestamp,
+        project, mode (PLAN.md 4.1) plus the chat id so RECLAIM knows where to send
+        the 'session ended' note."""
+        record = {
+            "timestamp": utc_now_iso(),
+            "project": project,
+            "mode": mode,
+            "chat_id": chat_id,
+        }
+        try:
+            self.profile.profile_dir.mkdir(parents=True, exist_ok=True)
+            path = self.handoff_marker_path
+            tmp = path.with_suffix(".tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, (json.dumps(record) + "\n").encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(str(tmp), str(path))
+            os.chmod(path, 0o600)
+        except OSError:
+            log.warning("poller[%s] could not write handoff marker", self.profile.name)
+
+    def _read_handoff_marker(self) -> dict[str, Any] | None:
+        try:
+            data = json.loads(self.handoff_marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _clear_handoff_marker(self) -> None:
+        try:
+            self.handoff_marker_path.unlink()
+        except OSError:
+            pass
+
+    async def check_stale_handoff(self) -> None:
+        """Boot/startup guard (2.3 preview): a handoff marker with no live session
+        is stale — the session it referred to is gone. Clear it and warn. (No
+        'session ended' ping on startup: it could be an old marker, and a spurious
+        phone message on every daemon boot would be worse than silence.)"""
+        marker = self._read_handoff_marker()
+        if marker is None:
+            return
+        if self.profile.live_session_pid() is not None:
+            return
+        log.warning(
+            "poller[%s] stale handoff marker (no live session) — clearing",
+            self.profile.name,
+        )
+        self._clear_handoff_marker()
+
+    # ---- HANDOFF (PLAN.md 4.1, exact ordering) ---------------------------
+
+    async def _do_handoff(self) -> None:
+        """Execute HANDOFF for a completed flow, in the 4.1 order:
+
+        (1) we have already left the poll loop (this runs after the batch, and the
+            state flips to SESSION_LIVE so poll_once won't poll again); (2) one
+            final ``getUpdates(timeout=0, offset=last+1)`` — the single offset
+            commit; (3) write the handoff marker; (4) engine.create_session; (5)
+            confirmation with the attach hint; (6) → SESSION_LIVE.
+        """
+        req = self._handoff_request
+        self._handoff_request = None
+        if req is None:
+            return
+
+        # (2) single final offset commit.
+        if self.offset is not None:
+            try:
+                await self.client.get_updates(offset=self.offset, timeout=0)
+            except Conflict409:
+                # The plugin may already be registering; the offset is committed
+                # locally and the plugin resumes from it. Not fatal to the handoff.
+                pass
+            except TelegramError:
+                log.warning("poller[%s] handoff offset commit failed", self.profile.name)
+            self.handoff_committed_offset = self.offset
+
+        mode = "away" if req.away else "normal"
+        # (3) handoff marker.
+        self._write_handoff_marker(req.project_path, mode, req.chat_id)
+
+        # (4) launch through the engine (never reimplement the launcher — 4.2).
+        try:
+            if self.engine is None:
+                raise EngineError("no session engine configured")
+            argv = flow_mod.build_launcher_argv(
+                self._script_path(), self.profile.name, req.away
+            )
+            env = {"ABS_HOME": str(self.profile.abs_home)}
+            self.engine.create_session(
+                self.profile.name, Path(req.project_path), argv, env
+            )
+        except Exception as exc:  # EngineError or anything the engine surfaces
+            log.error("poller[%s] handoff launch failed: %s", self.profile.name, exc)
+            self._clear_handoff_marker()
+            if req.chat_id is not None:
+                try:
+                    await self.client.send_message(
+                        req.chat_id, HANDOFF_FAILED_MSG.format(err=exc)
+                    )
+                except TelegramError:
+                    pass
+            self.session_state = STATE_IDLE
+            return
+
+        # (5) confirmation with attach hint.
+        if req.chat_id is not None:
+            try:
+                await self.client.send_message(
+                    req.chat_id,
+                    HANDOFF_CONFIRM.format(
+                        label=req.label, mode=mode, profile=self.profile.name
+                    ),
+                )
+            except TelegramError:
+                pass
+
+        # (6) SESSION_LIVE.
+        self.session_state = STATE_SESSION_LIVE
+        self._handoff_chat_id = req.chat_id
+        self._handoff_at = self._clock()
+        self._session_seen_alive = False
+        log.info(
+            "poller[%s] HANDOFF complete — session launching in %s",
+            self.profile.name,
+            req.project_path,
+        )
+
+    # ---- SESSION_LIVE / RECLAIM (PLAN.md 4.1) ----------------------------
+
+    def _session_dead(self) -> bool:
+        """Reconcile BOTH liveness signals (PLAN.md 4.1): a daemon-launched session
+        is dead only when neither ``session.pid`` is alive NOR the engine reports
+        the session alive. If either says alive, it is not (yet) dead — the safe
+        bias, so a flapping/racy single signal never triggers a premature reclaim."""
+        pid_alive = self.profile.live_session_pid() is not None
+        engine_alive = False
+        if self.engine is not None:
+            try:
+                engine_alive = self.engine.is_alive(self.profile.name)
+            except EngineError:
+                engine_alive = False
+        return not pid_alive and not engine_alive
+
+    async def watch_once(self) -> bool:
+        """One SESSION_LIVE liveness check. Returns True while the session is
+        (still) alive or starting; on death transitions to RECLAIM and returns
+        False.
+
+        A launch that never comes alive within ``session_start_grace_s`` (crash,
+        not-logged-in — full login detection is Step 1.6) is treated as a failed
+        start and reclaimed, so the daemon can never wedge in SESSION_LIVE."""
+        if not self._session_dead():
+            self._session_seen_alive = True
+            return True
+        if self._session_seen_alive:
+            log.info("poller[%s] session ended — entering RECLAIM", self.profile.name)
+            self.session_state = STATE_RECLAIM
+            return False
+        if (self._clock() - self._handoff_at) > self.cfg.session_start_grace_s:
+            log.warning(
+                "poller[%s] launched session never came alive within %.0fs — reclaiming",
+                self.profile.name,
+                self.cfg.session_start_grace_s,
+            )
+            self.session_state = STATE_RECLAIM
+            return False
+        return True  # still starting up
+
+    async def reclaim(self, sleep: SleepFn = asyncio.sleep) -> None:
+        """RECLAIM (PLAN.md 4.1): grace delay → probe ``getUpdates(timeout=0)`` →
+        on 409 back off (2,4,8… capped) → on success clear the marker, send the
+        'session ended' note, and resume IDLE_POLLING. The probe does NOT advance
+        the offset, so any messages that arrived after the session died are
+        re-fetched and pooled by the next IDLE poll (D14 — never lost)."""
+        await sleep(self.cfg.reclaim_grace_s)
+        backoff: float | None = None
+        while not self._stop.is_set():
+            try:
+                await self.client.get_updates(offset=self.offset, timeout=0)
+            except Conflict409:
+                backoff = (
+                    BACKOFF_INITIAL_S
+                    if backoff is None
+                    else min(backoff * 2, self.cfg.reclaim_backoff_max_s)
+                )
+                log.debug(
+                    "poller[%s] reclaim 409 — backoff %.1fs", self.profile.name, backoff
+                )
+                await sleep(backoff)
+                continue
+            except TelegramError:
+                # Transient network error: nap and retry (never abandon reclaim).
+                await sleep(YIELD_RECHECK_S)
+                continue
+            break  # probe succeeded → the token is free again
+
+        if self._stop.is_set():
+            return
+        self._clear_handoff_marker()
+        if self._handoff_chat_id is not None:
+            try:
+                await self.client.send_message(self._handoff_chat_id, SESSION_ENDED_MSG)
+            except TelegramError:
+                pass
+        self.session_state = STATE_IDLE
+        self._session_seen_alive = False
+        self._handoff_chat_id = None
+        log.info("poller[%s] RECLAIM complete — polling resumes", self.profile.name)
+
     # ---- run loop --------------------------------------------------------
 
     def stop(self) -> None:
@@ -489,41 +1074,55 @@ class Poller:
     ) -> None:
         """Loop ``poll_once`` until stopped (or ``max_cycles`` reached).
 
-        ``sleep`` is injectable so tests advance without real time. 409 backs off
-        exponentially (2,4,8… capped at ``reclaim_backoff_max_s``) and resets on
-        the next successful poll; a yield naps :data:`YIELD_RECHECK_S`.
+        ``sleep`` is injectable so tests advance without real time. Dispatches on
+        the session-state (PLAN.md 4.1): SESSION_LIVE watches engine liveness every
+        few seconds; RECLAIM runs the grace/probe/backoff to completion; IDLE polls
+        (409 backs off 2,4,8… capped at ``reclaim_backoff_max_s`` and resets on the
+        next non-409 outcome; a yield naps :data:`YIELD_RECHECK_S`).
         """
+        # A handoff marker with no live session at startup is stale (2.3 preview).
+        await self.check_stale_handoff()
+
         cycles = 0
         backoff: float | None = None
         while not self._stop.is_set():
-            try:
-                processed = await self.poll_once()
-                backoff = None  # any non-409 outcome clears the backoff
-                if processed == -1:
+            if self.session_state == STATE_SESSION_LIVE:
+                alive = await self.watch_once()
+                if alive:
+                    await sleep(SESSION_WATCH_S)
+            elif self.session_state == STATE_RECLAIM:
+                await self.reclaim(sleep=sleep)
+            else:
+                try:
+                    processed = await self.poll_once()
+                    backoff = None  # any non-409 outcome clears the backoff
+                    if processed == -1 and self.session_state == STATE_IDLE:
+                        await sleep(YIELD_RECHECK_S)
+                except Conflict409:
+                    backoff = (
+                        BACKOFF_INITIAL_S
+                        if backoff is None
+                        else min(backoff * 2, self.cfg.reclaim_backoff_max_s)
+                    )
+                    log.debug(
+                        "poller[%s] 409 — backing off %.1fs", self.profile.name, backoff
+                    )
+                    await sleep(backoff)
+                except asyncio.CancelledError:
+                    raise
+                except TelegramError:
+                    # An operational Bot API / network error (already retried once
+                    # in the client). Stay alive — a transient outage must not kill
+                    # the task or trip the supervisor's loud restart — nap + retry.
+                    log.warning(
+                        "poller[%s] telegram error — retrying shortly", self.profile.name
+                    )
                     await sleep(YIELD_RECHECK_S)
-            except Conflict409:
-                backoff = (
-                    BACKOFF_INITIAL_S
-                    if backoff is None
-                    else min(backoff * 2, self.cfg.reclaim_backoff_max_s)
-                )
-                log.debug("poller[%s] 409 — backing off %.1fs", self.profile.name, backoff)
-                await sleep(backoff)
-            except asyncio.CancelledError:
-                raise
-            except TelegramError:
-                # An operational Bot API / network error (already retried once in
-                # the client). Stay alive — a transient outage must not kill the
-                # task or trip the supervisor's loud restart — nap and retry.
-                log.warning(
-                    "poller[%s] telegram error — retrying shortly", self.profile.name
-                )
-                await sleep(YIELD_RECHECK_S)
-            # NOTE: any OTHER exception is unexpected (a bug / corrupted state).
-            # It is deliberately NOT caught here — it propagates to the daemon's
-            # per-profile supervisor (absd.__main__._run_profile), which logs it
-            # loudly and RESTARTS this poller with backoff, in isolation from the
-            # other profiles' tasks (PLAN.md Step 1.4 supervision requirement).
+                # NOTE: any OTHER exception is unexpected (a bug / corrupted state).
+                # It is deliberately NOT caught here — it propagates to the daemon's
+                # per-profile supervisor (absd.__main__._run_profile), which logs it
+                # loudly and RESTARTS this poller with backoff, isolated from the
+                # other profiles' tasks (PLAN.md Step 1.4 supervision requirement).
 
             # Status snapshot for `abs daemon status` (best-effort, never raises).
             self.write_status()

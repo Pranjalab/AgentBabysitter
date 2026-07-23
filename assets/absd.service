@@ -15,6 +15,11 @@ Description=Agent Babysitter always-on daemon (absd)
 Documentation=https://github.com/Pranjalab/AgentBabysitter
 # Start after the user session's basic targets are up.
 After=default.target
+# Rate-limit rapid restarts. These are [Unit] keys (systemd warns "Unknown key,
+# ignoring" if placed under [Service]); the burst window pairs with the
+# Restart=/RestartSec= in [Service] below.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -25,12 +30,10 @@ Environment=PYTHONPATH=@@ABSROOT@@
 Environment=ABS_HOME=%h/.abs
 ExecStart=@@PYTHON@@ -m absd
 # Restart on crash, but not on a clean exit or an explicit stop (Step 1.8 hardens
-# crash recovery + state re-derivation on top of this).
+# crash recovery + state re-derivation on top of this). The flapping guard
+# (StartLimitIntervalSec/StartLimitBurst) lives in [Unit] above.
 Restart=on-failure
 RestartSec=3
-# Do not let a flapping daemon spin: give up after too many rapid restarts.
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 [Install]
 WantedBy=default.target
