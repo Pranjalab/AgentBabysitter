@@ -204,6 +204,16 @@ class Profile:
             return []
         return [str(x) for x in raw]
 
+    def chat_id(self) -> int | None:
+        """The paired chat id from rc.json (for a reboot notice to a terminal
+        session that has no handoff marker). ``None`` if unset/malformed."""
+        rc = _read_json(self.rc_path) or {}
+        raw = rc.get("chat_id")
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
     def dm_policy(self) -> str:
         """The ``dmPolicy`` from ``access.json`` (default ``"allowlist"`` when
         unset, matching the plugin's own default before ABS writes the file)."""

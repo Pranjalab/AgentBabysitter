@@ -49,8 +49,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from absd import rotate as rotate_mod
+
 _MODE = 0o600
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_KEEP = 3
 
 # ---- event vocabulary (stable constants) ------------------------------------
 
@@ -83,18 +86,19 @@ def utc_now_iso() -> str:
 class EventLog:
     """Append-only JSONL writer for daemon events. One instance per daemon."""
 
-    def __init__(self, path: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> None:
+    def __init__(
+        self,
+        path: Path,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        keep: int = DEFAULT_KEEP,
+    ) -> None:
         self.path = Path(path)
         self.max_bytes = max_bytes
+        self.keep = keep
 
     def _maybe_roll(self) -> None:
-        """Roll to ``.old`` when over the size cap (one generation kept)."""
-        try:
-            if self.path.exists() and self.path.stat().st_size > self.max_bytes:
-                old = self.path.with_suffix(self.path.suffix + ".old")
-                os.replace(str(self.path), str(old))
-        except OSError:
-            pass
+        """Rotate ``.1``…``.keep`` when over the size cap (Step 1.8)."""
+        rotate_mod.maybe_rotate(self.path, self.max_bytes, self.keep, mode=_MODE)
 
     def emit(
         self,
@@ -130,23 +134,7 @@ class EventLog:
             return None
 
 
-def iter_events(
-    path: Path,
-    profile: str | None = None,
-    since: str | None = None,
-    event: str | None = None,
-) -> Iterator[dict[str, Any]]:
-    """Yield events from ``path`` in file (chronological) order, filtered.
-
-    Corruption-tolerant: any line that is not a JSON object is skipped (including a
-    torn trailing line after a crash mid-write). Filters:
-      - ``profile`` — only events for that profile (events with no profile are
-        skipped when a profile filter is given).
-      - ``since``   — only events with ``ts >= since`` (ISO-8601 string compare,
-        which is chronological for this fixed ``...Z`` format).
-      - ``event``   — only events of that name.
-    """
-    path = Path(path)
+def _iter_one_file(path: Path) -> Iterator[dict[str, Any]]:
     try:
         fh = path.open("r", encoding="utf-8")
     except OSError:
@@ -160,8 +148,36 @@ def iter_events(
                 rec = json.loads(line)
             except (ValueError, TypeError):
                 continue
-            if not isinstance(rec, dict):
-                continue
+            if isinstance(rec, dict):
+                yield rec
+
+
+def iter_events(
+    path: Path,
+    profile: str | None = None,
+    since: str | None = None,
+    event: str | None = None,
+    include_rotated: bool = True,
+    keep: int = DEFAULT_KEEP,
+) -> Iterator[dict[str, Any]]:
+    """Yield events in chronological order, filtered — ACROSS rotated files.
+
+    With ``include_rotated`` (default), reads ``<path>.keep`` … ``<path>.1`` then
+    the live ``<path>`` so a rolled log still reconstructs a continuous timeline
+    (Step 1.8 — closes the obs "reconstruction survives rotation" residual).
+
+    Corruption-tolerant: any line that is not a JSON object is skipped (including a
+    torn trailing line after a crash mid-write). Filters:
+      - ``profile`` — only events for that profile (events with no profile are
+        skipped when a profile filter is given).
+      - ``since``   — only events with ``ts >= since`` (ISO-8601 string compare,
+        which is chronological for this fixed ``...Z`` format).
+      - ``event``   — only events of that name.
+    """
+    path = Path(path)
+    files = rotate_mod.rotated_paths(path, keep=keep) if include_rotated else [path]
+    for fpath in files:
+        for rec in _iter_one_file(fpath):
             if event is not None and rec.get("event") != event:
                 continue
             if profile is not None and rec.get("profile") != profile:

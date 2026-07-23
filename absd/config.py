@@ -80,6 +80,11 @@ class DaemonConfig:
     # window so a session that is still booting is not mistaken for a dead one.
     session_start_grace_s: float = 30.0
 
+    # Log rotation (Step 1.8): daemon.log and events.jsonl rotate at this size,
+    # keeping this many .1/.2/.3 generations.
+    log_max_bytes: int = 5 * 1024 * 1024
+    log_keep: int = 3
+
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping for this config."""
         return asdict(self)
@@ -132,6 +137,10 @@ def validate(cfg: DaemonConfig) -> DaemonConfig:
         raise ConfigError(
             f"session_start_grace_s must be >= 0, got {cfg.session_start_grace_s!r}"
         )
+    if not isinstance(cfg.log_max_bytes, int) or cfg.log_max_bytes < 1024:
+        raise ConfigError(f"log_max_bytes must be an int >= 1024, got {cfg.log_max_bytes!r}")
+    if not isinstance(cfg.log_keep, int) or cfg.log_keep < 1:
+        raise ConfigError(f"log_keep must be an int >= 1, got {cfg.log_keep!r}")
     return cfg
 
 

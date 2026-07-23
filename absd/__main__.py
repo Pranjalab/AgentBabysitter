@@ -136,20 +136,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _setup_logging(daemon_dir: Path, level: str) -> None:
-    """Structured logging to stderr + <daemon_dir>/daemon.log (append).
+def _setup_logging(
+    daemon_dir: Path,
+    level: str,
+    max_bytes: int = _LOG_MAX_BYTES,
+    keep: int = 3,
+) -> None:
+    """Structured logging to stderr + <daemon_dir>/daemon.log with real rotation.
 
-    Applies a crude size cap with one ``.old`` roll before opening the file
-    (full rotation is Step 1.8). Never logs tokens (the client redacts them).
+    Uses a :class:`RotatingFileHandler` (``.1``…``.keep`` generations at
+    ``max_bytes``, Step 1.8). Called first with defaults so startup + config
+    errors are visible; re-called after config load applies the configured sizes.
+    Never logs tokens (the client redacts them).
     """
+    from logging.handlers import RotatingFileHandler
+
     daemon_dir.mkdir(parents=True, exist_ok=True)
     log_path = daemon_dir / "daemon.log"
-    try:
-        if log_path.exists() and log_path.stat().st_size > _LOG_MAX_BYTES:
-            old = log_path.with_suffix(".log.old")
-            os.replace(str(log_path), str(old))
-    except OSError:
-        pass
 
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s", "%Y-%m-%dT%H:%M:%S"
@@ -163,7 +166,9 @@ def _setup_logging(daemon_dir: Path, level: str) -> None:
     root.addHandler(stderr_h)
 
     try:
-        file_h = logging.FileHandler(str(log_path), encoding="utf-8")
+        file_h = RotatingFileHandler(
+            str(log_path), maxBytes=max_bytes, backupCount=keep, encoding="utf-8"
+        )
         file_h.setFormatter(fmt)
         root.addHandler(file_h)
         try:
@@ -418,7 +423,7 @@ async def _amain(args: argparse.Namespace) -> int:
         print(render_daemon_status(read_status_files(daemon_dir)))
         return 0
 
-    _setup_logging(daemon_dir, args.log_level)
+    _setup_logging(daemon_dir, args.log_level)  # bootstrap (default rotation)
     log.info("absd %s starting (abs_home=%s, once=%s)", __version__, abs_home, args.once)
 
     try:
@@ -426,6 +431,8 @@ async def _amain(args: argparse.Namespace) -> int:
     except config_mod.ConfigError as exc:
         log.error("invalid config: %s", exc)
         return 2
+    # Re-apply logging with the configured rotation sizes now the config is known.
+    _setup_logging(daemon_dir, args.log_level, cfg.log_max_bytes, cfg.log_keep)
 
     base_url = os.environ.get("ABS_TELEGRAM_BASE_URL", "https://api.telegram.org")
     home = Path(os.environ.get("HOME") or Path.home())
@@ -445,7 +452,9 @@ async def _amain(args: argparse.Namespace) -> int:
 
     # Structured event log (observability): one shared writer for the daemon,
     # alongside the human-readable daemon.log. Metadata only — never message text.
-    events = EventLog(daemon_dir / "events.jsonl")
+    events = EventLog(
+        daemon_dir / "events.jsonl", max_bytes=cfg.log_max_bytes, keep=cfg.log_keep
+    )
     events.emit(EVENT_DAEMON_START, version=__version__, profiles=[p.name for p in profiles])
 
     pollers = _build_pollers(

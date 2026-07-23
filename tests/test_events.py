@@ -75,15 +75,19 @@ def test_corrupt_trailing_line_tolerated(tmp_path: Path) -> None:
     assert events[0]["event"] == "daemon_start"
 
 
-def test_rotation_rolls_to_old(tmp_path: Path) -> None:
+def test_rotation_rolls_generations(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
-    log = EventLog(path, max_bytes=200)  # tiny cap to force a roll
-    for i in range(50):
+    log = EventLog(path, max_bytes=200, keep=3)  # tiny cap to force rolls
+    for i in range(200):
         log.emit("message_pooled", profile="a", update_id=i)
-    assert path.with_suffix(".jsonl.old").exists()  # rolled once
-    # the live file still holds the most recent events
-    live = list(iter_events(path))
-    assert live and live[-1]["update_id"] == 49
+    # rotated into .1/.2/.3 (logrotate-style), no .4 kept
+    assert (tmp_path / "events.jsonl.1").exists()
+    assert not (tmp_path / "events.jsonl.4").exists()
+    # iter_events reads ACROSS rotated files chronologically; nothing lost from the
+    # kept generations, and the newest event is present.
+    ids = [e["update_id"] for e in iter_events(path)]
+    assert ids == sorted(ids)  # chronological across rotation
+    assert ids[-1] == 199
 
 
 def test_emit_never_raises_on_bad_field(tmp_path: Path) -> None:

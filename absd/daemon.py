@@ -146,6 +146,13 @@ OFF_ACK = "📴 Inbound off. Re-enable from the terminal: abs on"
 BLOCK_ACK = "🔒 Blocked. Re-establish it deliberately from the terminal: abs setup"
 CLEAR_POOL_ACK = "🗑 Pool cleared ({n} message(s) removed)."
 
+# Reboot notification (Step 1.8): a session that did not survive a machine/daemon
+# restart. Sent once per boot, per profile; suppressed for blocked/off profiles.
+REBOOT_NOTICE = (
+    "🔄 Machine or daemon restarted; session {label} did not survive. "
+    "Pool intact ({n}). ABS START to relaunch."
+)
+
 # A resume tap whose recorded folder has since been deleted (Step 2.2 edge case).
 RECENT_GONE_MSG = "📁 That folder no longer exists — I've removed it from recents."
 
@@ -563,6 +570,9 @@ class Poller:
         self._session_started_at: float = 0.0
         self._session_end_reason: str = END_EXITED
         self._reclaim_409s: int = 0
+        #: One-shot boot recovery guard (Step 1.8) — recovery + reboot notice run
+        #: exactly once per process boot, never on an in-process supervisor restart.
+        self._booted = False
         #: Offset value committed by the single HANDOFF commit (test bookkeeping).
         self.handoff_committed_offset: int | None = None
         #: Per-profile status file (Step 1.4) — rewritten atomically each cycle so
@@ -1679,6 +1689,13 @@ class Poller:
             except TelegramError:
                 pass
         self._emit(EVENT_RECLAIM_DONE, backoff_409s=self._reclaim_409s)
+        self._reset_session_fields()
+        # Back to idle-polling — restore the idle "/" menu (Step 2.2).
+        await self._ensure_menu("idle")
+        log.info("poller[%s] RECLAIM complete — polling resumes", self.profile.name)
+
+    def _reset_session_fields(self) -> None:
+        """Clear all SESSION_LIVE/RECLAIM bookkeeping and return to IDLE."""
         self._session_seen_alive = False
         self._handoff_chat_id = None
         self._session_pane_id = None
@@ -1686,10 +1703,107 @@ class Poller:
         self._foreign_warned = False
         self._session_started_at = 0.0
         self._session_end_reason = END_EXITED
-        # Back to idle-polling — restore the idle "/" menu (Step 2.2).
         self._set_state(STATE_IDLE)
-        await self._ensure_menu("idle")
-        log.info("poller[%s] RECLAIM complete — polling resumes", self.profile.name)
+
+    # ---- boot recovery + reboot notification (Step 1.8) ------------------
+
+    def _marker_age_s(self, marker: dict[str, Any]) -> float:
+        """Seconds since the marker's timestamp (wall-clock), or 0 if unparseable —
+        used to derive lived_s across a restart (closes the obs residual)."""
+        from datetime import datetime, timezone
+
+        ts = marker.get("timestamp")
+        if not isinstance(ts, str):
+            return 0.0
+        try:
+            then = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return 0.0
+        return max(0.0, (datetime.now(timezone.utc) - then).total_seconds())
+
+    async def _send_reboot_notice(self, chat_id: int | None, label: str) -> None:
+        """Send the reboot notice (once), suppressed for blocked/off profiles."""
+        if chat_id is None:
+            return
+        if self.profile.is_blocked() or self.profile.is_off():
+            return
+        await self._safe_send(int(chat_id), REBOOT_NOTICE.format(label=label, n=self.pool.count()))
+
+    async def boot_recover_and_notify(self) -> str:
+        """Re-derive full session state from disk at boot (Step 1.8), and send the
+        reboot notice for any session that did not survive. Runs once per process.
+
+        Recovery matrix (marker × recorded pane/pid × session.pid):
+          * marker + recorded pane/pid ALIVE → resume SESSION_LIVE with full FIX B/C
+            precision (recorded pane_id + launcher_pid + chat_id; lived_s derived
+            from the marker timestamp). Closes the 2.2a "not re-derived" residual.
+          * marker + recorded DEAD → the session died while the daemon was down:
+            kill any engine leftover, emit session_end/reclaim_done, clear the
+            marker, send the reboot notice, go IDLE.
+          * no marker + LIVE session.pid → a terminal session (yield; IDLE).
+          * no marker + STALE session.pid → a terminal session that did not survive:
+            reboot notice to the profile's chat, go IDLE.
+          * nothing → IDLE.
+        """
+        if self._booted:
+            return "already"
+        self._booted = True
+
+        marker = self._read_handoff_marker()
+        if marker is not None:
+            pane_id = marker.get("pane_id")
+            launcher_pid = marker.get("launcher_pid")
+            chat_id = marker.get("chat_id")
+            project = str(marker.get("project") or "")
+            label = Path(project).name or self.profile.name
+
+            pane_alive = False
+            if pane_id and self.engine is not None:
+                try:
+                    pane_alive = self.engine.is_alive(self.profile.name, pane_id=pane_id)
+                except EngineError:
+                    pane_alive = False
+            pid_alive = _pid_is_alive(launcher_pid) if isinstance(launcher_pid, int) else False
+
+            if pane_alive or pid_alive:
+                # Survived the restart → resume SESSION_LIVE, full precision.
+                self._session_pane_id = pane_id if isinstance(pane_id, str) else None
+                self._launched_pid = launcher_pid if isinstance(launcher_pid, int) else None
+                self._handoff_chat_id = chat_id
+                self._session_started_at = self._clock() - self._marker_age_s(marker)
+                self._session_seen_alive = True
+                self._set_state(STATE_SESSION_LIVE)
+                await self._ensure_menu("session")
+                log.info(
+                    "boot: poller[%s] recovered LIVE daemon session (pane %s)",
+                    self.profile.name, pane_id,
+                )
+                return "session-live"
+
+            # Recorded but DEAD → the session did not survive. Reclaim + notify.
+            log.warning(
+                "boot: poller[%s] daemon session did not survive — reclaiming",
+                self.profile.name,
+            )
+            lived = int(self._marker_age_s(marker))
+            self._kill_engine_session()
+            self._emit(EVENT_SESSION_END, reason=END_EXITED, lived_s=lived)
+            self._clear_handoff_marker()
+            self._emit(EVENT_RECLAIM_DONE, backoff_409s=0)
+            await self._send_reboot_notice(chat_id, label)
+            self._reset_session_fields()
+            await self._ensure_menu("idle")
+            return "reclaimed"
+
+        # No marker: distinguish a live terminal session from a dead (stale) one.
+        if self.profile.has_stale_session_pid():
+            log.warning(
+                "boot: poller[%s] terminal session did not survive (stale pid)",
+                self.profile.name,
+            )
+            await self._send_reboot_notice(self.profile.chat_id(), self.profile.name)
+            return "stale-terminal"
+        return "idle"
 
     # ---- run loop --------------------------------------------------------
 
@@ -1709,8 +1823,10 @@ class Poller:
         (409 backs off 2,4,8… capped at ``reclaim_backoff_max_s`` and resets on the
         next non-409 outcome; a yield naps :data:`YIELD_RECHECK_S`).
         """
-        # A handoff marker with no live session at startup is stale (2.3 preview).
-        await self.check_stale_handoff()
+        # Boot recovery (Step 1.8): re-derive full state from disk (resume a
+        # surviving daemon session with FIX B/C precision, reclaim a dead one, and
+        # send the reboot notice). Runs once per process; a no-op on restarts.
+        await self.boot_recover_and_notify()
         # Register the "/" menu matching our state at boot (Step 2.2; debounced).
         await self._ensure_menu(
             "session" if self.session_state == STATE_SESSION_LIVE else "idle"
