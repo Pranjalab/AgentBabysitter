@@ -11,9 +11,11 @@ and security model. This package is deliberately stdlib-first (asyncio,
 dataclasses, json, pathlib; aiohttp for HTTP) so it stays cheap to port to
 Rust or TS/Bun later — see PLAN.md section 4.4.
 
-Nothing in this package implements daemon behavior yet: Step 0.1 lays down the
-skeleton, protocol, and types only. The state machine, pollers, engines, and
-Telegram client arrive in later steps.
+As of Step 1.3 the daemon core is live: the Telegram client (:mod:`absd.telegram`),
+per-profile pool (:mod:`absd.pool`), read-only profile discovery
+(:mod:`absd.profiles`), the IDLE_POLLING poller (:mod:`absd.daemon`), and the
+``python -m absd`` entry point (:mod:`absd.__main__`). The ABS START/handoff
+flow, multi-profile stagger tests, and sandbox layers arrive in later steps.
 """
 
 __all__ = ["__version__"]

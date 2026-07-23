@@ -17,6 +17,8 @@ Design notes:
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,16 @@ from typing import Any
 # Allowed values for the engine selector (PLAN.md 4.2 / D4). "auto" resolves to
 # herdr-if-available-and-spike-verified, else tmux.
 ENGINE_CHOICES = ("auto", "herdr", "tmux")
+
+_MODE = 0o600
+
+
+class ConfigError(ValueError):
+    """``config.json`` is present but invalid (bad engine, out-of-range number).
+
+    Raised by :func:`load` so the daemon refuses to start on a corrupt config
+    rather than silently polling with surprising timings.
+    """
 
 
 @dataclass
@@ -74,11 +86,77 @@ class DaemonConfig:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
-def load(path: Path) -> DaemonConfig:
-    """Load and validate a ``config.json`` from disk. (Step 1.3.)
+def validate(cfg: DaemonConfig) -> DaemonConfig:
+    """Validate a config's values; return it unchanged, or raise ``ConfigError``.
 
-    Will: read the file if present (defaults if absent), parse JSON, coerce via
-    ``DaemonConfig.from_dict``, validate ``engine`` against ``ENGINE_CHOICES``
-    and numeric ranges, and enforce 0600 perms. Not implemented yet.
+    Rules (PLAN.md 4.1/4.2/4.5):
+      - ``engine`` must be one of :data:`ENGINE_CHOICES`.
+      - ``max_sessions`` >= 1.
+      - ``poll_timeout_s`` in [0, 300] (0 = short poll; Telegram caps ~50).
+      - ``poll_stagger_s`` >= 0.
+      - ``reclaim_grace_s`` >= 0.
+      - ``reclaim_backoff_max_s`` >= ``reclaim_grace_s`` (the cap must not sit
+        below the initial grace, or backoff maths is nonsense).
     """
-    raise NotImplementedError("config loading lands in Step 1.3")
+    if cfg.engine not in ENGINE_CHOICES:
+        raise ConfigError(
+            f"engine must be one of {ENGINE_CHOICES}, got {cfg.engine!r}"
+        )
+    if not isinstance(cfg.max_sessions, int) or cfg.max_sessions < 1:
+        raise ConfigError(f"max_sessions must be an int >= 1, got {cfg.max_sessions!r}")
+    if not (0 <= cfg.poll_timeout_s <= 300):
+        raise ConfigError(f"poll_timeout_s must be in [0, 300], got {cfg.poll_timeout_s!r}")
+    if cfg.poll_stagger_s < 0:
+        raise ConfigError(f"poll_stagger_s must be >= 0, got {cfg.poll_stagger_s!r}")
+    if cfg.reclaim_grace_s < 0:
+        raise ConfigError(f"reclaim_grace_s must be >= 0, got {cfg.reclaim_grace_s!r}")
+    if cfg.reclaim_backoff_max_s < cfg.reclaim_grace_s:
+        raise ConfigError(
+            "reclaim_backoff_max_s must be >= reclaim_grace_s "
+            f"({cfg.reclaim_backoff_max_s!r} < {cfg.reclaim_grace_s!r})"
+        )
+    return cfg
+
+
+def load(path: Path) -> DaemonConfig:
+    """Load and validate ``config.json`` from ``path``.
+
+    - **Missing file** → defaults (a fresh install with no config yet is valid).
+    - **Present** → parse JSON, coerce via :meth:`DaemonConfig.from_dict`
+      (unknown keys ignored, PLAN.md 4.4), validate values (:func:`validate`),
+      and enforce 0600 perms on the file (pool/config are local user data,
+      PLAN.md 5.5). A file that is not a JSON object, or whose values are
+      out of range, raises :class:`ConfigError`.
+    """
+    path = Path(path)
+    if not path.exists():
+        return DaemonConfig()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise ConfigError(f"{path}: unreadable/invalid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: top-level JSON must be an object, got {type(raw).__name__}")
+    cfg = validate(DaemonConfig.from_dict(raw))
+    # Config carries no secrets, but the daemon tree is 0600/0700 throughout
+    # (PLAN.md 4.3); tighten a loosely-created file rather than trust its mode.
+    try:
+        os.chmod(path, _MODE)
+    except OSError:
+        pass
+    return cfg
+
+
+def save(path: Path, cfg: DaemonConfig) -> None:
+    """Write ``cfg`` to ``path`` as pretty JSON, 0600 (used by ``abs`` tooling)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _MODE)
+    try:
+        os.write(fd, (json.dumps(cfg.to_dict(), indent=2) + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+    os.chmod(path, _MODE)

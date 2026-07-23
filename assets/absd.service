@@ -1,0 +1,36 @@
+# Agent Babysitter always-on daemon (absd) — systemd USER unit.
+#
+# Rendered and installed by `abs daemon install` to
+#   ~/.config/systemd/user/absd.service
+# with the @@ placeholders substituted. It is NOT enabled or started by the
+# installer — you enable/start it deliberately (see the instructions printed by
+# `abs daemon install`). This is a user unit: it runs as your login user, needs
+# no root, and (with linger enabled) survives logout.
+#
+# %h expands to your home directory at unit-load time, so the daemon's ABS_HOME
+# defaults to ~/.abs without hardcoding a path here.
+
+[Unit]
+Description=Agent Babysitter always-on daemon (absd)
+Documentation=https://github.com/Pranjalab/AgentBabysitter
+# Start after the user session's basic targets are up.
+After=default.target
+
+[Service]
+Type=simple
+# @@PYTHON@@  = absolute path to the repo venv interpreter (…/.venv/bin/python)
+# @@ABSROOT@@ = repo root containing the absd/ package (set on PYTHONPATH so the
+#               daemon imports regardless of the working directory).
+Environment=PYTHONPATH=@@ABSROOT@@
+Environment=ABS_HOME=%h/.abs
+ExecStart=@@PYTHON@@ -m absd
+# Restart on crash, but not on a clean exit or an explicit stop (Step 1.8 hardens
+# crash recovery + state re-derivation on top of this).
+Restart=on-failure
+RestartSec=3
+# Do not let a flapping daemon spin: give up after too many rapid restarts.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=default.target

@@ -2496,15 +2496,95 @@ cmd_run() {
 }
 
 # `abs daemon` — control surface for the v3 always-on daemon (absd): the
-# install|start|stop|status|logs verbs that manage the single background process
-# polling every idle bot. Not built yet — absd is a Python asyncio daemon that
-# lands in Phase 1 of PLAN.md. This stub exists so the verb is discoverable and
-# so callers get a clean, explained non-zero exit instead of "Unknown command"
-# while v3 is in flight. It needs no profile and no jq, so dispatch handles it
-# before either is resolved. See PLAN.md sections 4 and 6.
+# install|start|stop|status|logs|run verbs that manage the single background
+# process polling every idle bot. absd is a Python asyncio daemon (absd/ package,
+# PLAN.md sections 4/7). It needs no profile and no jq, so dispatch handles it
+# before either is resolved.
+#
+# install renders the systemd USER unit and reloads the daemon but deliberately
+# does NOT enable or start it — that is a decision you make at the terminal after
+# reading the printed instructions (and the linger note, so the daemon can
+# survive logout). start/stop/status/logs are thin `systemctl --user` wrappers;
+# run is a foreground debug launch (no systemd).
 cmd_daemon() {
-  info "absd: not implemented yet — see PLAN.md"
-  exit 1
+  local sub="${1:-status}"; shift || true
+  local root py unit_src unit_dst cfg_home
+  root="$(dirname "$SCRIPT_PATH")"
+  py="$root/.venv/bin/python"
+  unit_src="$root/assets/absd.service"
+  cfg_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  unit_dst="$cfg_home/systemd/user/absd.service"
+
+  case "$sub" in
+    install)
+      [ -x "$py" ] || die "absd needs $root/.venv (Python 3.11+). Not found."
+      [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root)."
+      [ -f "$unit_src" ] || die "Unit template missing: $unit_src"
+      mkdir -p "$cfg_home/systemd/user"
+      # Substitute the two placeholders. Use a non-/ sed delimiter since the
+      # values are absolute paths.
+      sed -e "s#@@PYTHON@@#$py#g" -e "s#@@ABSROOT@@#$root#g" "$unit_src" > "$unit_dst"
+      chmod 644 "$unit_dst"
+      systemctl --user daemon-reload 2>/dev/null || warn "systemctl --user daemon-reload failed (no user systemd?)."
+      ok "Installed user unit: $unit_dst"
+      # Linger controls whether user services keep running after you log out.
+      local linger
+      linger="$(loginctl show-user "$USER" --property=Linger 2>/dev/null | cut -d= -f2)"
+      if [ "$linger" = "yes" ]; then
+        info "Linger is ${c_green}enabled${c_reset} — the daemon will survive logout."
+      else
+        warn "Linger is OFF — the daemon stops when you log out."
+        info "  Enable it (needs sudo, once): ${c_bold}sudo loginctl enable-linger $USER${c_reset}"
+      fi
+      step "Next steps (run these yourself — install did NOT start anything):"
+      info "  ${c_bold}systemctl --user enable absd${c_reset}    # start on login"
+      info "  ${c_bold}systemctl --user start absd${c_reset}     # start now"
+      info "  ${c_bold}abs daemon status${c_reset}               # check it"
+      exit 0
+      ;;
+    start)
+      systemctl --user start absd && ok "absd started." || die "Could not start absd."
+      exit 0
+      ;;
+    stop)
+      systemctl --user stop absd && ok "absd stopped." || die "Could not stop absd."
+      exit 0
+      ;;
+    status)
+      systemctl --user status absd --no-pager 2>/dev/null || warn "absd unit not found or not running (try: abs daemon install)."
+      # Per-profile poller offset summary, if the daemon has written any state.
+      local dd="$ABS_HOME/daemon" f name
+      if [ -d "$dd" ]; then
+        local shown=0
+        for f in "$dd"/poller-*.json; do
+          [ -f "$f" ] || continue
+          name="$(basename "$f" .json)"; name="${name#poller-}"
+          info "  poller $name: $(cat "$f" 2>/dev/null)"
+          shown=1
+        done
+        [ "$shown" = 1 ] || info "  (no per-profile poller state yet)"
+      fi
+      exit 0
+      ;;
+    logs)
+      # Prefer the journal; fall back to tailing the daemon's own log file.
+      if journalctl --user -u absd -n 200 --no-pager 2>/dev/null; then
+        exit 0
+      fi
+      local logf="$ABS_HOME/daemon/daemon.log"
+      [ -f "$logf" ] || die "No journal for absd and no $logf yet."
+      tail -n 200 "$logf"
+      exit 0
+      ;;
+    run)
+      [ -x "$py" ] || die "absd needs $root/.venv (Python 3.11+). Not found."
+      [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root)."
+      exec env PYTHONPATH="$root" "$py" -m absd "$@"
+      ;;
+    *)
+      die "Usage: abs daemon install|start|stop|status|logs|run"
+      ;;
+  esac
 }
 
 # v3 engine adapter shims. `abs sessions` and `abs attach [profile]` shell into
@@ -2571,7 +2651,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
 
   ${c_bold}abs${c_reset} sessions            List engine sessions (v3; --json for scripts)
   ${c_bold}abs${c_reset} attach [profile]    Attach to a running session (v3)
-  ${c_bold}abs${c_reset} daemon              Always-on daemon (v3, not implemented yet — see PLAN.md)
+  ${c_bold}abs${c_reset} daemon install|start|stop|status|logs|run
+                          Always-on daemon: polls idle bots, pools messages (v3)
   ${c_bold}abs${c_reset} update              Update abs in place to the latest release
   ${c_bold}abs${c_reset} reset               Delete this profile's token, allowlist and state
   ${c_bold}abs${c_reset} version             Print the installed version
@@ -2613,8 +2694,9 @@ main() {
   case "$cmd" in
     help|-h|--help) cmd_help; return 0 ;;
     version|--version|-V) printf 'Agent Babysitter %s\n' "$ABS_VERSION"; return 0 ;;
-    # daemon is a v3 stub: it needs no profile and no jq, and exits 1 itself.
-    daemon) cmd_daemon ;;
+    # daemon: v3 always-on daemon control; needs no profile and no jq, and each
+    # subcommand exits itself (install/start/stop/status/logs) or execs (run).
+    daemon) shift; cmd_daemon "$@" ;;
     # v3 engine shims: no profile, no jq — they exec the Python adapter.
     sessions|attach) cmd_engine "$@" ;;
   esac

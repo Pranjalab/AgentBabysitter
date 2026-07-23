@@ -1,13 +1,14 @@
-"""Scaffolding sanity: the Step 0.1 package skeleton imports and is shaped right.
+"""Scaffolding sanity: the absd package imports and is shaped right.
 
-These lock the surface the daemon (Step 1.3+) and later steps build on. No I/O,
-no network. Stubs are expected to raise ``NotImplementedError`` — that is the
-contract for this step, not a bug.
+Locks the surface the daemon and later steps build on. The Step 0.1 stubs are
+now implemented (Step 1.3); these tests assert the real behavior with no network
+(the entry-point smoke uses a temp ABS_HOME with no profiles, so no client is
+ever built and nothing reaches Telegram).
 """
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
 from absd.engines import Engine, SessionInfo
 
@@ -51,33 +52,34 @@ def test_session_info_round_trip() -> None:
     assert info.cwd is None
 
 
-def test_main_stub_reports_not_implemented() -> None:
-    """The daemon entry stub exits non-zero (nothing starts polling yet)."""
+def test_main_once_no_profiles_returns_zero(tmp_path: Path) -> None:
+    """The real entry point runs cleanly with --once against an empty temp home.
+
+    No profiles ⇒ no Telegram client is built ⇒ no network. Proves the wiring
+    (arg parse → config load → discover → run) holds together and exits 0.
+    """
     from absd.__main__ import main
 
-    assert main([]) == 1
+    assert main(["--abs-home", str(tmp_path / "abs"), "--once"]) == 0
 
 
-def test_stubs_raise_not_implemented() -> None:
-    """Placeholder modules expose the surface but no logic yet."""
-    from pathlib import Path
-
-    from absd.config import load
+def test_modules_are_implemented(tmp_path: Path) -> None:
+    """The former stubs now have real behavior (Step 1.3)."""
+    from absd.config import DaemonConfig, load
     from absd.pool import Pool, PooledMessage
     from absd.telegram import TelegramClient
 
-    with pytest.raises(NotImplementedError):
-        load(Path("/nonexistent/config.json"))
+    # config.load: missing file → defaults (no crash).
+    assert load(tmp_path / "config.json") == DaemonConfig()
 
-    pool = Pool(Path("/nonexistent/pool.jsonl"))
-    with pytest.raises(NotImplementedError):
-        pool.read_all()
-    with pytest.raises(NotImplementedError):
-        pool.append(
-            PooledMessage(update_id=1, from_id=2, text="hi", received_at="1970-01-01T00:00:00Z")
-        )
+    # pool: append/read round-trips.
+    pool = Pool(tmp_path / "pool.jsonl")
+    assert pool.append(
+        PooledMessage(update_id=1, from_id=2, text="hi", received_at="1970-01-01T00:00:00Z")
+    ) == 1
+    assert pool.read_all()[0].text == "hi"
 
-    # The Telegram client stub constructs (token stored, not logged) but has no
-    # implemented calls yet; it is driven against fake_telegram in later steps.
+    # Telegram client: token is private and never surfaced via repr (5.5).
     client = TelegramClient(token="x", base_url="http://127.0.0.1:0")
-    assert client.token == "x"
+    assert "token" not in repr(client) or "redacted" in repr(client)
+    assert not hasattr(client, "token")  # not a public attribute anymore
