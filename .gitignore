@@ -31,6 +31,10 @@ inbox/
 # builds on Python <3.10, so TTS lives in its own 3.11 env. See README.
 .venv/
 .venv-tts/
+# Third: kokoro. Separate again because it needs CPU-only torch and Python 3.12
+# (spacy has no 3.13 wheels), and mixing it into .venv-tts would drag the CUDA
+# build around and risk breaking a working chatterbox install.
+.venv-kokoro/
 __pycache__/
 *.py[cod]
 
