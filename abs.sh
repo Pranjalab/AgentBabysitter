@@ -101,6 +101,231 @@ warn() { printf '%s!%s %s\n' "$c_yellow" "$c_reset" "$*" >&2; }
 die()  { printf '%s✗%s %s\n' "$c_red" "$c_reset" "$*" >&2; exit 1; }
 step() { printf '\n%s%s%s\n' "$c_bold" "$*" "$c_reset" >&2; }
 
+# --- interactive menu ---------------------------------------------------------
+#
+# One arrow-key picker behind every list this script offers. ↑/↓ (or k/j) move the
+# highlight, Enter takes it, and the plain number the old prompts wanted still
+# works — typing `2` selects the second row exactly as it always did, so nobody
+# has to relearn anything.
+#
+# It degrades rather than breaks. Whenever raw-key reading would be wrong or
+# impossible — stderr is not a terminal, TERM=dumb, ABS_NO_TUI=1, no /dev/tty —
+# every caller silently gets the old numbered prompt back. That matters: these
+# same functions run under `docker exec` without -t, over pipes, and in CI.
+
+MENU_INDEX=-1                      # chosen 0-based index; -1 when backed out
+
+# How long to wait for the rest of an escape sequence before calling it a bare
+# Escape. bash 3.2 — which is what stock macOS ships — rejects a fractional
+# `read -t` outright ("invalid timeout specification"), and would print that error
+# into the middle of the drawn menu on every arrow press. A whole second there is
+# the cost of a bare Escape feeling sluggish on one platform; the alternative was
+# the arrow keys not working at all on it.
+_MENU_ESC_WAIT=0.15
+case "${BASH_VERSION:-}" in 3.*) _MENU_ESC_WAIT=1 ;; esac
+readonly _MENU_ESC_WAIT
+
+# Raw keys are only safe to read when we own a real terminal AND the drawing we
+# do lands on it. Both halves matter: /dev/tty can exist while fd 2 is a log file.
+_menu_interactive() {
+  if [ "${ABS_NO_TUI:-0}" = "1" ]; then return 1; fi
+  [ -t 2 ] || return 1
+  [ -r /dev/tty ] || return 1
+  case "${TERM:-}" in ''|dumb) return 1 ;; esac
+  return 0
+}
+
+_menu_cols() {
+  local w=""
+  w="$(tput cols 2>/dev/null || true)"
+  case "$w" in ''|*[!0-9]*) w=80 ;; esac
+  [ "$w" -ge 30 ] || w=80
+  printf '%s' "$w"
+}
+
+# Labels carry colour, so their byte length is not their printed width. Strip the
+# escapes to measure, and if a row would wrap, keep the plain text and drop the
+# colour — a wrapped row would desync the cursor arithmetic and smear the menu.
+#
+# Control characters go first. A label is a project name or a folder path, so a
+# newline in one is unlikely — but it would split the row in two and put the
+# highlight on a line other than the one being pointed at, which is a worse bug
+# than a smear. Everything below 0x20 goes except ESC, which the colour codes need.
+# Labels come from folder paths and project names, so they can hold anything a
+# filename can — including escape sequences. Colour is legitimate here (callers
+# pass $c_yellow markers), so keep SGR, `\033[…m`, and drop every other escape:
+# a label must not be able to clear the screen, move the cursor, or split its own
+# row. Control characters below ESC go entirely.
+#
+# Protect, strip, restore: the colour codes are lifted out to a placeholder, every
+# remaining control byte (ESC included) is deleted outright, then the colour is put
+# back. Trying to express "every escape except SGR" as one bracket expression is
+# where portability goes to die — `[@-Za-ln-~]` is rejected by GNU sed.
+_menu_clean() {
+  printf '%s' "$1" \
+    | sed -E $'s/\033\\[([0-9;]*)m/\001\\1\002/g' \
+    | tr -d '\000\003-\037' \
+    | sed -E $'s/\001([0-9;]*)\002/\033[\\1m/g'
+}
+
+# Printed columns, not characters. An emoji or a CJK glyph occupies two columns
+# while counting as one character, and a row that overflows by even one column
+# wraps — which turns the fixed "move up N+1 lines" redraw into a smear, with the
+# highlight landing on a row other than the one being pointed at.
+#
+# The test is on UTF-8 lead bytes in the C locale, because that is the only way to
+# ask this question with tools that exist on both GNU and BSD: \343-\351 covers
+# kana through the CJK ideographs, \360-\364 covers everything above the BMP,
+# which is where the emoji live. Deliberately not exhaustive — the arrows and
+# ellipsis this script draws (\342…) are left as one column, which is right.
+_menu_cells() {
+  local s="$1" wide
+  wide="$(printf '%s' "$s" | LC_ALL=C tr -dc '\343-\351\360-\364' | wc -c | tr -d '[:space:]')"
+  case "$wide" in ''|*[!0-9]*) wide=0 ;; esac
+  printf '%s' "$(( ${#s} + wide ))"
+}
+
+_menu_fit() {
+  local label="$1" max="$2" plain cells n
+  plain="$(printf '%s' "$label" | sed $'s/\033\\[[0-9;]*m//g')"
+  cells="$(_menu_cells "$plain")"
+  if [ "$cells" -le "$max" ]; then printf '%s' "$label"; return 0; fi
+  # Guess proportionally, then walk down. Two or three iterations, not one per
+  # character — this runs once per row when the menu is built.
+  n=$(( (${#plain} * (max - 1)) / cells ))
+  [ "$n" -ge 0 ] || n=0
+  while [ "$n" -gt 0 ]; do
+    cells="$(_menu_cells "${plain:0:$n}")"
+    if [ "$((cells + 1))" -le "$max" ]; then break; fi
+    n=$((n - 1))
+  done
+  printf '%s…' "${plain:0:$n}"
+}
+
+# One keypress → one word. Escape sequences arrive as three reads (ESC, [, A), so
+# a bare Escape is told apart from an arrow by whether more bytes follow.
+_menu_read_key() {
+  local k rest
+  IFS= read -rsn1 k < /dev/tty || { printf 'quit'; return 0; }
+  case "$k" in
+    ''|' ') printf 'enter' ;;
+    $'\033')
+      if ! IFS= read -rsn2 -t "$_MENU_ESC_WAIT" rest < /dev/tty; then printf 'quit'; return 0; fi
+      case "$rest" in
+        '[A'|'OA') printf 'up' ;;
+        '[B'|'OB') printf 'down' ;;
+        '[H'|'OH') printf 'home' ;;
+        '[F'|'OF') printf 'end' ;;
+        *)         printf 'other' ;;
+      esac ;;
+    k|K) printf 'up' ;;
+    j|J) printf 'down' ;;
+    q|Q) printf 'quit' ;;
+    *)   printf 'char:%s' "$k" ;;
+  esac
+}
+
+_menu_show_cursor() { printf '\033[?25h' >&2; }
+_menu_on_int()      { _menu_show_cursor; exit 130; }
+
+# Paint the item block. Every line is cleared first so a shorter row can never
+# leave the tail of a longer one behind.
+_menu_paint() {
+  local sel="$1" i
+  for i in $(seq 0 $((_MENU_N - 1))); do
+    if [ "$i" -eq "$sel" ]; then
+      printf '\033[2K%s❯%s %s%s%s\n' "$c_cyan" "$c_reset" "$c_bold" "${_MENU_ITEMS[$i]}" "$c_reset" >&2
+    else
+      printf '\033[2K  %s\n' "${_MENU_ITEMS[$i]}" >&2
+    fi
+  done
+  printf '\033[2K  %s%s%s\n' "$c_dim" "$_MENU_HINT" "$c_reset" >&2
+}
+
+# The old prompt, kept whole for every non-terminal caller.
+_menu_fallback() {
+  local default="$1" i c
+  for i in $(seq 0 $((_MENU_N - 1))); do
+    info "  $((i + 1)). ${_MENU_ITEMS[$i]}"
+  done
+  printf '  Choice [Enter=%s]: ' "$((default + 1))" >&2
+  if [ -r /dev/tty ]; then read -r c < /dev/tty || c=""; else read -r c || c=""; fi
+  [ -n "$c" ] || c=$((default + 1))
+  if printf '%s' "$c" | grep -qE '^[0-9]+$' && [ "$c" -ge 1 ] && [ "$c" -le "$_MENU_N" ]; then
+    MENU_INDEX=$((c - 1))
+    return 0
+  fi
+  MENU_INDEX=-1
+  return 1
+}
+
+# menu_select "<title>" <default-index> <item> [item…]
+# Sets MENU_INDEX. Returns 1 when the user backed out (Esc/q, or junk typed at
+# the fallback prompt) — callers decide what backing out means.
+menu_select() {
+  local title="$1" default="$2"; shift 2
+  _MENU_ITEMS=("$@")
+  _MENU_N=${#_MENU_ITEMS[@]}
+  MENU_INDEX=-1
+  [ "$_MENU_N" -gt 0 ] || return 1
+  local k
+  for k in $(seq 0 $((_MENU_N - 1))); do
+    _MENU_ITEMS[$k]="$(_menu_clean "${_MENU_ITEMS[$k]}")"
+  done
+  case "$default" in ''|*[!0-9]*) default=0 ;; esac
+  [ "$default" -lt "$_MENU_N" ] || default=0
+
+  if [ -n "$title" ]; then step "$title"; fi
+
+  if ! _menu_interactive; then
+    _menu_fallback "$default"
+    return
+  fi
+
+  local cols i
+  cols="$(_menu_cols)"
+  for i in $(seq 0 $((_MENU_N - 1))); do
+    _MENU_ITEMS[$i]="$(_menu_fit "${_MENU_ITEMS[$i]}" "$((cols - 4))")"
+  done
+  _MENU_HINT="↑↓ move · enter select · 1-9 jump · q cancel"
+  _MENU_HINT="$(_menu_fit "$_MENU_HINT" "$((cols - 4))")"
+
+  local sel="$default" first=1 key d
+  printf '\033[?25l' >&2
+  trap '_menu_on_int' INT
+  while :; do
+    if [ "$first" = 1 ]; then first=0; else printf '\033[%dA' "$((_MENU_N + 1))" >&2; fi
+    _menu_paint "$sel"
+    key="$(_menu_read_key)"
+    case "$key" in
+      up)    sel=$(( (sel - 1 + _MENU_N) % _MENU_N )) ;;
+      down)  sel=$(( (sel + 1) % _MENU_N )) ;;
+      home)  sel=0 ;;
+      end)   sel=$((_MENU_N - 1)) ;;
+      enter) MENU_INDEX=$sel; break ;;
+      quit)  MENU_INDEX=-1; break ;;
+      char:[1-9])
+        d="${key#char:}"
+        if [ "$d" -le "$_MENU_N" ]; then MENU_INDEX=$((d - 1)); break; fi ;;
+      *) : ;;
+    esac
+  done
+  trap - INT
+  _menu_show_cursor
+
+  # Collapse the block to a single line: the transcript keeps what was chosen
+  # without keeping the whole menu.
+  printf '\033[%dA' "$((_MENU_N + 1))" >&2
+  for i in $(seq 0 "$_MENU_N"); do printf '\033[2K\n' >&2; done
+  printf '\033[%dA' "$((_MENU_N + 1))" >&2
+  if [ "$MENU_INDEX" -ge 0 ]; then
+    printf '  %s❯%s %s\n' "$c_cyan" "$c_reset" "${_MENU_ITEMS[$MENU_INDEX]}" >&2
+    return 0
+  fi
+  printf '  %scancelled%s\n' "$c_dim" "$c_reset" >&2
+  return 1
+}
+
 # --- telegram api ------------------------------------------------------------
 #
 # The bot token is a bearer credential and Telegram puts it in the URL path.
@@ -307,35 +532,27 @@ pick_profile() {
     return 0
   fi
 
-  step "Which bot?"
-  local i=1
+  local rows=()
   for n in "${names[@]}"; do
     use_profile "$n"
     local bot live tag=""
     bot="$(jq -r '.bot // "?"' "$ABS_STATE" 2>/dev/null || echo '?')"
     live="$(profile_live_pid)"
     if [ -n "$live" ]; then tag=" ${c_yellow}(in use, pid $live)${c_reset}"; fi
-    info "  $i) ${c_bold}$n${c_reset} — @${bot}${tag}"
-    i=$((i + 1))
+    rows+=("$n — @${bot}${tag}")
   done
-  info "  n) add a new bot"
-  info ""
+  rows+=("+ Add a new bot")
 
-  local choice=""
-  read -rp "Choose [1-${#names[@]} or n]: " choice < /dev/tty
-  case "$choice" in
-    n|N)
-      local newname=""
-      read -rp "Name for the new profile: " newname < /dev/tty
-      [ -n "$newname" ] || die "No name given."
-      use_profile "$newname"
-      ;;
-    ''|*[!0-9]*) die "Not a choice: '$choice'" ;;
-    *)
-      [ "$choice" -ge 1 ] && [ "$choice" -le "${#names[@]}" ] || die "Out of range: $choice"
-      use_profile "${names[$((choice - 1))]}"
-      ;;
-  esac
+  menu_select "Which bot?" 0 "${rows[@]}" || die "Cancelled."
+  if [ "$MENU_INDEX" -eq "${#names[@]}" ]; then
+    local newname=""
+    printf '  Name for the new profile: ' >&2
+    read -r newname < /dev/tty || newname=""
+    [ -n "$newname" ] || die "No name given."
+    use_profile "$newname"
+  else
+    use_profile "${names[$MENU_INDEX]}"
+  fi
 }
 
 # --- preflight ---------------------------------------------------------------
@@ -737,6 +954,27 @@ build_prompt() {
   # install they don't (voice is an opt-in add-on), and asserting a working
   # pipeline there is what made the agent walk into dead paths and refuse to work
   # around them. So swap in an honest "not set up" block when it isn't built.
+  # Reply mode is enforced by the hooks whatever the model believes, so this
+  # paragraph exists for one reason only: to stop the model ALSO calling `abs say`
+  # and sending the same sentence twice.
+  local reply_mode_section=""
+  case "$(reply_mode)" in
+    both) reply_mode_section="
+Reply mode is 'both' (abs config reply). ABS already mirrors every \`reply\` you
+send as a voice note, automatically, from a hook — you do not have to remember it
+and you must NOT run \`abs say\` for a reply as well, or they get it twice. Write
+the reply as normal text and let the mirror do the speaking.
+" ;;
+    voice) reply_mode_section="
+Reply mode is 'voice' (abs config reply). ABS speaks every \`reply\` you send and
+suppresses the text. The tool will come back as BLOCKED with a note saying it was
+delivered as audio — that is success, not failure: do not resend, do not fall back
+to another channel, and do not run \`abs say\` yourself. Messages carrying a code
+block, a link, or an attachment are let through as text instead, because a voice
+note cannot carry them; put anything they need to copy or tap in one of those.
+" ;;
+  esac
+
   local voice_section
   if voice_have; then
     voice_section="$(cat <<VOICEON
@@ -762,7 +1000,7 @@ Outbound, only when they ask for a voice answer:
 That synthesizes and sends the voice bubble itself, so do not also \`reply\` with
 the same words. Never attach audio with \`reply\` — it lands as a document, not a
 playable voice note. Synthesis takes ~30s and holds the GPU.
-
+${reply_mode_section}
 You cannot hear what you generated. If it matters, run the output back through
 transcribe.py and confirm the words survived — that catches truncation and
 garbling. On tone you are guessing; say so rather than claiming it sounds good.
@@ -1070,6 +1308,187 @@ cmd_statusline() {
   return 0
 }
 
+# --- reply mode: voice that doesn't depend on remembering ---------------------
+#
+# "Always answer me in voice" used to be a note in the model's prompt, which is
+# exactly the kind of standing instruction a long session drifts away from. This
+# moves it out of the model's hands: `abs config reply` is a stored setting, and
+# the hooks enforce it on every outbound Telegram message whether the model
+# remembers or not.
+#
+#   text   every reply is text (the default — today's behaviour)
+#   both   the text goes out, and a voice note of it follows
+#   voice  the voice note IS the reply; the text is suppressed
+#
+# `voice` still lets some messages through as text — see _voice_speakable. A
+# voice note cannot carry a command to copy, a link to tap, or a screenshot, and
+# silently dropping one would lose it for good.
+
+readonly VOICE_MIRROR_MAX="${ABS_VOICE_MAX_CHARS:-1200}"
+
+reply_mode() {
+  local m; m="$(state_get '.reply_mode')"
+  case "$m" in both|voice) printf '%s' "$m" ;; *) printf 'text' ;; esac
+}
+
+# Markdown reads terribly out loud: asterisks become "star", a URL becomes a
+# minute of alphabet, a code fence becomes noise. Strip the syntax and keep the
+# prose. Deliberately blunt — this feeds a speech engine, not a parser.
+_voice_prep() {
+  printf '%s' "$1" \
+    | sed -E 's/^```.*$/ code block. /' \
+    | sed -E 's/`([^`]*)`/\1/g' \
+    | sed -E 's/!?\[([^]]*)\]\([^)]*\)/\1/g' \
+    | sed -E 's#https?://[^[:space:]]+# link #g' \
+    | sed -E 's/\*\*([^*]*)\*\*/\1/g; s/\*([^*]*)\*/\1/g' \
+    | sed -E 's/^[[:space:]]*#+[[:space:]]*//' \
+    | sed -E 's/^[[:space:]]*[-*•][[:space:]]+//' \
+    | sed -E 's/[_~>]+//g' \
+    | tr '\n' ' ' \
+    | tr -d '\000-\010\013\014\016-\037' \
+    | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+# Is there enough here to be worth a voice note at all? A bare "👍" or "ok" costs
+# thirty seconds of synthesis and the lock, and arrives as a grunt. Both the gate
+# and the mirror ask this, so they agree on what counts as sayable — if the gate
+# suppressed the text, the mirror must not then decide there was nothing to say.
+_voice_worth_saying() {
+  [ "${#1}" -ge 8 ]
+}
+
+# Is this message safe to deliver as voice INSTEAD of text? Only asked in `voice`
+# mode. Anything the operator might need to copy, tap, or look at stays text.
+_voice_speakable() {
+  local text="$1" prepped
+  printf '%s' "$text" | grep -q '```' && return 1          # code to copy
+  printf '%s' "$text" | grep -qE 'https?://' && return 1   # a link to tap
+  [ "${#text}" -le "$VOICE_MIRROR_MAX" ] || return 1       # too long to listen to
+  prepped="$(_voice_prep "$text")"
+  _voice_worth_saying "$prepped" || return 1
+  return 0
+}
+
+# Speak one outbound reply. Called backgrounded from the hooks, so it must never
+# write to stdout, never fail loudly, and never block the turn.
+#
+# Serialised behind a lock: synthesis holds a GPU (chatterbox) or a core for tens
+# of seconds, and two replies in quick succession would otherwise fight over it.
+# The lock stops them overlapping — it does NOT promise an order, since flock is
+# not FIFO. If a queued note waits out the timeout it counts as a failure, which
+# in `voice` mode means the words go out as text rather than being dropped.
+_voice_mirror() {
+  local original="$1" prepped hash last_hash last_ts now rc=0
+  prepped="$(_voice_prep "$original")"
+  _voice_worth_saying "$prepped" || return 0
+  [ "${#prepped}" -le "$VOICE_MIRROR_MAX" ] \
+    || prepped="$(printf '%s' "${prepped:0:$VOICE_MIRROR_MAX}" | sed -E 's/[^ ]*$//')… the rest is in the text."
+
+  hash="$(printf '%s' "$prepped" | cksum | cut -d' ' -f1)"
+  now="$(date +%s)"
+
+  # Skipping a repeat stops a model that ALSO ran `abs say` from sending the same
+  # note twice — worth having when the text went out as well. In `voice` mode the
+  # note is the only copy of the message that exists, so "we already said that"
+  # must never be allowed to mean "say nothing": the operator would simply never
+  # receive their second "pushed, tests green".
+  if [ "$(reply_mode)" != "voice" ]; then
+    last_hash="$(state_get '.last_voice_hash')"
+    last_ts="$(state_get '.last_voice_mirror_ts')"
+    case "$last_ts" in ''|null|*[!0-9]*) last_ts=0 ;; esac
+    if [ "$hash" = "$last_hash" ] && [ "$((now - last_ts))" -lt 300 ]; then return 0; fi
+  fi
+
+  local lock="$ABS_DIR/voice.lock"
+  mkdir -p "$ABS_DIR" 2>/dev/null || true
+  # The text goes over stdin, never in argv: a reply can quote anything the
+  # operator pasted, and argv is world-readable through /proc for as long as
+  # synthesis runs. `-` is how both TTS scripts (and cmd_say) ask for stdin.
+  #
+  # flock is Linux-only; on macOS the notes just aren't serialised, which is a
+  # weaker ordering guarantee, not a failure.
+  if command -v flock >/dev/null 2>&1; then
+    printf '%s' "$prepped" | flock -w 180 "$lock" -c "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+  else
+    printf '%s' "$prepped" | eval "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    # Stamped only on success, and only here: .last_voice_ts (cmd_say's) means "a
+    # note really went out" and drives the status bar. Recording the hash before
+    # the attempt would let one failed synthesis suppress every retry of that
+    # sentence for five minutes.
+    state_set --arg h "$hash" --argjson t "$(date +%s)" \
+      '.last_voice_hash = $h | .last_voice_mirror_ts = $t' 2>/dev/null || true
+    return 0
+  fi
+
+  # Synthesis or delivery failed. In `voice` mode the text was suppressed on the
+  # promise that audio would arrive, so send the words rather than let the message
+  # vanish. In the other modes the text is already on their phone.
+  if [ "$(reply_mode)" = "voice" ]; then _voice_fallback_text "$original"; fi
+  return 0
+}
+
+# Last resort when the voice note could not be produced: deliver the words as
+# text, straight from here. Best-effort and silent — this runs detached.
+_voice_fallback_text() {
+  local cid
+  cid="$(state_get '.chat_id')"
+  { [ -n "$cid" ] && [ "$cid" != null ]; } || return 0
+  load_token 2>/dev/null || return 0
+  tg_send "$cid" "🔇 (voice failed — here it is as text)"$'\n\n'"$1" >/dev/null 2>&1 || true
+}
+
+# The command that actually speaks. It is invoked with a trailing `-` and the text
+# on stdin. A seam: the tests point it at a stub so they can assert what would
+# have been said without spending a minute in a TTS model.
+_voice_say_cmd() {
+  if [ -n "${ABS_VOICE_CMD:-}" ]; then printf '%s' "$ABS_VOICE_CMD"; return 0; fi
+  printf 'bash %s --profile %s say --' "$(printf '%q' "$SCRIPT_PATH")" "$(printf '%q' "$PROFILE")"
+}
+
+# Hand the work to a detached process and return immediately. Hooks are given a
+# 5s timeout and synthesis takes ~30s, so a plain background job inside the hook
+# would be killed with the hook's process group half-way through a sentence.
+# setsid breaks it out of that group; without setsid we still try, because a
+# truncated note beats no note.
+_voice_spawn() {
+  local text="$1" cmdline
+  [ -n "$text" ] || return 0
+  cmdline="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") __voice-mirror"
+  if command -v setsid >/dev/null 2>&1; then cmdline="setsid $cmdline"; fi
+  ( printf '%s' "$text" | eval "$cmdline" >/dev/null 2>&1 & ) 2>/dev/null || true
+}
+
+# `abs __voice-mirror` — read the reply text on stdin and speak it. Hidden; only
+# _voice_spawn calls it.
+cmd_voice_mirror() {
+  local text; text="$(cat)"
+  _voice_mirror "$text"
+}
+
+# PreToolUse on the Telegram reply tool, wired only in reply mode `voice`. Speaks
+# the message and blocks the text send, so the voice note IS the reply.
+#
+# Every doubt resolves toward letting the text through. A blocked message that
+# never becomes audio is a message the operator simply never receives, and there
+# is no second chance: this is the bridge to their phone.
+_reply_voice_gate() {
+  local input="$1" text files
+  [ "$(reply_mode)" = "voice" ] || return 0
+  voice_can_speak || return 0                    # nothing can speak → don't mute the bridge
+  files="$(printf '%s' "$input" | jq -r '(.tool_input.files // []) | length' 2>/dev/null)"
+  case "$files" in ''|*[!0-9]*) files=0 ;; esac
+  [ "$files" -eq 0 ] || return 0                 # an attachment needs its message
+  text="$(printf '%s' "$input" | jq -r '.tool_input.text // ""' 2>/dev/null)"
+  [ -n "$text" ] || return 0
+  _voice_speakable "$text" || return 0           # code, a link, or too long → text wins
+  _voice_spawn "$text"
+  printf '%s\n' "🔊 Sent as a voice note instead — reply mode is 'voice' (abs config reply). The operator has it; do NOT resend this as text." >&2
+  exit 2
+}
+
 # --- smart auto-silent hook --------------------------------------------------
 #
 # Wired by cmd_run into the session as a UserPromptSubmit + PostToolUse hook (see
@@ -1251,8 +1670,15 @@ cmd_silent_hook() {
       case "$tool" in
         *telegram*reply*)
           _silent_reset "$now"
-          log_event "abs" "→ telegram" "$sess" \
-            "$(printf '%s' "$input" | jq -r '.tool_input.text // ""' 2>/dev/null)" ;;
+          local rtext
+          rtext="$(printf '%s' "$input" | jq -r '.tool_input.text // ""' 2>/dev/null)"
+          log_event "abs" "→ telegram" "$sess" "$rtext"
+          # Reply mode `both`, and `voice` when the message was let through as
+          # text anyway (a link, a code block): the text has already gone out, so
+          # the voice note is a mirror of it, not a replacement.
+          case "$(reply_mode)" in
+            both|voice) _voice_spawn "$rtext" ;;
+          esac ;;
         *telegram*react*|*telegram*edit_message*) : ;;  # reactions/edits are noise
         "") : ;;
         *) log_event "tool" "$tool" "$sess" "" ;;   # record that a tool ran, name only
@@ -1288,11 +1714,16 @@ _is_destructive() {
 # gap it closes. Opt out with `abs config guard off`.
 cmd_guard_hook() {
   [ -f "${ABS_STATE:-/nonexistent}" ] || return 0
-  [ "$(state_get '.no_guard')" = "true" ] && return 0
   local input tool cmd
   input="$(cat)"
   tool="$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)"
-  case "$tool" in Bash) ;; *) return 0 ;; esac
+  # Two unrelated PreToolUse jobs share this entry point because they share a
+  # matcher list. The guard's own off-switch must not silence the voice gate.
+  case "$tool" in
+    Bash) if [ "$(state_get '.no_guard')" = "true" ]; then return 0; fi ;;
+    *telegram*reply*) _reply_voice_gate "$input"; return 0 ;;
+    *) return 0 ;;
+  esac
   [ "$(state_get '.last_origin')" = "telegram" ] || return 0
   cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
   [ -n "$cmd" ] || return 0
@@ -1478,6 +1909,25 @@ cmd_config() {
         "")         info "Voice engine: $(state_get '.tts_engine' | sed 's/^null$/auto/')" ;;
         *)          die "Usage: abs config engine kokoro|chatterbox|auto" ;;
       esac ;;
+    reply)
+      # How every outbound Telegram message is delivered. Enforced by the hooks,
+      # not by the model remembering — which is the whole point of it living here.
+      case "$val" in
+        text|off)
+          state_set 'del(.reply_mode)'
+          ok "Replies: text only." ;;
+        both|voice+text|on)
+          voice_can_speak || warn "Voice isn't installed here — set it up with 'abs voice setup' or the notes won't send."
+          state_set '.reply_mode = "both"'
+          ok "Replies: text, and a voice note of it. Takes effect next session." ;;
+        voice|only|voice-only)
+          voice_can_speak || die "Reply mode 'voice' suppresses the text, and nothing here can speak. Run: abs voice setup"
+          state_set '.reply_mode = "voice"'
+          ok "Replies: voice only. Code, links and attachments still go as text — a voice note can't carry them. Takes effect next session." ;;
+        "")
+          info "Replies: $(reply_mode)" ;;
+        *) die "Usage: abs config reply text|both|voice" ;;
+      esac ;;
     kokoro-voice)
       # Which built-in kokoro voice to speak with. Ignored by chatterbox, which
       # takes its voice from the sample instead.
@@ -1518,12 +1968,13 @@ cmd_config() {
       info "  conversation log $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)"
       info "  command guard  $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)"
       info "  start menu     $([ "$(state_get '.no_start_menu')" = "true" ] && echo off || echo on)"
+      info "  reply mode     $(reply_mode)"
       info "  voice engine   $(state_get '.tts_engine' | sed 's/^null$/auto/')"
       info "  kokoro voice   $(state_get '.kokoro_voice' | sed 's/^null$/af_heart (default)/')"
       info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
       info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply text|both|voice  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 
@@ -2244,6 +2695,19 @@ voice_have() {
     && [ -f "$r/speak.py" ] && [ -f "$r/transcribe.py" ]
 }
 
+# Narrower than voice_have: can this machine SPEAK? Either engine will do, and
+# transcription is irrelevant here. `abs config reply` gates on this rather than
+# on voice_have, because a kokoro-only install can talk perfectly well — and
+# because reply mode `voice` suppresses the text, so a wrong answer here is the
+# difference between a voice note and total silence.
+voice_can_speak() {
+  local r; r="$(voice_root)"
+  { [ -x "$r/.venv-kokoro/bin/python" ] && [ -f "$r/speak_kokoro.py" ]; } \
+    || { [ -x "$r/.venv-tts/bin/python" ] && [ -f "$r/speak.py" ]; } \
+    || return 1
+  command -v ffmpeg >/dev/null 2>&1
+}
+
 # yes/no on the human's terminal. abs prompts on /dev/tty everywhere, which is
 # also what lets `curl install.sh | bash` hand off to `abs voice setup` — that
 # child's stdin is the piped installer, but /dev/tty is still the person.
@@ -2511,7 +2975,10 @@ cmd_say() {
     out="$tmp.ogg"
   fi
   # The TTS scripts chatter progress to stderr; only the last line is a summary.
-  "$venv" "$script" $say_args "$text" "$out" >/dev/null || {
+  # The text goes over stdin (`-`), never in argv: /proc/<pid>/cmdline is readable
+  # by every user on the box for as long as synthesis runs, and a spoken reply can
+  # quote anything at all.
+  printf '%s' "$text" | "$venv" "$script" $say_args - "$out" >/dev/null || {
     [ -n "$keep" ] || rm -f "$out" ${tmp:+"$tmp"}
     die "Synthesis failed."
   }
@@ -2651,23 +3118,22 @@ _start_menu_project() {
     warn "No registered projects or workspace-root children. Launching here."
     return 0
   fi
-  step "Which project?"
+  local rows=()
   for i in $(seq 0 $((tcount - 1))); do
     label="$(printf '%s' "$tj" | jq -r ".[$i].label")"
-    info "  $((i + 1)). $label"
+    rows+=("$label")
   done
-  printf '  Choice: ' >&2
-  read -r c || c=""
-  if printf '%s' "$c" | grep -qE '^[0-9]+$' && [ "$c" -ge 1 ] && [ "$c" -le "$tcount" ]; then
-    p="$(printf '%s' "$tj" | jq -r ".[$((c - 1))].path")"
-    if [ -d "$p" ]; then
-      START_CWD="$p"; MENU_CONTINUE=0
-      info "${c_dim}New session in $p${c_reset}"
-    else
-      warn "That folder no longer exists. Launching here."
-    fi
+  if ! menu_select "Which project?" 0 "${rows[@]}"; then
+    warn "Nothing picked — launching here."
+    return 0
+  fi
+  c="$MENU_INDEX"
+  p="$(printf '%s' "$tj" | jq -r ".[$c].path")"
+  if [ -d "$p" ]; then
+    START_CWD="$p"; MENU_CONTINUE=0
+    info "${c_dim}New session in $p${c_reset}"
   else
-    warn "Not a choice — launching here."
+    warn "That folder no longer exists. Launching here."
   fi
 }
 
@@ -2704,29 +3170,27 @@ _start_menu() {
   [ "${count:-0}" -gt 0 ] 2>/dev/null || return 0       # no recents → straight launch
   [ "$count" -gt 3 ] && count=3                         # same cap as the Telegram flow
 
-  step "Start a session — profile '$PROFILE':"
-  local i label age agestr
+  local i label age agestr rows=()
   for i in $(seq 0 $((count - 1))); do
     label="$(printf '%s' "$recents_json" | jq -r ".[$i].label")"
     age="$(printf '%s' "$recents_json" | jq -r ".[$i].age")"
     if [ "$age" = "just now" ]; then agestr="just now"; else agestr="$age ago"; fi
-    info "  $((i + 1)). ▶ Resume $label ($agestr)"
+    rows+=("▶ Resume $label ($agestr)")
   done
-  local new_n=$((count + 1)) proj_n=$((count + 2))
-  info "  $new_n. 🆕 New session in this folder ($PWD)"
-  info "  $proj_n. 📁 Another project…"
-  printf '  Choice [Enter=1]: ' >&2
-  local choice; read -r choice || choice=""
-  [ -n "$choice" ] || choice=1
+  local new_n=$count proj_n=$((count + 1))
+  rows+=("🆕 New session in this folder ($PWD)")
+  rows+=("📁 Another project…")
 
-  if [ "$choice" = "$new_n" ]; then
+  if ! menu_select "Start a session — profile '$PROFILE':" 0 "${rows[@]}"; then
+    warn "Nothing picked — launching a new session here."
+    return 0
+  fi
+  if [ "$MENU_INDEX" -eq "$new_n" ]; then
     return 0                                            # fresh in cwd (today's behavior)
-  elif [ "$choice" = "$proj_n" ]; then
+  elif [ "$MENU_INDEX" -eq "$proj_n" ]; then
     _start_menu_project "$mroot" "$mpy"
-  elif printf '%s' "$choice" | grep -qE '^[0-9]+$' && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
-    _start_menu_apply "$recents_json" $((choice - 1))
   else
-    warn "Not a choice — launching a new session here."
+    _start_menu_apply "$recents_json" "$MENU_INDEX"
   fi
   return 0
 }
@@ -2752,13 +3216,10 @@ _start_sandbox() {
     elif [ "${#names[@]}" -eq 1 ]; then
       name="${names[0]}"
     else
-      step "Which sandbox?"
-      local i=1
-      for n in "${names[@]}"; do info "  $i) 🏖 $n"; i=$((i + 1)); done
-      printf '  Choice: ' >&2
-      local c; read -r c || c=""
-      { [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le "${#names[@]}" ]; } || die "Not a choice."
-      name="${names[$((c - 1))]}"
+      local rows=()
+      for n in "${names[@]}"; do rows+=("🏖 $n"); done
+      menu_select "Which sandbox?" 0 "${rows[@]}" || die "Cancelled."
+      name="${names[$MENU_INDEX]}"
     fi
   fi
   # Refuse to clobber a live session for this profile (same guard as cmd_run).
@@ -2784,29 +3245,24 @@ _newbot_pick_cwd() {
   local root="$1" py="$2" tj tcount i label c p
   tj="$(env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.registry targets --json 2>/dev/null || echo '[]')"
   tcount="$(printf '%s' "$tj" | jq 'length' 2>/dev/null || echo 0)"
-  step "Where should this bot's sessions run?"
-  info "  1. 📁 This folder ($PWD)"
+  local rows=("📁 This folder ($PWD)")
   if [ "${tcount:-0}" -gt 0 ] 2>/dev/null; then
     for i in $(seq 0 $((tcount - 1))); do
       label="$(printf '%s' "$tj" | jq -r ".[$i].label")"
-      info "  $((i + 2)). $label"
+      rows+=("$label")
     done
   fi
-  printf '  Choice [Enter=1]: ' >&2
-  read -r c < /dev/tty || c=""
-  [ -n "$c" ] || c=1
-  if [ "$c" = "1" ]; then
-    return 0                                   # this folder (empty → caller keeps PWD)
+  if ! menu_select "Where should this bot's sessions run?" 0 "${rows[@]}"; then
+    warn "Nothing picked — launching here."
+    return 0
   fi
-  if printf '%s' "$c" | grep -qE '^[0-9]+$' && [ "$c" -ge 2 ] && [ "$c" -le "$((tcount + 1))" ]; then
-    p="$(printf '%s' "$tj" | jq -r ".[$((c - 2))].path")"
-    if [ -d "$p" ]; then
-      printf '%s' "$p"
-    else
-      warn "That folder no longer exists — launching here."
-    fi
+  c="$MENU_INDEX"
+  if [ "$c" -eq 0 ]; then return 0; fi         # this folder (empty → caller keeps PWD)
+  p="$(printf '%s' "$tj" | jq -r ".[$((c - 1))].path")"
+  if [ -d "$p" ]; then
+    printf '%s' "$p"
   else
-    warn "Not a choice — launching here."
+    warn "That folder no longer exists — launching here."
   fi
 }
 
@@ -3136,11 +3592,18 @@ cmd_run() {
   # so the per-tool hook cost is only paid by users who want the log.
   local pt_matcher="mcp__plugin_telegram_telegram__reply"
   [ "$(state_get '.no_log')" = "true" ] || pt_matcher=".*"
-  # PreToolUse guard on Bash, unless disabled. It blocks destructive commands on
-  # Telegram-driven turns; wired only when on so a guard-off session pays nothing.
+  # PreToolUse entries, each wired only when it has work to do so a session never
+  # pays for a hook it doesn't use: the Bash guard (blocks destructive commands on
+  # Telegram-driven turns), and — in reply mode `voice` only — the gate that turns
+  # an outbound message into a voice note instead of text.
   local pretool='[]'
   [ "$(state_get '.no_guard')" = "true" ] \
-    || pretool="$(jq -n --arg g "$guard_cmd" '[{matcher:"Bash", hooks:[{type:"command", command:$g, timeout:5}]}]')"
+    || pretool="$(jq -n --argjson p "$pretool" --arg g "$guard_cmd" \
+         '$p + [{matcher:"Bash", hooks:[{type:"command", command:$g, timeout:5}]}]')"
+  if [ "$(reply_mode)" = "voice" ]; then
+    pretool="$(jq -n --argjson p "$pretool" --arg g "$guard_cmd" \
+      '$p + [{matcher:"mcp__plugin_telegram_telegram__reply", hooks:[{type:"command", command:$g, timeout:5}]}]')"
+  fi
   jq -n --arg c "$hook_cmd" --arg pm "$pt_matcher" --argjson pre "$pretool" --argjson sl "$status_json" '$sl + {
     hooks: ({
       UserPromptSubmit: [ { hooks: [ { type: "command", command: $c, timeout: 5 } ] } ],
@@ -3407,7 +3870,20 @@ cmd_sandbox() {
   command -v docker >/dev/null 2>&1 || die "abs sandbox needs Docker. Install it: https://docs.docker.com/engine/install/"
   case "$sub" in
     build|create|list|start|stop|destroy) ;;
-    *) die "Usage: abs sandbox build|create <name> [--ports a:b,c:d]|list|start <name>|stop <name>|destroy <name> [--purge]" ;;
+    login)
+      # The credentials copied in at `create` are a snapshot: they expire while
+      # the host's keep being refreshed. A box in that state still starts and
+      # still receives Telegram messages — it just never answers any of them.
+      # This is the one-time fix, and it mirrors `abs restricted login`.
+      local name="${1:-}"
+      [ -n "$name" ] || die "Usage: abs sandbox login <name>"
+      [ -t 0 ] || die "abs sandbox login is interactive — run it at a terminal."
+      step "Logging Claude in inside sandbox '$name'"
+      env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
+      info "${c_dim}Complete the login, then leave with /exit or Ctrl-D.${c_reset}"
+      exec docker exec -it "absd-sbx-$name" claude auth login
+      ;;
+    *) die "Usage: abs sandbox build|create <name> [--ports a:b,c:d]|list|start <name>|stop <name>|login <name>|destroy <name> [--purge]" ;;
   esac
   exec env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox "$sub" "$@"
 }
@@ -3618,6 +4094,13 @@ main() {
   if [ "$cmd" = "__guard-hook" ]; then
     use_profile "${want_profile:-default}"
     cmd_guard_hook || true
+    return 0
+  fi
+  # The detached voice mirror. Spawned by the hooks, never by a person: it holds
+  # the TTS lock for ~30s, so it must not run inside a hook's 5s budget.
+  if [ "$cmd" = "__voice-mirror" ]; then
+    use_profile "${want_profile:-default}"
+    cmd_voice_mirror || true
     return 0
   fi
 

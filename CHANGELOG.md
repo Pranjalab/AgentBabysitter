@@ -6,6 +6,86 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] — v3: the always-on daemon
 
+- **`abs config reply text|both|voice` — "always answer me in voice", enforced.**
+  Asking the assistant to always reply with a voice note worked until the session
+  got long and the instruction drifted out of the model's attention, which is the
+  failure mode of every standing preference kept in a prompt. Reply mode is stored
+  state and the session hooks act on it: `both` mirrors every outbound Telegram
+  message as a voice note from PostToolUse, and `voice` intercepts the message at
+  PreToolUse, speaks it, and blocks the text so the voice note *is* the reply. The
+  model is told which mode is on — but only so it doesn't ALSO call `abs say` and
+  send the same sentence twice. Enforcement never depends on it.
+  Markdown is stripped before speaking (a URL read aloud is a minute of alphabet),
+  the same sentence is never spoken twice within five minutes, and synthesis is
+  serialised behind a lock and detached from the hook, which has a 5s budget
+  against TTS's ~30s.
+  `voice` still lets a message through as text when it carries a code block, a
+  link, or an attachment — a voice note cannot carry any of them, and a blocked
+  message is one the operator simply never receives. Same reason it refuses to
+  engage at all on a machine that can't speak: the failure mode of this feature
+  must be "text as usual", never silence.
+  Three ways it could still have lost a message, all found in review and closed
+  before release: the repeat-suppressor applied in `voice` mode too, so saying the
+  same sentence twice inside five minutes blocked the text and skipped the audio;
+  a failed synthesis recorded itself as "already said", so the retry vanished as
+  well; and a synthesis that failed after the text was suppressed produced nothing
+  at all — it now falls back to sending the words as text. Reply bodies also go to
+  the speech engine on stdin rather than in argv, where `/proc/<pid>/cmdline`
+  exposed them to every user on the box for the ~30s synthesis takes.
+
+- **The terminal pickers are arrow-key menus now.** Every list `abs` offers —
+  which bot, which session to resume, which project, which sandbox, where a new
+  bot should run — is one `menu_select` with ↑/↓ (or k/j) moving a highlight,
+  Enter taking it, and Esc/q backing out. Typing the number still works, so
+  nothing anyone already does stops working, and the chosen row collapses to a
+  single line so the scrollback keeps the decision without the whole menu.
+  Long rows are truncated to the terminal width rather than wrapping — a wrapped
+  row would desync the cursor arithmetic and smear the menu on every redraw.
+  It degrades instead of breaking: no terminal on stderr, `TERM=dumb`, no
+  `/dev/tty`, or `ABS_NO_TUI=1` all fall back to the old numbered prompt, which
+  is what keeps these functions usable under `docker exec` without `-t`, over a
+  pipe, and in CI.
+  Row widths are counted in printed columns, not characters, because an emoji or a
+  CJK glyph costs two — and every one of these menus carries an emoji. Labels come
+  from folder names, so they are stripped of newlines and of every escape sequence
+  except colour; a row that splits in two puts the highlight somewhere other than
+  where it is drawn, which is worse than a smear. Verified against real bash 3.2
+  (what stock macOS ships), where the escape-sequence timeout had to stop being
+  fractional — 3.2 rejects that outright and the arrow keys did nothing.
+
+- **Fixed: a reclaimed sandbox session left an orphan poller stealing messages.**
+  Live-testing symptom: roughly half the operator's replies stopped arriving, with
+  nothing erroring. `engine.kill()` closes the pane's process group on the *host*,
+  and a sandbox session is a `docker exec` client — killing that client does **not**
+  kill the claude it started inside the container, nor its Telegram plugin (verified
+  against a real container, not assumed). That orphan kept polling the bot, and since
+  Telegram gives each update to whichever consumer asks first, the next session saw
+  only a random half of them. Teardown now reaps the in-container half too, via the
+  in-box `session.pid`, and warns if a survivor is detected instead of passing in
+  silence. The reap is TERM, then wait, then KILL: the first version asked whether
+  anything had survived immediately after sending TERM, which both reported healthy
+  shutdowns as survivors and let a claude that ignores TERM live on — the exact
+  orphan this exists to prevent.
+- **Fixed: the launch grace window predated ABS-in-the-box.** `session_start_grace_s`
+  is 30s, set when an in-box session was bare `claude`. A v4 box must `docker cp` ABS
+  in, run abs.sh, boot claude and start the plugin before its channel exists, so
+  healthy launches were being declared dead — which is what triggered the orphan
+  above. Sandbox launches now get their own `sandbox_start_grace_s` (120s); host
+  sessions keep the tight 30s.
+
+- **A sandbox that isn't logged in now says so.** Found in live testing: a sandbox
+  session started, received the operator's Telegram message, and answered nothing —
+  Claude *inside* the box was not authenticated. Nothing warned, because the
+  pre-launch check tests the **host** credentials, and the only box-side check asks
+  whether the credentials *file* exists. It does: the copy made at `create` is a
+  frozen snapshot that expires while the host's keeps refreshing, so it stays present
+  and well-formed while authentication fails. The daemon now asks `claude auth status`
+  inside the box and refuses the handoff with the exact fix rather than launching a
+  session that will read messages and reply to none. A probe that cannot run counts as
+  *unknown* and fails open.
+- **`abs sandbox login <name>`** — log Claude in inside a box, one time. Mirrors
+  `abs restricted login`, which was previously the only one of the pair that existed.
+
 The big v3 story: `abs` was a passenger — when Claude Code wasn't running, the bot
 was deaf. v3 adds **`absd`**, a background systemd user daemon that polls every
 idle bot so you can start, resume, and manage sessions entirely from Telegram, and
@@ -46,6 +126,26 @@ stays bash. All behind a small fixed grammar with the security model unchanged.
   in `abs status` / `abs daemon status`; `abs doctor` diagnoses the whole stack.
 - **Real log rotation** for `daemon.log` and `events.jsonl` (size-based, N
   generations); the installer refreshes the unit and can install a pinned herdr.
+- **Sandbox sessions — `abs sandbox build|create|list|start|stop|destroy`, and
+  🏖 Sandbox as an `ABS START` target.** Claude Code runs inside a long-lived Ubuntu
+  container: non-root `dev`, no `--privileged`, no docker socket, and exactly one
+  host mount — a dedicated `~/Projects/sandboxes/<name>` folder — so work syncs live
+  and nothing else on the host is visible. Credentials are **copied** in (never
+  mounted), sanitised on the way: `~/.claude.json` included, host hooks stripped,
+  the plugin marketplace re-homed to `/home/dev`, and the box workspace pre-trusted
+  (without those last two, a box starts with no Telegram channel or blocks forever
+  on the trust prompt). If an in-box session's channel never comes up, the daemon
+  reclaims the bot and says so instead of silently swallowing messages.
+- **ABS itself runs inside the sandbox** (image `absd-sandbox:v4`). A box session is
+  the *same* launcher the host runs — `abs.sh --profile <p> --daemon-start` — just
+  inside the container, so the box gets the ABS status bar, the `PreToolUse` Bash
+  guard, the `ABS STOP`/`EXIT`/`MUTE` remote controls, and a `session.pid` that
+  `abs exit` can signal (**`ABS EXIT` from the phone now ends an in-box session**).
+  `abs` is on `PATH` in the box; the orchestration verbs (`abs sandbox|daemon|
+  restricted`) refuse in-box, since sandboxes are managed from outside. abs.sh and
+  `absd/` are copied into `/opt/abs` at container start and before every session, so
+  a host-side fix reaches a box without an image rebuild. Existing boxes must be
+  re-created to pick up v4 (the host workdir is kept).
 
 ## [2.6.0] — 2026-07-22
 
