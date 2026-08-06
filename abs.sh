@@ -675,6 +675,11 @@ _resolve_relay_target() {
     RELAY_CID="$(state_get '.chat_id')"; [ "$RELAY_CID" = "null" ] && RELAY_CID=""
     RELAY_BOT="$(state_get '.bot')"; [ "$RELAY_BOT" = "null" ] && RELAY_BOT=""
   fi
+  # Explicit success: the trailing `[ … = "null" ]` above returns 1 whenever a
+  # real relay exists (the value is NOT "null"), and this function is called
+  # bare, so under `set -e` that stray non-zero would kill the script exactly on
+  # the healthy path. Never let this function's exit status leak.
+  return 0
 }
 
 cmd_setup() {
@@ -2759,6 +2764,12 @@ _start_sandbox() {
   # Refuse to clobber a live session for this profile (same guard as cmd_run).
   _guard_no_live_session
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
+  # v4: sync ABS + this profile's pairing into the running box so the in-container
+  # launcher runs the session THROUGH abs.sh (status bar, guard, ABS remote
+  # controls, an in-box session.pid). No-op on a pre-v4 box — it falls back to the
+  # old bare-claude launch, so this must never be fatal.
+  env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox prepare "$name" \
+    --profile "$PROFILE" >/dev/null 2>&1 || true
   printf '%s\n' "$$" > "$ABS_DIR/session.pid" 2>/dev/null || true
   chmod 600 "$ABS_DIR/session.pid" 2>/dev/null || true
   info "${c_dim}Entering sandbox '$name' — Claude runs inside the container (exit to leave; the sandbox stays).${c_reset}"
@@ -3219,9 +3230,18 @@ cmd_run() {
   chmod 600 "$ABS_DIR/session.pid" 2>/dev/null || true
   state_set 'del(.last_origin)' 2>/dev/null || true
 
+  # ABS_EXTRA_SYSTEM_PROMPT: an extra system prompt MERGED into the ABS one rather
+  # than passed as a second --append-system-prompt (two of them do not reliably
+  # both apply). The in-container launcher uses this to add the restricted-assistant
+  # persona on top of the normal ABS instructions; unset everywhere else.
+  local sys_prompt
+  sys_prompt="$(build_prompt "$cid")"
+  [ -n "${ABS_EXTRA_SYSTEM_PROMPT:-}" ] \
+    && sys_prompt="${sys_prompt}"$'\n\n'"${ABS_EXTRA_SYSTEM_PROMPT}"
+
   exec claude \
     --channels "plugin:${PLUGIN_ID}" \
-    --append-system-prompt "$(build_prompt "$cid")" \
+    --append-system-prompt "$sys_prompt" \
     ${hook_args[@]+"${hook_args[@]}"} \
     ${model_args[@]+"${model_args[@]}"} \
     ${perm_args[@]+"${perm_args[@]}"} \

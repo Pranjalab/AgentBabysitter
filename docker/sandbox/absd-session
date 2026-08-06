@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# absd-session — the in-container Claude Code launcher (Phase 3.2 + Stage 3).
+# absd-session — the in-container Claude Code launcher (Phase 3.2 + Stage 3 + v4).
 #
 # The daemon/terminal launches a sandbox session by having the engine pane run
 #   docker exec -it absd-sbx-<name> absd-session <profile> [session opts] [claude args…]
@@ -8,15 +8,35 @@
 # Telegram state. The plugin then polls from inside the box and owns the bot while
 # the session is live.
 #
+# v4 — run the session THROUGH abs.sh instead of bare claude.
+# ------------------------------------------------------------------------------
+# Up to v3 this exec'd `claude --channels plugin:telegram…` directly. That works for
+# message delivery but the box gets none of ABS: no status bar, no Bash guard, no
+# ABS STOP/EXIT/MUTE remote controls, no session.pid — so `abs exit` and the kill
+# ladder could not reach an in-box session at all. All of that is wired by abs.sh's
+# own launch path (`--settings <hooks.json>` + session.pid), so the fix is to reuse
+# it rather than reimplement it: the host `docker cp`s abs.sh + absd/ to /opt/abs,
+# and a sandbox session becomes exactly the same launcher the HOST daemon runs —
+#   bash /opt/abs/abs.sh --profile <p> --daemon-start [flags…]
+# just inside the container.
+#
+# If /opt/abs/abs.sh is absent (a box created from a pre-v4 image, or a code sync
+# that never ran) we fall back to the v3 bare-claude launch, so an old box keeps
+# working exactly as it did.
+#
 # Session options THIS launcher consumes (Stage 3 — closes the 3.2 in-container gap;
 # a general capability, the restricted assistant is the first user):
 #   --restricted                 inject the bundled restricted system prompt (persona
 #                                + no-code refusal + "session control is operator-only")
-#   --model <m>                  pass --model <m> to claude (e.g. haiku)
-#   --append-system-prompt <t>   pass an extra system prompt to claude (combined with
-#                                the restricted one when --restricted is also given)
-# Everything else is forwarded straight to claude (e.g. --permission-mode acceptEdits
-# for Away, --continue for Resume, an initial prompt positional for pool forwarding).
+#   --model <m>                  run claude on that model (e.g. haiku)
+#   --append-system-prompt <t>   an extra system prompt (combined with the restricted
+#                                one when --restricted is also given)
+#   --permission-mode <m>        forwarded (Away mode sends acceptEdits)
+#   --continue                   resume the previous conversation in the workdir
+#   <text>                       a bare positional = claude's initial prompt (pool
+#                                forwarding). On the abs.sh path it is re-emitted as
+#                                `--prompt <text>`, because abs.sh's dispatch would
+#                                read a bare positional as an unknown COMMAND and die.
 
 set -u
 
@@ -25,6 +45,8 @@ PLUGIN_ID="telegram@claude-plugins-official"
 # absd/prompts.py reads on the host, so the value the model sees can't drift). The
 # env override is a TEST seam (unset in production, where the baked path is used).
 RESTRICTED_PROMPT_FILE="${ABSD_RESTRICTED_PROMPT_FILE:-/usr/local/share/absd/restricted-prompt.txt}"
+# The host syncs abs.sh + absd/ here. Overridable for tests.
+ABS_SH="${ABSD_ABS_SH:-/opt/abs/abs.sh}"
 
 profile="${1:-default}"
 shift || true
@@ -44,18 +66,30 @@ cd /home/dev/workspace 2>/dev/null || true
 model=""
 restricted=0
 append_prompt=""
-claude_args=()
+perm_mode=""
+resume=0
+initial_prompt=""
+have_prompt=0
+extra_args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --restricted)            restricted=1; shift ;;
     --model)                 model="${2:-}"; shift 2 ;;
     --append-system-prompt)  append_prompt="${2:-}"; shift 2 ;;
-    *)                       claude_args+=("$1"); shift ;;
+    --permission-mode)       perm_mode="${2:-}"; shift 2 ;;
+    --continue)              resume=1; shift ;;
+    --*)                     extra_args+=("$1"); shift ;;
+    *)
+      # The first bare positional is the initial prompt; anything after it is a
+      # flag VALUE we don't know about, so keep the order and pass it through.
+      if [ "$have_prompt" = "0" ]; then
+        initial_prompt="$1"; have_prompt=1
+      else
+        extra_args+=("$1")
+      fi
+      shift ;;
   esac
 done
-
-cmd=(claude --channels "plugin:${PLUGIN_ID}")
-[ -n "$model" ] && cmd+=(--model "$model")
 
 # Assemble the system prompt: the bundled restricted prompt first (if --restricted),
 # then any explicit --append-system-prompt, joined so both take effect.
@@ -70,6 +104,35 @@ if [ -n "$append_prompt" ]; then
     sys="$append_prompt"
   fi
 fi
-[ -n "$sys" ] && cmd+=(--append-system-prompt "$sys")
 
-exec "${cmd[@]}" ${claude_args[@]+"${claude_args[@]}"}
+# --- v4 path: a real ABS session inside the box -------------------------------
+if [ -f "$ABS_SH" ]; then
+  # abs.sh builds its own --append-system-prompt (the ABS operating instructions),
+  # so ours must be MERGED into that, not passed as a second competing flag.
+  # ABS_EXTRA_SYSTEM_PROMPT is the seam abs.sh reads for exactly this.
+  [ -n "$sys" ] && export ABS_EXTRA_SYSTEM_PROMPT="$sys"
+  abs_args=(--profile "$profile" --daemon-start)
+  [ "$resume" = "1" ] && abs_args+=(--continue)
+  [ "$have_prompt" = "1" ] && abs_args+=(--prompt "$initial_prompt")
+  # Claude passthrough — abs.sh forwards args it doesn't own straight to claude.
+  # --permission-mode acceptEdits is Away mode; abs.sh has its own --away flag that
+  # does the same thing plus the warning, so prefer it.
+  if [ "$perm_mode" = "acceptEdits" ]; then
+    abs_args+=(--away)
+  elif [ -n "$perm_mode" ]; then
+    abs_args+=(--permission-mode "$perm_mode")
+  fi
+  [ -n "$model" ] && abs_args+=(--model "$model")
+  exec bash "$ABS_SH" "${abs_args[@]}" ${extra_args[@]+"${extra_args[@]}"}
+fi
+
+# --- v3 fallback: bare claude (pre-v4 box, no abs.sh synced in) ---------------
+cmd=(claude --channels "plugin:${PLUGIN_ID}")
+[ -n "$model" ] && cmd+=(--model "$model")
+[ -n "$sys" ] && cmd+=(--append-system-prompt "$sys")
+[ -n "$perm_mode" ] && cmd+=(--permission-mode "$perm_mode")
+[ "$resume" = "1" ] && cmd+=(--continue)
+cmd+=(${extra_args[@]+"${extra_args[@]}"})
+[ "$have_prompt" = "1" ] && cmd+=("$initial_prompt")
+
+exec "${cmd[@]}"

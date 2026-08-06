@@ -79,6 +79,10 @@ EVENT_RESTRICTED_LOGIN_NEEDED = "restricted_login_needed"
 END_EXITED = "exited"
 END_FAILED_START = "failed_start"
 END_FOREIGN_TAKEOVER_CLEARED = "foreign_takeover_cleared"
+#: A SANDBOX session whose process was running but whose in-box Telegram channel
+#: never took over the bot — the daemon had stopped polling, so messages were going
+#: nowhere. Reclaimed deliberately rather than sitting in a silent black hole.
+END_SANDBOX_CHANNEL_DOWN = "sandbox_channel_down"
 
 _LEVELS = ("info", "warning", "error")
 

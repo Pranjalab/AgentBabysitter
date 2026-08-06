@@ -34,6 +34,28 @@ RUN npm install -g @anthropic-ai/claude-code
 COPY absd-session /usr/local/bin/absd-session
 RUN chmod 0755 /usr/local/bin/absd-session
 
+# --- ABS inside the box (v4) -------------------------------------------------
+#
+# The sandbox is meant to be a COMPLETE isolated ABS environment, not just a
+# claude shell: `abs` on PATH, the status bar, the ABS remote controls, the Bash
+# guard. All of that is abs.sh's own launch path, so abs.sh has to live in here.
+#
+# Split by rate of change: the image carries the SLOW parts (the venv + its
+# deps, the directory skeleton, the PATH shim); the fast-moving CODE (abs.sh,
+# absd/) is `docker cp`'d in at container start and again before every session
+# (SandboxManager._install_abs_into_box). That way editing abs.sh on the host
+# does not need an image rebuild, and a box can never run a stale launcher.
+RUN mkdir -p /opt/abs/absd /opt/abs/agent_babysitter \
+    && python3 -m venv /opt/abs/.venv \
+    && /opt/abs/.venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/abs/.venv/bin/pip install --no-cache-dir aiohttp \
+    && chmod -R 0755 /opt/abs
+
+# `abs` on PATH. A thin shim rather than a symlink so a box whose code sync has
+# not run yet fails with a sentence the operator can act on, instead of ENOENT.
+COPY abs-shim /usr/local/bin/abs
+RUN chmod 0755 /usr/local/bin/abs
+
 # The restricted-assistant system prompt (Stage 3). Same file absd/prompts.py reads
 # on the host — `absd-session --restricted` injects it via --append-system-prompt so
 # the model refuses to build/run code and disclaims session control. Baking it into

@@ -63,6 +63,7 @@ from absd.events import (
     END_EXITED,
     END_FAILED_START,
     END_FOREIGN_TAKEOVER_CLEARED,
+    END_SANDBOX_CHANNEL_DOWN,
     EventLog,
 )
 from absd.flow import ProjectOption
@@ -137,11 +138,40 @@ LOGIN_MISSING_MSG = (
     "⚠ Claude Code is not logged in on this machine. Please run `claude` in a "
     "terminal and complete login, then try ABS START again."
 )
+# Sandbox pre-launch: the HOST being logged in says nothing about the box. The
+# copied credentials are a frozen snapshot that expires while the host's keep
+# refreshing, so the box can start, poll Telegram, receive the message — and
+# answer nothing at all. Naming the fix beats leaving the operator to discover
+# it by attaching.
+SANDBOX_LOGIN_MISSING_MSG = (
+    "⚠ Claude Code is not logged in inside sandbox '{name}'. A session there "
+    "would receive your messages and never reply.\n\n"
+    "Log in once from a terminal:\n"
+    "`abs sandbox login {name}`\n\n"
+    "Then try ABS START again."
+)
 # Post-launch: the session never came alive (failed_start) — likely a login issue.
 FAILED_START_MSG = (
     "⚠ Session ended immediately — possible login issue. Run `claude` in a "
     "terminal to check, then ABS START again."
 )
+
+#: A sandbox session started but its in-box Telegram channel never took over the
+#: bot (live-test finding: the copied plugin metadata pointed at host paths, so the
+#: marketplace failed to load in the box and `--channels` silently started nothing).
+#: Without this the daemon sat in SESSION_LIVE, not polling, and every message the
+#: operator sent vanished. Now we reclaim and say so.
+SANDBOX_CHANNEL_DOWN_MSG = (
+    "⚠ The sandbox session started but its Telegram channel never came up, so it "
+    "couldn't receive messages — I've taken the bot back.\n\n"
+    "Check the box from the terminal:  abs attach <profile>   (or: docker exec -it "
+    "absd-sbx-<name> claude plugin list — the telegram plugin must be ✔ enabled)."
+)
+
+#: Matches the in-box Telegram plugin process (``bun run --cwd …/claude-plugins-
+#: official/telegram/<ver> … start``) via ``pgrep -f`` inside the container.
+#: Version-agnostic on purpose, so a plugin upgrade doesn't silently break the check.
+IN_BOX_POLLER_PATTERN = "claude-plugins-official/telegram"
 
 # Kill-ladder-while-idle acks (Step 1.7 / D11).
 OFF_ACK = "📴 Inbound off. Re-enable from the terminal: abs on"
@@ -621,6 +651,9 @@ class Poller:
         #: Sandbox manager (3.2) for sandbox-target sessions; None → no sandbox
         #: targets offered. Injectable (a fake in tests).
         self.sandbox_mgr = sandbox_mgr
+        #: Whether the CURRENT sandbox session's in-box Telegram channel has been
+        #: observed running (checked once, at the end of the start grace window).
+        self._sandbox_channel_seen: bool = False
         #: The sandbox name of the CURRENT live session (3.2), or None for a normal
         #: host session. When set, liveness is pane-only (the container-namespace pid
         #: is invisible to the host) and the FIX-C host-pid clobber check is skipped.
@@ -1460,6 +1493,28 @@ class Poller:
                 await self._safe_send(req.chat_id, LOGIN_MISSING_MSG)
             return
 
+        # (1b) Same check, but for the BOX — the host credentials above say
+        # nothing about what is inside a sandbox. `claude auth status` in the
+        # container is the real answer; a present, non-empty credentials file is
+        # not, because the copy expires while the host's keeps refreshing. This
+        # is the bug that let a sandbox session read messages and answer none.
+        # Only a definite False blocks: `login_ok` returns None when the probe
+        # itself could not run, and an unrunnable probe must never stop a
+        # session that would have worked.
+        if req.sandbox is not None and self.sandbox_mgr is not None:
+            probe = getattr(self.sandbox_mgr, "login_ok", None)
+            if probe is not None and probe(req.sandbox) is False:
+                log.warning(
+                    "poller[%s] sandbox %s is not logged in — not launching",
+                    self.profile.name, req.sandbox,
+                )
+                self._emit(EVENT_ERROR, level="error", where="sandbox_login_precheck")
+                if req.chat_id is not None:
+                    await self._safe_send(
+                        req.chat_id, SANDBOX_LOGIN_MISSING_MSG.format(name=req.sandbox)
+                    )
+                return
+
         # (2) single final offset commit.
         if self.offset is not None:
             try:
@@ -1477,6 +1532,8 @@ class Poller:
         # liveness is pane-only across the boundary (set BEFORE launch so watch/
         # recovery see it immediately).
         self._session_sandbox = req.sandbox
+        # Fresh session → re-arm the in-box channel check (latches once observed).
+        self._sandbox_channel_seen = False
         # (3) handoff marker (pre-launch, for crash-safety — pane recorded below).
         self._write_handoff_marker(
             req.project_path, mode, req.chat_id, sandbox=req.sandbox
@@ -1565,6 +1622,14 @@ class Poller:
             if self.sandbox_mgr is None:
                 raise EngineError("no sandbox manager configured")
             self.sandbox_mgr.ensure_running(req.sandbox)  # container must be up
+            # v4: sync ABS + this profile's pairing into the box, so the in-box
+            # launcher can run the session THROUGH abs.sh (status bar, Bash guard,
+            # ABS remote controls, a session.pid `abs exit` can signal). Must come
+            # after ensure_running — it is all `docker exec`, which needs a running
+            # container. Best-effort inside; a pre-v4 box just keeps the old launch.
+            prepare = getattr(self.sandbox_mgr, "prepare_session", None)
+            if prepare is not None:
+                prepare(req.sandbox, self.profile.name)
             launcher = flow_mod.build_sandbox_launcher_argv(
                 self.profile.name, req.away,
                 resume=req.resume, initial_prompt=req.initial_prompt,
@@ -1653,6 +1718,20 @@ class Poller:
                     )
                 return None
 
+    def _start_grace(self) -> float:
+        """How long a just-launched session gets to come alive.
+
+        A sandbox launch gets its own, larger window: it has to `docker cp` ABS
+        into the box, run abs.sh, boot claude and start the Telegram plugin
+        before the channel exists. The 30s host default was set when an in-box
+        session was bare `claude`, and against a v4 box it declared healthy
+        launches dead — then reclaiming one that kept running inside the
+        container left an orphan poller stealing the operator's messages.
+        """
+        if self._session_sandbox is not None:
+            return self.cfg.sandbox_start_grace_s
+        return self.cfg.session_start_grace_s
+
     def _kill_engine_session(self) -> None:
         """Tear down this profile's engine session (best-effort; never raises).
 
@@ -1668,6 +1747,38 @@ class Poller:
                 "poller[%s] engine kill failed: %s", self.profile.name, exc
             )
             self._emit(EVENT_ENGINE_KILL, ok=False, level="warning")
+        # For a SANDBOX session the engine kill only reached the host-side
+        # `docker exec` client. The claude it launched inside the container
+        # survives that, and so does its Telegram plugin — which keeps polling
+        # the bot. One getUpdates consumer per token means that orphan then
+        # splits every update with whatever starts next, and half the operator's
+        # messages disappear with nothing erroring. Reap it here, at the single
+        # choke point RECLAIM and handoff self-heal both go through.
+        self._kill_sandbox_session()
+
+    def _kill_sandbox_session(self) -> None:
+        """Reap the in-container half of a sandbox session. Best-effort."""
+        box = self._session_sandbox
+        if box is None or self.sandbox_mgr is None:
+            return
+        killer = getattr(self.sandbox_mgr, "kill_session", None)
+        if killer is None:
+            return
+        try:
+            ok = killer(box, self.profile.name)
+        except Exception as exc:
+            log.warning(
+                "poller[%s] in-box session kill failed for %s: %s",
+                self.profile.name, box, exc,
+            )
+            return
+        if not ok:
+            # Worth a warning rather than silence: a survivor here is exactly
+            # what corrupts the next session's message delivery.
+            log.warning(
+                "poller[%s] in-box session in %s may have survived the kill",
+                self.profile.name, box,
+            )
 
     # ---- Telegram "/" menu (Step 2.2 pulled forward) ---------------------
 
@@ -1746,6 +1857,42 @@ class Poller:
             return False
         return _pid_is_alive(disk)
 
+    def _sandbox_channel_up(self) -> bool:
+        """True if the in-box Telegram plugin process is running inside the sandbox.
+
+        The pane signal only proves the HOST-side ``docker exec`` client is alive; it
+        says nothing about whether the session inside the box actually took over the
+        bot. This is the missing half — ``pgrep -f`` in the container for the plugin
+        process (:data:`IN_BOX_POLLER_PATTERN`).
+
+        Fails OPEN (returns True) when it cannot tell — no sandbox manager, or a
+        docker error. A probe we can't run must never be grounds for killing a
+        session the operator may be using."""
+        if self._session_sandbox is None or self.sandbox_mgr is None:
+            return True
+        try:
+            return bool(
+                self.sandbox_mgr.process_alive(self._session_sandbox, IN_BOX_POLLER_PATTERN)
+            )
+        except Exception:  # noqa: BLE001 - a probe failure must not kill a session
+            return True
+
+    def _sandbox_channel_failed(self) -> bool:
+        """True when a SANDBOX session has run past the start-grace window without its
+        in-box Telegram channel ever coming up — the silent black hole (see
+        :data:`SANDBOX_CHANNEL_DOWN_MSG`). Checked once: as soon as the channel is
+        seen, ``_sandbox_channel_seen`` latches and this stays False for the session.
+
+        Only meaningful for a sandbox session; always False otherwise."""
+        if self._session_sandbox is None or self._sandbox_channel_seen:
+            return False
+        if (self._clock() - self._handoff_at) <= self._start_grace():
+            return False  # still inside the boot window — give the box time
+        if self._sandbox_channel_up():
+            self._sandbox_channel_seen = True
+            return False
+        return True
+
     def _session_dead(self) -> bool:
         """Reconcile BOTH liveness signals (PLAN.md 4.1 + Step 2.2c): the session is
         dead only when neither our RECORDED launcher pid is alive NOR the engine
@@ -1812,6 +1959,21 @@ class Poller:
             if disk is not None:
                 self._launched_pid = disk
 
+        # A sandbox session can be "alive" by the pane signal while being DEAF: the
+        # process runs but its in-box Telegram channel never took over the bot. The
+        # daemon has already stopped polling, so every message would be silently
+        # dropped. Reclaim deliberately (polling resumes) and tell the operator.
+        if self._sandbox_channel_failed():
+            log.warning(
+                "poller[%s] sandbox session's in-box Telegram channel never came up "
+                "within %.0fs — reclaiming so polling resumes",
+                self.profile.name,
+                self._start_grace(),
+            )
+            self._session_end_reason = END_SANDBOX_CHANNEL_DOWN
+            self._set_state(STATE_RECLAIM)
+            return False
+
         if not self._session_dead():
             self._session_seen_alive = True
             return True
@@ -1819,11 +1981,11 @@ class Poller:
             log.info("poller[%s] session ended — entering RECLAIM", self.profile.name)
             self._set_state(STATE_RECLAIM)
             return False
-        if (self._clock() - self._handoff_at) > self.cfg.session_start_grace_s:
+        if (self._clock() - self._handoff_at) > self._start_grace():
             log.warning(
                 "poller[%s] launched session never came alive within %.0fs — reclaiming",
                 self.profile.name,
-                self.cfg.session_start_grace_s,
+                self._start_grace(),
             )
             self._session_end_reason = END_FAILED_START
             self._set_state(STATE_RECLAIM)
@@ -1880,11 +2042,13 @@ class Poller:
         if self._handoff_chat_id is not None:
             # A session that never came alive (failed_start) most likely hit a login
             # issue (Step 1.6b) — say so instead of the generic "session ended".
-            note = (
-                FAILED_START_MSG
-                if self._session_end_reason == END_FAILED_START
-                else SESSION_ENDED_MSG
-            )
+            if self._session_end_reason == END_FAILED_START:
+                note = FAILED_START_MSG
+            elif self._session_end_reason == END_SANDBOX_CHANNEL_DOWN:
+                # Ran fine but was deaf — a login hint would be misleading here.
+                note = SANDBOX_CHANNEL_DOWN_MSG
+            else:
+                note = SESSION_ENDED_MSG
             try:
                 await self.client.send_message(self._handoff_chat_id, note)
             except TelegramError:

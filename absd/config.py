@@ -80,6 +80,14 @@ class DaemonConfig:
     # window so a session that is still booting is not mistaken for a dead one.
     session_start_grace_s: float = 30.0
 
+    # Same window, but for a SANDBOX launch, which has far more to do before its
+    # channel can come up: `docker cp` abs.sh + absd/ into the box, run abs.sh,
+    # boot claude, start the Telegram plugin. The 30s above was set when an
+    # in-box session was bare `claude`; against a v4 box it declared healthy
+    # launches dead, and reclaiming a launch that then kept running inside the
+    # container left an orphan poller stealing the operator's messages.
+    sandbox_start_grace_s: float = 120.0
+
     # Log rotation (Step 1.8): daemon.log and events.jsonl rotate at this size,
     # keeping this many .1/.2/.3 generations.
     log_max_bytes: int = 5 * 1024 * 1024
@@ -159,6 +167,10 @@ def validate(cfg: DaemonConfig) -> DaemonConfig:
     if cfg.session_start_grace_s < 0:
         raise ConfigError(
             f"session_start_grace_s must be >= 0, got {cfg.session_start_grace_s!r}"
+        )
+    if cfg.sandbox_start_grace_s < 0:
+        raise ConfigError(
+            f"sandbox_start_grace_s must be >= 0, got {cfg.sandbox_start_grace_s!r}"
         )
     if not isinstance(cfg.log_max_bytes, int) or cfg.log_max_bytes < 1024:
         raise ConfigError(f"log_max_bytes must be an int >= 1024, got {cfg.log_max_bytes!r}")
