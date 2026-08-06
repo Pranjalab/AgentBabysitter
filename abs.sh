@@ -1457,6 +1457,30 @@ cmd_config() {
         "")              info "Voice model: $(state_get '.tts_model' | sed 's/^null$/standard/')" ;;
         *)               die "Usage: abs config voice standard|turbo" ;;
       esac ;;
+    engine)
+      # Which TTS engine backs `abs say`. kokoro is an 82M model that runs on CPU,
+      # so a voice note can't be blocked by whatever else holds the GPU; chatterbox
+      # is heavier, wants CUDA, and is the only one that can clone a voice.
+      # Absence = auto: kokoro when installed, else chatterbox.
+      case "$val" in
+        kokoro)     state_set '.tts_engine = "kokoro"'
+                    ok "Voice engine: kokoro — runs on CPU. Note: it can't clone, so a saved voice sample is ignored." ;;
+        chatterbox) state_set '.tts_engine = "chatterbox"'
+                    ok "Voice engine: chatterbox — needs the GPU, and is the only engine that can clone your voice sample." ;;
+        auto|--clear|clear)
+                    state_set 'del(.tts_engine)'
+                    ok "Voice engine: auto — kokoro when installed, chatterbox otherwise (a voice sample forces chatterbox)." ;;
+        "")         info "Voice engine: $(state_get '.tts_engine' | sed 's/^null$/auto/')" ;;
+        *)          die "Usage: abs config engine kokoro|chatterbox|auto" ;;
+      esac ;;
+    kokoro-voice)
+      # Which built-in kokoro voice to speak with. Ignored by chatterbox, which
+      # takes its voice from the sample instead.
+      case "$val" in
+        --clear|clear) state_set 'del(.kokoro_voice)'; ok "Kokoro voice: af_heart (default)." ;;
+        "")            info "Kokoro voice: $(state_get '.kokoro_voice' | sed 's/^null$/af_heart (default)/')" ;;
+        *)             state_set --arg v "$val" '.kokoro_voice = $v'; ok "Kokoro voice: $val" ;;
+      esac ;;
     voice-sample)
       # A reference clip to clone the voice from, applied to every `abs say` (both
       # models) unless a per-call --audio-prompt overrides it. Stored as a normalised
@@ -1489,10 +1513,12 @@ cmd_config() {
       info "  conversation log $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)"
       info "  command guard  $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)"
       info "  start menu     $([ "$(state_get '.no_start_menu')" = "true" ] && echo off || echo on)"
+      info "  voice engine   $(state_get '.tts_engine' | sed 's/^null$/auto/')"
+      info "  kokoro voice   $(state_get '.kokoro_voice' | sed 's/^null$/af_heart (default)/')"
       info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
       info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 
@@ -2374,11 +2400,13 @@ cmd_say() {
   [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $ABS_STATE."
 
   local vroot; vroot="$(voice_root)"
-  local venv="$vroot/.venv-tts/bin/python"
-  [ -x "$venv" ] || die "Voice isn't set up. Turn it on once with: abs voice setup"
-  command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found — speak.py needs it to make Opus."
+  local venv_chatter="$vroot/.venv-tts/bin/python"
+  local venv_kokoro="$vroot/.venv-kokoro/bin/python"
+  { [ -x "$venv_chatter" ] || [ -x "$venv_kokoro" ]; } \
+    || die "Voice isn't set up. Turn it on once with: abs voice setup"
+  command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg not found — the TTS scripts need it to make Opus."
 
-  local keep="" text="" tmp="" say_args="" model_set="" audio_set=""
+  local keep="" text="" tmp="" say_args="" model_set="" audio_set="" engine=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --keep) keep="$2"; shift 2 ;;
@@ -2386,6 +2414,11 @@ cmd_say() {
       --standard|--normal) model_set=1; shift ;;   # force standard (no --turbo)
       --audio-prompt) say_args="$say_args --audio-prompt $2"; audio_set=1; shift 2 ;;
       --default-voice) audio_set=1; shift ;;       # ignore the saved sample, use model default
+      --engine) engine="$2"; shift 2 ;;
+      --kokoro) engine=kokoro; shift ;;
+      --chatterbox) engine=chatterbox; shift ;;
+      --voice) say_args="$say_args --voice $2"; shift 2 ;;   # kokoro voice id
+      --speed) say_args="$say_args --speed $2"; shift 2 ;;   # kokoro rate
       --exag|--cfg|--device|--max-chars|--gap)
         say_args="$say_args $1 $2"; shift 2 ;;
       --) shift; text="$*"; break ;;
@@ -2403,6 +2436,65 @@ cmd_say() {
     { [ -n "$vs" ] && [ "$vs" != null ] && [ -f "$vs" ]; } && say_args="$say_args --audio-prompt $vs"
   fi
 
+  # Engine choice. Kokoro is an 82M model that runs on CPU, so a voice note never
+  # fails just because something else (llama-server, a training job) is holding
+  # the GPU — chatterbox dies with a CUDA OOM in that situation. What kokoro
+  # cannot do is clone a voice: it has no audio-prompt input at all. So a
+  # configured voice sample forces chatterbox rather than silently ignoring the
+  # sample and speaking in a stranger's voice.
+  local cloning="" chosen=""
+  case " $say_args " in *" --audio-prompt "*) cloning=1 ;; esac
+  if [ -n "$engine" ]; then
+    chosen=flag                                  # --engine on the command line
+  else
+    engine="$(state_get '.tts_engine')"
+    [ "$engine" = null ] && engine=""
+    [ -n "$engine" ] && chosen=config            # abs config engine
+  fi
+  # A deliberately chosen engine wins over a configured voice sample, whether it
+  # came from the flag or from config. Silently running chatterbox instead would
+  # leave the caller wondering why voice notes still need the GPU. The sample is
+  # dropped rather than ignored in silence — but only noisily for a one-off flag;
+  # config is a standing decision and shouldn't nag on every single note.
+  if [ -n "$chosen" ] && [ "$engine" = kokoro ] && [ -n "$cloning" ]; then
+    [ "$chosen" = flag ] && warn "Kokoro can't clone — using its own voice, ignoring your voice sample."
+    say_args="$(printf '%s' "$say_args" | sed -E 's/--audio-prompt [^ ]*//')"
+    cloning=""
+  fi
+  # Nothing chosen, but a sample is configured: keep the cloned voice, which only
+  # chatterbox can produce.
+  if [ -n "$cloning" ] && [ "$engine" != chatterbox ]; then
+    engine=chatterbox
+  fi
+  if [ -z "$engine" ]; then
+    [ -x "$venv_kokoro" ] && engine=kokoro || engine=chatterbox
+  fi
+
+  # Saved kokoro voice, unless this call named one.
+  if [ "$engine" = kokoro ]; then
+    case " $say_args " in
+      *" --voice "*) : ;;
+      *) local kv; kv="$(state_get '.kokoro_voice')"
+         { [ -n "$kv" ] && [ "$kv" != null ]; } && say_args="$say_args --voice $kv" ;;
+    esac
+  fi
+
+  local venv script
+  case "$engine" in
+    kokoro)
+      venv="$venv_kokoro"; script="$vroot/speak_kokoro.py"
+      [ -x "$venv" ] || die "Kokoro isn't installed at $vroot/.venv-kokoro. Use --engine chatterbox, or install it." ;;
+    chatterbox)
+      venv="$venv_chatter"; script="$vroot/speak.py"
+      [ -x "$venv" ] || die "Chatterbox isn't installed. Run: abs voice setup" ;;
+    *) die "Unknown engine '$engine'. Use kokoro or chatterbox." ;;
+  esac
+  # Strip flags the target engine doesn't understand rather than letting it
+  # abort on an unrecognised option.
+  if [ "$engine" = chatterbox ]; then
+    say_args="$(printf '%s' "$say_args" | sed -E 's/--(voice|speed) [^ ]*//g')"
+  fi
+
   # macOS mktemp has no --suffix, so make the temp file portably and append .ogg
   # (ffmpeg infers the container from the extension). Track the placeholder $tmp
   # so cleanup removes both it and the .ogg.
@@ -2413,8 +2505,8 @@ cmd_say() {
     tmp="$(mktemp -t abs-voice.XXXXXX 2>/dev/null)" || die "Could not create a temp file."
     out="$tmp.ogg"
   fi
-  # speak.py chatters progress to stderr; only its last line is the summary.
-  "$venv" "$vroot/speak.py" $say_args "$text" "$out" >/dev/null || {
+  # The TTS scripts chatter progress to stderr; only the last line is a summary.
+  "$venv" "$script" $say_args "$text" "$out" >/dev/null || {
     [ -n "$keep" ] || rm -f "$out" ${tmp:+"$tmp"}
     die "Synthesis failed."
   }
