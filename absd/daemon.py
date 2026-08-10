@@ -45,6 +45,7 @@ from typing import Any, Awaitable, Callable
 
 from absd import __version__
 from absd import flow as flow_mod
+from absd.agentstatus import NOTICE_BLOCKED, NOTICE_DONE, StatusWatcher
 from absd.config import DaemonConfig, restricted_backoff
 from absd.engines.base import Engine, EngineError, SessionHandle
 from absd.events import (
@@ -58,8 +59,11 @@ from absd.events import (
     EVENT_RECLAIM_DONE,
     EVENT_RESTRICTED_LOGIN_NEEDED,
     EVENT_RESTRICTED_RELAUNCH,
+    EVENT_SESSION_BLOCKED,
+    EVENT_SESSION_DONE,
     EVENT_SESSION_END,
     EVENT_SESSION_START,
+    EVENT_STALE_HANDOFF,
     END_EXITED,
     END_FAILED_START,
     END_FOREIGN_TAKEOVER_CLEARED,
@@ -120,6 +124,16 @@ HANDOFF_CONFIRM = (
 )
 # Sent AFTER reclaim completes (PLAN.md 4.1 — only after the token is free again).
 SESSION_ENDED_MSG = "⏹ Session ended. I'm listening again — send ABS START to begin."
+# Step 2.1 (G8, herdr-only): the session stopped to ask something and nobody knows.
+# Says where it is stuck and both ways to answer — the terminal, or right here (the
+# session owns the bot while it is live, so a reply in this chat reaches it).
+BLOCKED_MSG = (
+    "⏸ {label} is waiting for input or approval ({mins}).\n"
+    "Answer here, or attach at the terminal:\n"
+    "  abs attach {profile}"
+)
+# The opt-in counterpart (config `done_notify`), off by default.
+DONE_MSG = "✅ {label} finished its turn."
 # Sent when a create collides with a stale leftover engine session and the daemon
 # self-heals (kills it + retries) — states what happened and what it's doing.
 HANDOFF_STALE_RECOVER_MSG = (
@@ -393,6 +407,31 @@ def _fmt_age(then: str | None, now: "datetime | None" = None) -> str:
     return f"{mins // 60}h"
 
 
+def _sent_message_id(result: dict[str, Any] | None) -> int | None:
+    """The ``message_id`` from a sendMessage result, or None. Pure and tolerant —
+    a missing id only costs an in-place edit (the flow falls back to a new
+    message), so it must never raise."""
+    if not isinstance(result, dict):
+        return None
+    mid = result.get("message_id")
+    return mid if isinstance(mid, int) else None
+
+
+def _fmt_duration(secs: float) -> str:
+    """A duration as prose for a phone notification: ``waiting 25s`` → ``25s``.
+
+    Same buckets as :func:`_fmt_age` but taking seconds directly (the blocked
+    notification knows its own elapsed time and has no timestamp to diff).
+    """
+    n = int(max(0.0, secs))
+    if n < 90:
+        return f"{n}s"
+    mins = n // 60
+    if mins < 90:
+        return f"{mins}m"
+    return f"{mins // 60}h"
+
+
 def read_status_files(daemon_dir: Path) -> list[dict[str, Any]]:
     """Read every ``status-<profile>.json`` under ``daemon_dir`` (sorted by
     profile). Malformed files are skipped, never fatal (PLAN.md 4.4)."""
@@ -512,6 +551,11 @@ class Flow:
     pending: "HandoffRequest | None" = None
     #: The unforwarded pooled messages offered on the "pool" step.
     pool_msgs: list[Any] = field(default_factory=list)
+    #: 1-based indices ticked on the pool step's multi-select keyboard (Step 2.2).
+    pool_selected: set[int] = field(default_factory=set)
+    #: The message carrying the pool keyboard, so a toggle edits it in place
+    #: instead of sending a new screen per tap.
+    pool_message_id: int | None = None
     #: The sandboxes offered on the "sandbox" step (list of (name, state)).
     sandboxes: list[Any] = field(default_factory=list)
     #: Chosen sandbox name (3.2) — the session runs INSIDE this container.
@@ -672,6 +716,20 @@ class Poller:
         self._relaunch_attempt = 0
         self._login_notified = False
         self._creds_seen: bool | None = None
+        #: Blocked/done notification state (Step 2.1). The watcher is pure and
+        #: reusable; it is reset at every session end so an episode can never leak
+        #: from one session into the next. ``_session_label`` is the human name of
+        #: the live session (project/sandbox), used in the notification text.
+        self._status_watcher = StatusWatcher(
+            debounce_s=cfg.blocked_debounce_s,
+            notify_blocked=cfg.blocked_notify,
+            notify_done=cfg.done_notify,
+        )
+        self._session_label: str | None = None
+        #: When the stale-handoff sweep last ran (Step 2.3); None = never, which
+        #: arms the timer rather than sweeping — boot recovery has just run, and a
+        #: second opinion on the same state one cycle later adds nothing.
+        self._last_stale_check: float | None = None
         #: Offset value committed by the single HANDOFF commit (test bookkeeping).
         self.handoff_committed_offset: int | None = None
         #: Per-profile status file (Step 1.4) — rewritten atomically each cycle so
@@ -1174,15 +1232,48 @@ class Poller:
         if unforwarded:
             flow.pending = decision
             flow.pool_msgs = unforwarded
+            flow.pool_selected = set()
             flow.step = "pool"
-            await self.client.send_message(
+            texts = [m.text for m in unforwarded]
+            sent = await self.client.send_message(
                 flow.chat_id,
-                flow_mod.render_pool_selection([m.text for m in unforwarded]),
-                reply_markup=flow_mod.build_pool_keyboard(),
+                flow_mod.render_pool_selection(texts),
+                reply_markup=flow_mod.build_pool_keyboard(texts),
             )
+            # Remember the screen so toggles edit it rather than stacking new ones.
+            flow.pool_message_id = _sent_message_id(sent)
             return
         self._handoff_request = decision
         self.flow = None
+
+    async def _repaint_pool(self, flow: Flow) -> None:
+        """Redraw the pool screen after a tick (Step 2.2 multi-select).
+
+        Edits the existing message so a burst of taps leaves one screen, not one
+        per tap. If the edit fails — the message was deleted, or it is too old for
+        Telegram to edit — fall back to sending a fresh screen and adopt that one,
+        so the keyboard the user is looking at is always the live one.
+        """
+        texts = [m.text for m in flow.pool_msgs]
+        body = flow_mod.render_pool_selection(texts, flow.pool_selected)
+        kb = flow_mod.build_pool_keyboard(texts, flow.pool_selected)
+        if flow.pool_message_id is not None:
+            try:
+                await self.client.edit_message_text(
+                    flow.chat_id, flow.pool_message_id, body, reply_markup=kb
+                )
+                return
+            except TelegramError:
+                log.debug(
+                    "poller[%s] pool screen edit failed — resending",
+                    self.profile.name,
+                )
+        try:
+            sent = await self.client.send_message(flow.chat_id, body, reply_markup=kb)
+            flow.pool_message_id = _sent_message_id(sent)
+        except TelegramError:
+            # The tick is still recorded; the next action will repaint or decide.
+            log.warning("poller[%s] could not repaint the pool screen", self.profile.name)
 
     async def _advance_flow(self, ex: Extracted) -> None:
         """Drive one step of the active flow from an update (callback or text)."""
@@ -1370,12 +1461,33 @@ class Poller:
                     "Reply `send all`, `send 1,3`, or `skip` (or tap a button).",
                 )
                 return
+
+            # A tick/untick is not a decision — repaint the same screen and wait.
+            if isinstance(choice, tuple) and choice[0] == "toggle":
+                idx = choice[1]
+                if idx in flow.pool_selected:
+                    flow.pool_selected.discard(idx)
+                else:
+                    flow.pool_selected.add(idx)
+                await self._repaint_pool(flow)
+                return
+
             decision = flow.pending
             assert decision is not None
             if choice == "skip":
                 selected: list[Any] = []
             elif choice == "all":
                 selected = list(flow.pool_msgs)
+            elif choice == "send":
+                # The ticked set. "Send" with nothing ticked cannot reach here —
+                # the button reads "Send all" and carries the `all` callback — but
+                # a stale keyboard could, and an empty send must mean skip, not
+                # silently everything.
+                selected = [
+                    flow.pool_msgs[i - 1]
+                    for i in sorted(flow.pool_selected)
+                    if 1 <= i <= len(flow.pool_msgs)
+                ]
             else:  # list of 1-based indices
                 selected = [
                     flow.pool_msgs[i - 1]
@@ -1464,6 +1576,70 @@ class Poller:
             self.profile.name,
         )
         self._clear_handoff_marker()
+
+    def _marker_is_stale(self, marker: dict[str, Any]) -> bool:
+        """True when ``marker`` describes a session that is provably gone (2.3).
+
+        BOTH liveness signals must be silent — the recorded engine pane and a live
+        session pid — and the marker must be older than ``stale_handoff_after_s``,
+        which is validated to be at least the launch grace so a session that is
+        still booting is never swept.
+        """
+        if self._marker_age_s(marker) < self.cfg.stale_handoff_after_s:
+            return False
+        if self.profile.live_session_pid() is not None:
+            return False
+        pane_id = marker.get("pane_id")
+        if isinstance(pane_id, str) and pane_id and self.engine is not None:
+            try:
+                if self.engine.is_alive(self.profile.name, pane_id=pane_id):
+                    return False
+            except EngineError:
+                # Cannot tell → assume alive. A sweep that guesses would kill work.
+                return False
+        return True
+
+    async def sweep_stale_handoff(self) -> bool:
+        """Periodic stale-handoff reclaim (Step 2.3). Returns True if it swept.
+
+        A handoff marker outlives its session when the daemon never observed the
+        death — the machine slept, the session was hard-killed while the daemon was
+        blocked, a reclaim was interrupted between killing the engine and clearing
+        the marker. Boot recovery catches that at startup; this catches it in a
+        daemon that has been up for weeks, so the profile cannot sit holding a
+        marker for a session that no longer exists.
+
+        Deliberately conservative — it is the one path here that can end a session
+        the operator might still be using, so it acts only when the marker is old
+        AND both liveness signals are silent AND we are not in SESSION_LIVE (where
+        ``watch_once`` already owns the decision, with more context than this has).
+        """
+        if self.session_state == STATE_SESSION_LIVE:
+            return False
+        now = self._clock()
+        if self._last_stale_check is None:
+            self._last_stale_check = now
+            return False
+        if (now - self._last_stale_check) < self.cfg.stale_handoff_check_s:
+            return False
+        self._last_stale_check = now
+        marker = self._read_handoff_marker()
+        if marker is None or not self._marker_is_stale(marker):
+            return False
+        age = int(self._marker_age_s(marker))
+        log.warning(
+            "poller[%s] stale handoff marker (%ss old, no live session) — reclaiming",
+            self.profile.name,
+            age,
+        )
+        self._emit(EVENT_STALE_HANDOFF, level="warning", age_s=age)
+        # Kill any engine leftover before dropping the marker: a herdr pane whose
+        # command exited still holds the session name, and the NEXT ABS START would
+        # collide with it ("already running").
+        self._kill_engine_session()
+        self._clear_handoff_marker()
+        self._reset_session_fields()
+        return True
 
     # ---- HANDOFF (PLAN.md 4.1, exact ordering) ---------------------------
 
@@ -1588,6 +1764,9 @@ class Poller:
         # menu to the in-session set now the session owns the bot (Step 2.2).
         self._record_recent(req)
         self._handoff_chat_id = req.chat_id
+        # Step 2.1: a fresh episode per session, and the name the blocked ping uses.
+        self._status_watcher.reset()
+        self._session_label = req.label
         self._handoff_at = self._clock()
         self._session_started_at = self._handoff_at
         self._session_seen_alive = False
@@ -1918,6 +2097,54 @@ class Poller:
             pid_alive = self.profile.live_session_pid() is not None
         return not pid_alive and not self._engine_pane_alive()
 
+    def _agent_status(self) -> str | None:
+        """Sample the engine's agent status for OUR pane, or None if unavailable.
+
+        Feature-detected (Step 2.1 / D4): a backend without ``agent_status`` — tmux —
+        returns None forever and the feature is simply absent. Every failure mode
+        (no engine, engine error, herdr not answering) also reads None, which
+        :mod:`absd.agentstatus` maps to ``unknown`` — never to a positive status,
+        so a probe hiccup can neither raise nor cancel a notification.
+        """
+        if self.engine is None:
+            return None
+        probe = getattr(self.engine, "agent_status", None)
+        if probe is None:
+            return None
+        try:
+            return probe(self.profile.name, self._session_pane_id)
+        except (EngineError, OSError):
+            return None
+
+    async def _check_agent_status(self) -> None:
+        """Sample agent status once and send whatever notice it warrants (2.1, G8).
+
+        Called on each SESSION_LIVE watch tick, only while the session is actually
+        alive. Cheap enough to sit on the 3s tick (one ``pane list``), and skipped
+        entirely when both notifications are off, so the default-off ``done_notify``
+        plus a ``blocked_notify off`` costs nothing at all.
+        """
+        if not (self.cfg.blocked_notify or self.cfg.done_notify):
+            return
+        notice = self._status_watcher.feed(self._agent_status(), self._clock())
+        if notice is None:
+            return
+        label = self._session_label or self.profile.name
+        if notice.kind == NOTICE_BLOCKED:
+            mins = _fmt_duration(notice.blocked_for_s)
+            log.info(
+                "poller[%s] agent blocked for %s — notifying", self.profile.name, mins
+            )
+            self._emit(EVENT_SESSION_BLOCKED, blocked_for_s=int(notice.blocked_for_s))
+            text = BLOCKED_MSG.format(label=label, mins=mins, profile=self.profile.name)
+        elif notice.kind == NOTICE_DONE:
+            self._emit(EVENT_SESSION_DONE)
+            text = DONE_MSG.format(label=label)
+        else:  # pragma: no cover - the vocabulary is closed
+            return
+        if self._handoff_chat_id is not None:
+            await self._safe_send(self._handoff_chat_id, text)
+
     async def watch_once(self) -> bool:
         """One SESSION_LIVE liveness check. Returns True while the session is
         (still) alive or starting; on death transitions to RECLAIM and returns
@@ -1976,6 +2203,10 @@ class Poller:
 
         if not self._session_dead():
             self._session_seen_alive = True
+            # Step 2.1: only while confirmably alive. Not during the start grace
+            # (nothing is running to be blocked) and not under a foreign takeover
+            # (that session is the terminal's, and its pane is not ours to read).
+            await self._check_agent_status()
             return True
         if self._session_seen_alive:
             log.info("poller[%s] session ended — entering RECLAIM", self.profile.name)
@@ -2068,6 +2299,10 @@ class Poller:
         self._foreign_warned = False
         self._session_started_at = 0.0
         self._session_end_reason = END_EXITED
+        # Step 2.1: an unfinished blocked episode dies with its session — carrying it
+        # into the next one would ping about a block that no longer exists.
+        self._status_watcher.reset()
+        self._session_label = None
         self._session_sandbox = None  # 3.2: sandbox session ended (container survives)
         self._set_state(STATE_IDLE)
 
@@ -2146,6 +2381,11 @@ class Poller:
                 self._launched_pid = launcher_pid if isinstance(launcher_pid, int) else None
                 self._session_sandbox = sandbox
                 self._handoff_chat_id = chat_id
+                # Step 2.1: the recovered session gets a clean episode and its label
+                # back from the marker — a block observed before the restart was
+                # either already notified or is gone, and we cannot tell which.
+                self._status_watcher.reset()
+                self._session_label = label
                 self._session_started_at = self._clock() - self._marker_age_s(marker)
                 self._session_seen_alive = True
                 self._set_state(STATE_SESSION_LIVE)
@@ -2477,6 +2717,9 @@ class Poller:
             elif self.session_state == STATE_RECLAIM:
                 await self.reclaim(sleep=sleep)
             else:
+                # Step 2.3: rate-limited itself; a no-op on all but the rare cycle
+                # where a marker has outlived the session it described.
+                await self.sweep_stale_handoff()
                 try:
                     processed = await self.poll_once()
                     backoff = None  # any non-409 outcome clears the backoff

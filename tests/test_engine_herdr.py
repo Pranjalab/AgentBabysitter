@@ -135,7 +135,9 @@ def test_pane_id_from_create_bad_shape_raises() -> None:
 
 
 def test_first_pane_ok() -> None:
-    assert first_pane(_PANE_LIST) == PaneRef(pane_id="w1:p1", cwd="/proj")
+    assert first_pane(_PANE_LIST) == PaneRef(
+        pane_id="w1:p1", cwd="/proj", agent_status="unknown"
+    )
 
 
 def test_first_pane_empty_or_malformed() -> None:

@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="2.6.0"
+readonly ABS_VERSION="3.0.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1301,10 +1301,29 @@ cmd_statusline() {
   [ "$lvt" -gt 0 ] && [ "$(( now_s - lvt ))" -le "$voice_win" ] && voice_active=1
   if [ "$off_state" = 0 ] && [ "$voice_active" = 1 ]; then voice_dot="${c_on}●${off}"; else voice_dot="${dim}●${off}"; fi
   local sep="${dim} · ${off}"
+  # Daemon dot (v3). Green when absd has refreshed THIS profile's status file
+  # recently, which is the only thing that matters from the bar: it means the bot
+  # is being watched, so a message sent after this session ends still lands.
+  #
+  # Freshness via the file's mtime, not the `updated_at` inside it: parsing an
+  # ISO timestamp in portable shell needs `date -d` (GNU) or `date -j -f` (BSD),
+  # and this runs on every single statusline render. `find -mmin` exists on both.
+  #
+  # Shown ONLY when the daemon dir exists — a v2 install has no absd and should
+  # see exactly the bar it saw before.
+  local daemon_seg="" dstatus="$ABS_HOME/daemon/status-$PROFILE.json"
+  if [ -d "$ABS_HOME/daemon" ]; then
+    local daemon_dot="${dim}●${off}"
+    if [ -f "$dstatus" ] \
+       && [ -n "$(find "$dstatus" -mmin -"${ABS_DAEMON_FRESH_MIN:-3}" 2>/dev/null)" ]; then
+      daemon_dot="${c_on}●${off}"
+    fi
+    daemon_seg="${sep}${daemon_dot} Daemon"
+  fi
   # Usage glance (coloured); also kicks a lazy background refresh when stale.
   local g; g="$(usage_glance_str color)"
   [ -n "$g" ] && g="${sep}${g}"
-  printf '%s' "${label}${sep}${text_dot} Text${sep}${voice_dot} Voice${g}"
+  printf '%s' "${label}${sep}${text_dot} Text${sep}${voice_dot} Voice${daemon_seg}${g}"
   return 0
 }
 

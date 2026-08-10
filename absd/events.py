@@ -28,6 +28,9 @@ shapes, not this code):
   error          {where, message}
   menu_set       {kind}                                   # idle | session
   engine_kill    {ok: bool}
+  session_blocked {blocked_for_s}    # herdr-only; once per blocked episode
+  session_done    {}                 # herdr-only; opt-in (done_notify)
+  stale_handoff   {age_s}            # marker swept with no live session behind it
 
 Discipline:
   - **Single writer per daemon process.** The daemon is single-threaded asyncio,
@@ -74,6 +77,11 @@ EVENT_PROFILE_REMOVED = "profile_removed"
 # Restricted assistant keep-alive (Stage 3).
 EVENT_RESTRICTED_RELAUNCH = "restricted_relaunch"
 EVENT_RESTRICTED_LOGIN_NEEDED = "restricted_login_needed"
+# Agent-status notifications (Step 2.1, herdr-only — absent on tmux).
+EVENT_SESSION_BLOCKED = "session_blocked"
+EVENT_SESSION_DONE = "session_done"
+# A handoff marker swept while the daemon ran (Step 2.3).
+EVENT_STALE_HANDOFF = "stale_handoff"
 
 # session_end reasons.
 END_EXITED = "exited"

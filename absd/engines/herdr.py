@@ -94,10 +94,17 @@ class HerdrSession:
 
 @dataclass(frozen=True)
 class PaneRef:
-    """A pane's id + cwd, from ``herdr pane list``. Pure value type."""
+    """A pane's id + cwd + agent status, from ``herdr pane list``. Pure value type.
+
+    ``agent_status`` is herdr's own screen-derived view of the agent running in the
+    pane (``idle``/``working``/``blocked``/``done``/``unknown``); it is present on
+    every pane row, so Step 2.1 needs no extra call beyond the ``pane list`` this
+    engine already makes. ``None`` when the field is missing (an older herdr).
+    """
 
     pane_id: str
     cwd: str | None
+    agent_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,26 +193,55 @@ def pane_id_from_create(output: str) -> str:
     return pane_id
 
 
-def first_pane(output: str) -> PaneRef | None:
-    """First pane from ``herdr pane list`` (``result.panes[0]``), or None.
-
-    Pure. ABS sessions have exactly one pane, so "first" is "the" pane.
-    """
-    obj = _loads(output)
-    panes = None
-    result = obj.get("result")
-    if isinstance(result, dict):
-        panes = result.get("panes")
-    if not isinstance(panes, list) or not panes:
-        return None
-    p = panes[0]
+def _pane_ref(p: object) -> PaneRef | None:
+    """Build a :class:`PaneRef` from one ``panes[]`` row, or None if unusable."""
     if not isinstance(p, dict):
         return None
     pane_id = p.get("pane_id")
     if not isinstance(pane_id, str) or not pane_id:
         return None
     cwd = p.get("cwd")
-    return PaneRef(pane_id=pane_id, cwd=cwd if isinstance(cwd, str) and cwd else None)
+    status = p.get("agent_status")
+    return PaneRef(
+        pane_id=pane_id,
+        cwd=cwd if isinstance(cwd, str) and cwd else None,
+        agent_status=status if isinstance(status, str) and status else None,
+    )
+
+
+def _panes(output: str) -> list[object]:
+    """The raw ``result.panes`` list from a ``pane list`` dump ( ``[]`` if absent)."""
+    obj = _loads(output)
+    result = obj.get("result")
+    if not isinstance(result, dict):
+        return []
+    panes = result.get("panes")
+    return panes if isinstance(panes, list) else []
+
+
+def first_pane(output: str) -> PaneRef | None:
+    """First pane from ``herdr pane list`` (``result.panes[0]``), or None.
+
+    Pure. ABS sessions have exactly one pane, so "first" is "the" pane.
+    """
+    panes = _panes(output)
+    if not panes:
+        return None
+    return _pane_ref(panes[0])
+
+
+def pane_agent_status(output: str, pane_id: str) -> str | None:
+    """``agent_status`` for the NAMED pane in a ``pane list`` dump, else None. Pure.
+
+    Named, not first: an attach can open a second pane, and reading its status
+    would report on a bare shell instead of the session (the same class of mistake
+    that made "first pane" liveness kill a live claude — Step 2.2c).
+    """
+    for row in _panes(output):
+        ref = _pane_ref(row)
+        if ref is not None and ref.pane_id == pane_id:
+            return ref.agent_status
+    return None
 
 
 def parse_process_info(output: str) -> ProcessInfo:
@@ -506,6 +542,38 @@ class HerdrEngine:
             # Raced with teardown, or the server is not answering: treat as gone.
             return False
         return command_running(self._process_info(name, pane.pane_id))
+
+    def agent_status(self, profile: str, pane_id: str | None = None) -> str | None:
+        """herdr's view of the agent in the session's pane, or ``None``.
+
+        **Optional engine capability (Step 2.1, G8).** Deliberately not part of the
+        ``Engine`` protocol: tmux cannot answer it, and requiring it would demote a
+        complete backend to a broken one (D4). The daemon feature-detects with
+        ``getattr(engine, "agent_status", None)`` and simply never notifies when the
+        method is absent.
+
+        Returns one of ``idle``/``working``/``blocked``/``done``/``unknown``, or
+        ``None`` when there is nothing to report — session not running, pane gone,
+        herdr not answering, or a herdr too old to carry the field. ``None`` means
+        "no signal", NOT "no agent"; :mod:`absd.agentstatus` maps it to ``unknown``
+        so a hiccup can never cancel a pending block.
+
+        Costs one ``pane list`` call. Errors are swallowed: a status probe must
+        never be able to disturb a live session.
+        """
+        name = self._session_name(profile)
+        try:
+            if not self._is_running(name):
+                return None
+            proc = self._run(["pane", "list"], session=name, check=False)
+            if proc.returncode != 0:
+                return None
+            if pane_id is not None:
+                return pane_agent_status(proc.stdout, pane_id)
+            pane = first_pane(proc.stdout)
+            return pane.agent_status if pane is not None else None
+        except EngineError:
+            return None
 
     def kill(self, profile: str) -> None:
         """Terminate the session for ``profile`` and clean up. Idempotent: a no-op

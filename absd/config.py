@@ -88,6 +88,27 @@ class DaemonConfig:
     # container left an orphan poller stealing the operator's messages.
     sandbox_start_grace_s: float = 120.0
 
+    # Blocked-session notifications (Step 2.1, G8). A remotely-started session that
+    # stops to ask something is invisible from the phone; when the engine can report
+    # agent status (herdr only — tmux silently has no such feature, D4), a block
+    # sustained for `blocked_debounce_s` pings the chat that started the session,
+    # once per episode. The debounce exists because herdr's blocked detection needs
+    # a beat to match an approval UI, and a block answered at the desk in five
+    # seconds never needed a phone ping.
+    blocked_notify: bool = True
+    blocked_debounce_s: float = 20.0
+    # The matching "✅ finished" ping. OFF by default: a finished turn is normally
+    # followed by the session's own Telegram reply, which says it better.
+    done_notify: bool = False
+
+    # Stale-handoff sweep (Step 2.3). A handoff marker with no live session behind
+    # it is a session that ended without the daemon seeing it (a hard kill, an OOM,
+    # a machine that slept). Boot recovery catches it at startup; this catches it
+    # while the daemon runs. A marker must be older than this before it counts as
+    # stale, so the launch window (session_start_grace_s) is never swept.
+    stale_handoff_after_s: float = 600.0
+    stale_handoff_check_s: float = 60.0
+
     # Log rotation (Step 1.8): daemon.log and events.jsonl rotate at this size,
     # keeping this many .1/.2/.3 generations.
     log_max_bytes: int = 5 * 1024 * 1024
@@ -176,6 +197,25 @@ def validate(cfg: DaemonConfig) -> DaemonConfig:
         raise ConfigError(f"log_max_bytes must be an int >= 1024, got {cfg.log_max_bytes!r}")
     if not isinstance(cfg.log_keep, int) or cfg.log_keep < 1:
         raise ConfigError(f"log_keep must be an int >= 1, got {cfg.log_keep!r}")
+    if cfg.blocked_debounce_s < 0:
+        raise ConfigError(
+            f"blocked_debounce_s must be >= 0, got {cfg.blocked_debounce_s!r}"
+        )
+    if cfg.stale_handoff_after_s < 0:
+        raise ConfigError(
+            f"stale_handoff_after_s must be >= 0, got {cfg.stale_handoff_after_s!r}"
+        )
+    if cfg.stale_handoff_check_s <= 0:
+        raise ConfigError(
+            f"stale_handoff_check_s must be > 0, got {cfg.stale_handoff_check_s!r}"
+        )
+    # A sweep window shorter than the launch grace would reclaim sessions that are
+    # still legitimately starting up — the one way this feature could destroy work.
+    if cfg.stale_handoff_after_s < cfg.session_start_grace_s:
+        raise ConfigError(
+            "stale_handoff_after_s must be >= session_start_grace_s "
+            f"({cfg.stale_handoff_after_s!r} < {cfg.session_start_grace_s!r})"
+        )
     if cfg.profile_rescan_s < 0:
         raise ConfigError(
             f"profile_rescan_s must be >= 0 (0 disables), got {cfg.profile_rescan_s!r}"

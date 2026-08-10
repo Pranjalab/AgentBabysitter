@@ -118,3 +118,22 @@ class Engine(Protocol):
     def list_sessions(self) -> list[SessionInfo]:
         """Return one ``SessionInfo`` per ABS-owned session this backend knows."""
         ...
+
+
+# --------------------------------------------------------------------------- #
+# Optional capabilities — NOT part of the protocol above
+# --------------------------------------------------------------------------- #
+#
+# ``agent_status(profile, pane_id=None) -> str | None``
+#     herdr's screen-derived view of the agent running in the session's pane, as
+#     one of ``idle``/``working``/``blocked``/``done``/``unknown``, or ``None``
+#     when there is no signal. Powers blocked-session notifications (Step 2.1,
+#     G8) via :mod:`absd.agentstatus`.
+#
+#     It is not on ``Engine`` on purpose (D4): tmux has no equivalent, and adding
+#     it to the contract would turn a complete backend into an incomplete one.
+#     Callers feature-detect — ``getattr(engine, "agent_status", None)`` — and the
+#     feature is silently absent where the backend cannot support it.
+#
+# Add optional capabilities here rather than widening the protocol, so "which
+# backend can do what" stays readable in one place.

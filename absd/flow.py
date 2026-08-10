@@ -408,24 +408,66 @@ def build_launcher_argv(
 # Callback data for the pool-selection step.
 CB_POOL_ALL = "as:pool:all"
 CB_POOL_SKIP = "as:pool:skip"
+CB_POOL_SEND = "as:pool:send"
+CB_POOL_TOGGLE_PREFIX = "as:pool:t:"
 
 # Preview truncation for the pool-selection screen.
 POOL_PREVIEW_TRUNC = 60
+#: Preview truncation INSIDE a toggle button. Much shorter than the message body:
+#: Telegram wraps long button labels into unreadable blocks, and the full text is
+#: already listed above the keyboard.
+POOL_BUTTON_TRUNC = 28
+#: How many messages get their own toggle button. Beyond this the keyboard becomes
+#: a wall, so the screen falls back to "Send all / Skip" plus the text protocol
+#: (`send 1,3`), which has no such limit.
+POOL_TOGGLE_MAX = 8
 
 # Prefix for the forwarded messages delivered as claude's initial prompt.
 OFFLINE_PROMPT_PREFIX = "Messages received while you were offline:"
 
 
-def build_pool_keyboard() -> dict[str, Any]:
-    """Inline keyboard for the pool-selection step: Send all / Skip."""
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "📤 Send all", "callback_data": CB_POOL_ALL},
-                {"text": "🙈 Skip", "callback_data": CB_POOL_SKIP},
-            ]
-        ]
-    }
+def pool_toggles_fit(count: int) -> bool:
+    """True when ``count`` pooled messages get individual toggle buttons."""
+    return 0 < count <= POOL_TOGGLE_MAX
+
+
+def build_pool_keyboard(
+    texts: list[str] | None = None, selected: set[int] | None = None
+) -> dict[str, Any]:
+    """Inline keyboard for the pool-selection step (Step 2.2).
+
+    With a small enough pool, every message gets a ``☐``/``☑`` toggle row, so the
+    operator picks on a phone by tapping instead of typing ``send 1,3``. The action
+    row then reads "Send N" once anything is ticked, and "Send all" while nothing
+    is — so a single tap still does the common thing, which is what the text
+    protocol was good at and what a pure multi-select would have taken away.
+
+    Called with no arguments (or an oversized pool) it degrades to the original
+    two-button Send all / Skip row.
+
+    ``selected`` holds 1-based indices, matching the numbering shown to the user
+    and accepted by :func:`parse_pool_choice`.
+    """
+    texts = texts or []
+    selected = selected or set()
+    rows: list[list[dict[str, Any]]] = []
+    if pool_toggles_fit(len(texts)):
+        for i, t in enumerate(texts, start=1):
+            mark = "☑" if i in selected else "☐"
+            rows.append(
+                [
+                    {
+                        "text": f"{mark} {i}. {_truncate(t, POOL_BUTTON_TRUNC)}",
+                        "callback_data": f"{CB_POOL_TOGGLE_PREFIX}{i}",
+                    }
+                ]
+            )
+    if selected:
+        send = {"text": f"📤 Send {len(selected)}", "callback_data": CB_POOL_SEND}
+    else:
+        send = {"text": "📤 Send all", "callback_data": CB_POOL_ALL}
+    rows.append([send, {"text": "🙈 Skip", "callback_data": CB_POOL_SKIP}])
+    return {"inline_keyboard": rows}
 
 
 def _truncate(text: str, limit: int = POOL_PREVIEW_TRUNC) -> str:
@@ -435,31 +477,55 @@ def _truncate(text: str, limit: int = POOL_PREVIEW_TRUNC) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def render_pool_selection(texts: list[str]) -> str:
+def render_pool_selection(texts: list[str], selected: set[int] | None = None) -> str:
     """The pool-selection prompt: numbered, truncated previews of the unforwarded
-    messages, with the send/skip guidance (keyboard + numbered-text fallback)."""
+    messages, with the send/skip guidance (keyboard + numbered-text fallback).
+
+    ``selected`` mirrors the keyboard's ticks in the text body, so the state is
+    still legible where inline keyboards are not rendered (a desktop client with
+    images off, a screen reader, a copy-pasted transcript).
+    """
+    selected = selected or set()
     lines = [f"📨 {len(texts)} pooled message(s) waiting:"]
     for i, t in enumerate(texts, start=1):
-        lines.append(f"{i}. {_truncate(t)}")
+        mark = "☑ " if i in selected else ""
+        lines.append(f"{mark}{i}. {_truncate(t)}")
     lines.append("")
-    lines.append("Tap 📤 Send all / 🙈 Skip — or reply `send all`, `send 1,3`, or `skip`.")
+    if pool_toggles_fit(len(texts)):
+        lines.append(
+            "Tap to tick the ones to send, then 📤 — or reply `send all`, "
+            "`send 1,3`, or `skip`."
+        )
+    else:
+        lines.append(
+            "Tap 📤 Send all / 🙈 Skip — or reply `send all`, `send 1,3`, or `skip`."
+        )
     return "\n".join(lines)
 
 
 def parse_pool_choice(
     data: str | None, text: str, count: int
-) -> "str | list[int] | None":
-    """Resolve a pool-selection input. Returns ``"all"``, ``"skip"``, a list of
-    1-based indices to send (deduped, in range, sorted), or ``None`` if it selects
-    nothing (re-prompt).
+) -> "str | tuple[str, int] | list[int] | None":
+    """Resolve a pool-selection input. Returns ``"all"``, ``"skip"``, ``"send"``,
+    ``("toggle", i)``, a list of 1-based indices to send (deduped, in range,
+    sorted), or ``None`` if it selects nothing (re-prompt).
 
-    Callback: ``as:pool:all`` / ``as:pool:skip``. Text: ``send all`` / ``skip`` /
-    ``send 1,3`` (also bare ``1,3``)."""
+    Callback: ``as:pool:all`` / ``as:pool:skip`` / ``as:pool:send`` /
+    ``as:pool:t:<i>``. Text: ``send all`` / ``skip`` / ``send 1,3`` (also bare
+    ``1,3``)."""
     if data:
         if data == CB_POOL_ALL:
             return "all"
         if data == CB_POOL_SKIP:
             return "skip"
+        if data == CB_POOL_SEND:
+            return "send"
+        if data.startswith(CB_POOL_TOGGLE_PREFIX):
+            raw = data[len(CB_POOL_TOGGLE_PREFIX):]
+            # An out-of-range or non-numeric index is a stale keyboard from an
+            # earlier, larger pool — ignore it rather than toggling something else.
+            if raw.isdigit() and 1 <= int(raw) <= count:
+                return ("toggle", int(raw))
         return None
     norm = (text or "").strip().lower()
     if not norm:
