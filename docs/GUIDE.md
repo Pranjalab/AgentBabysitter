@@ -1,8 +1,9 @@
 # Agent Babysitter — full guide
 
 The [README](../README.md) covers what it is and how to start. This is the deeper
-reference: profiles, voice setup, running it while you're away, where state
-lives, limits, and troubleshooting.
+reference: profiles, voice setup, running it while you're away, the daemon,
+sandboxes, the restricted assistant, where state lives, limits, and
+troubleshooting.
 
 ## Profiles — more than one session at once
 
@@ -30,6 +31,32 @@ with in-use profiles marked. `abs` refuses to start a session on a profile that'
 already being polled, and tells you which one — reusing a single bot across two
 *simultaneous* sessions isn't supported because Telegram won't allow it, but
 sequential reuse is fine.
+
+### The pickers
+
+Every list `abs` offers — bots, sessions to resume, projects, sandboxes, where a
+new bot should run — is one arrow-key menu:
+
+```
+❯ default — @yourbot
+  work — @yourwork_bot (in use)
+  + Add a new bot
+  ↑↓ move · enter select · 1-9 jump · q cancel
+```
+
+↑/↓ or `k`/`j` move, Enter takes it, `q` or Esc backs out — and **typing the
+number still works**, so existing muscle memory is untouched. The chosen row
+collapses to one line once you pick, so scrollback keeps the decision without the
+menu around it.
+
+Long rows are truncated to the terminal width rather than wrapped, because a
+wrapped row desyncs the cursor arithmetic and would draw the highlight somewhere
+other than the row it selects. Row widths are counted in printed *columns*, not
+characters, since an emoji or a CJK glyph costs two.
+
+Set `ABS_NO_TUI=1` to force the old numbered prompt. It also falls back on its
+own with no terminal on stderr, with `TERM=dumb`, or with no `/dev/tty` — which is
+what keeps these usable under `docker exec` without `-t`, over a pipe, and in CI.
 
 ## Voice notes
 
@@ -60,6 +87,37 @@ abs say - < story.txt             # read stdin
 
 `speak.py --exag` is an emotion dial: `0.3` flat, `0.5` natural, `0.8+` animated.
 Lower `--cfg` slows delivery, which pairs well with a high `--exag`.
+
+### Reply mode — "always answer me in voice", enforced
+
+Telling the assistant to always answer with a voice note works until the session
+gets long and the instruction drifts out of the model's attention — the failure
+mode of every standing preference kept in a prompt. `abs config reply` stores it,
+and the session hooks act on it whether the model remembers or not.
+
+```sh
+abs config reply text     # text only (default)
+abs config reply both     # the text goes out, and a voice note of it follows
+abs config reply voice    # the voice note IS the reply; the text is suppressed
+abs config                # shows the current mode
+```
+
+`both` mirrors from a `PostToolUse` hook; `voice` intercepts at `PreToolUse`,
+speaks the message, and blocks the text. The model is *told* which mode is on —
+but only so it doesn't also call `abs say` and send the same sentence twice.
+Enforcement never depends on it.
+
+What `voice` deliberately does **not** suppress: a message carrying a code block,
+a link, or an attachment. A voice note can't carry any of those, and a blocked
+message is one you never receive. For the same reason it refuses to turn on where
+nothing can speak (`abs voice setup` first). The failure mode is always "text as
+usual", never silence.
+
+Under the hood: markdown is stripped before speaking (a URL read aloud is a minute
+of alphabet), the same sentence is never spoken twice within five minutes,
+synthesis is serialised behind a lock and detached from the hook (which has a 5s
+budget against TTS's ~30s), and the message body reaches the engine on **stdin**,
+never argv — `/proc/<pid>/cmdline` is world-readable.
 
 ### Setting up voice
 
@@ -183,7 +241,35 @@ makes outbound Telegram calls.
    ends it, and the bot goes back to listening.
 
 Messages you send while nothing is running are **pooled** (never lost); when you
-start a session they're offered to forward as its first prompt.
+start a session they're offered to forward as its first prompt. Each waiting
+message gets a ☐/☑ button — tick the ones you want and tap **📤 Send 2**, or tap
+**📤 Send all** without ticking anything. Typing still works too (`send 1,3`,
+`send all`, `skip`), and past eight pooled messages the buttons step aside for the
+typed form rather than turning the screen into a wall.
+
+### When the session gets stuck
+
+A remotely-started session that stops to ask a question is invisible from the
+phone: the daemon has handed the bot over, the session is waiting for a human, and
+nothing says so. When the engine can report agent status, a block that lasts more
+than `blocked_debounce_s` (default 20s) pings the chat that started it:
+
+> ⏸ myrepo is waiting for input or approval (24s).
+> Answer here, or attach at the terminal: `abs attach default`
+
+Once per block, not once per check. The debounce is there because a block you
+answer at the desk in five seconds never needed a phone ping, and because herdr
+takes a beat to recognise an approval prompt.
+
+**herdr only.** tmux has no way to tell what the program in a pane is doing, so on
+tmux this feature is silently absent rather than half-working. Configure it in
+`~/.abs/daemon/config.json`:
+
+| Key | Default | What |
+| --- | --- | --- |
+| `blocked_notify` | `true` | Ping when a session sits blocked |
+| `blocked_debounce_s` | `20` | How long it must stay blocked first |
+| `done_notify` | `false` | Also ping when a turn finishes (off — the session's own reply usually says it better) |
 
 ### The engine (herdr vs tmux)
 
@@ -198,6 +284,72 @@ works on tmux alone. Which one is used is `~/.abs/daemon/config.json`'s `engine`
 Both are recoverable only at the terminal (`abs on` / `abs setup`), so a stolen
 phone can silence a bot but never quietly re-enable it.
 
+## Sandboxes
+
+A sandbox is a session with its own Ubuntu container. The project lives in one
+dedicated host folder — `~/Projects/sandboxes/<name>` (`0700`, configurable via
+`sandbox_root`) — bind-mounted at `/home/dev/workspace`. That folder is the only
+host path the container can see, so work syncs live to somewhere you can open in
+an editor while the container reaches nothing else.
+
+```sh
+abs sandbox build                          # once (again with --rebuild to update)
+abs sandbox create web --ports 3000:3000   # named box + workspace + published port
+abs start sandbox web                      # a session running INSIDE the box
+abs sandbox list
+abs sandbox stop web
+abs sandbox destroy web                    # keeps the workspace; --purge removes it
+```
+
+From Telegram, `ABS START` grows a **🏖 Sandbox…** entry that lists your boxes.
+Attach, detach, and the kill ladder all behave identically.
+
+What the container does *not* get: `--privileged`, a docker socket, or any host
+mount besides that one workspace folder — verifiable with `docker inspect`. Your
+Claude credentials are **copied in** at create time (`docker cp`), never mounted,
+so the box's login diverges from yours the moment either changes.
+
+Two honest caveats. A normal sandbox is created with your credentials inside it,
+so treat it as isolating your *filesystem*, not your Claude account — for genuinely
+untrusted work, use a restricted assistant (below), which gets no host credentials
+at all. And a sandbox session's process lives in the container's PID namespace,
+which the host can't see; the daemon therefore tracks its liveness through the
+engine pane alone.
+
+## The restricted assistant
+
+A different kind of bot: everyday questions, web lookups, notes, arithmetic — but
+it refuses to write or run project code, and it cannot start or stop sessions.
+
+```sh
+abs restricted create assistant   # provisions a bot + a credential-free sandbox
+abs restricted login assistant    # log Claude in INSIDE the box (one time)
+abs restricted list
+abs restricted stop assistant     # pause the keep-alive and stop the box
+abs restricted destroy assistant
+```
+
+Ask it to build something and it answers, verbatim:
+
+> This is a restricted assistant — ask the operator to upgrade your profile to
+> build projects.
+
+One switch (`restricted: true`) implies four layers: **(1)** an injected system
+prompt carrying that refusal, **(2)** the Haiku model, **(3)** a dedicated sandbox,
+**(4)** `--no-creds` — no host credentials copied, so the box logs in separately.
+
+Worth being blunt about which of those are real. Layer 1 is a prompt, and prompts
+are bypassable; layer 2 is a cost choice. The actual containment is 3 and 4: a
+throwaway container holding none of your files and none of your credentials. Judge
+it on those.
+
+Unlike a normal profile, a restricted one isn't idle-polled — the daemon *keeps it
+alive*, relaunching on death with exponential backoff. After a few consecutive
+fast deaths (almost always a box that isn't logged in) it stops and DMs you once:
+"run `abs restricted login <name>`". Once you do, it comes back on its own. While
+it's down the daemon refuses `ABS START`/`ABS EXIT` from that bot — session control
+is operator-only, so a restricted bot can never launch a normal host session.
+
 ## Where things live
 
 Nothing in the repo holds state or secrets — it's all safe to fork. State lives
@@ -208,7 +360,12 @@ in `$HOME`:
 | `~/.claude/channels/telegram/.env` | Bot token (`600`) |
 | `~/.claude/channels/telegram/access.json` | Allowlist + policy (`600`) |
 | `~/.claude/channels/telegram/bot.pid` | Which process holds the poller |
-| `~/.abs/profiles/<name>/rc.json` | Chat ID, mute state, which bot dir (`600`) |
+| `~/.abs/profiles/<name>/rc.json` | Chat ID, mute state, reply mode, which bot dir (`600`) |
+| `~/.abs/profiles/<name>/pool.jsonl` | Messages received while nothing was running (`600`) |
+| `~/.abs/daemon/config.json` | Daemon settings — engine, timings, notifications (`600`) |
+| `~/.abs/daemon/status-<name>.json` | Per-profile snapshot, rewritten each poll (`600`) |
+| `~/.abs/daemon/events.jsonl` | Structured daemon event trail — **metadata only** (`600`) |
+| `~/Projects/sandboxes/<name>/` | A sandbox's workspace — the only host path its box sees (`700`) |
 
 `ABS_HOME` overrides where profiles live. Non-default profiles get their own
 plugin directory (`~/.claude/channels/telegram-<name>/`); the `default` profile

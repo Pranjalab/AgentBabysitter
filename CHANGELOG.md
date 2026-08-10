@@ -4,7 +4,62 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v3: the always-on daemon
+## [3.0.0] — 2026-08-10 — v3: the always-on daemon
+
+- **The daemon says when a session is stuck.** A remotely-started session that
+  stops to ask a question is invisible from the phone: the daemon has handed the
+  bot to the session, the session is waiting for a human, and nothing says so.
+  A block sustained past `blocked_debounce_s` (20s) now pings the chat that
+  started it — once per block, not once per check. The debounce is the whole
+  design: a block answered at the desk in five seconds never needed a phone ping,
+  and herdr takes a beat to recognise an approval prompt as one.
+  **herdr only.** tmux cannot report what the program in a pane is doing, so
+  there the feature is absent rather than half-working — and `agent_status` is
+  deliberately NOT on the `Engine` protocol, so tmux stays a complete backend
+  instead of a non-conforming one.
+  Where PLAN.md sketched an `events.subscribe` socket client, what shipped
+  samples `pane list` on the existing 3s watch tick. Against a ≥20s debounce,
+  push buys nothing but a reconnect path and a second long-lived task — and a
+  window where a dropped connection silently stops the pings.
+  `unknown` is treated as *no information*: it neither starts a block nor ends
+  one. Reading it as "not blocked" would let one bad sample cancel a real,
+  still-pending block, which is exactly when this feature needs to work.
+
+- **Pooled messages are picked by tapping, not typing.** Each waiting message
+  gets a ☐/☑ toggle and the action button becomes "📤 Send 2"; with nothing
+  ticked it still reads "📤 Send all" and still means all, so the common case
+  stays one tap rather than N+1. Ticks repaint the same screen in place instead
+  of stacking one per tap, and past eight messages the toggles step aside for the
+  typed protocol (`send 1,3`) rather than making the keyboard a wall.
+
+- **A third dot on the status bar: `● Daemon`.** Green while `absd` has refreshed
+  this profile's status file recently — i.e. the bot is being watched, so a
+  message sent after this session ends will still land. It appears only where a
+  daemon directory exists, so a v2 install sees the bar it always saw.
+
+- **A handoff marker can no longer outlive its session.** Boot recovery caught
+  that at startup; nothing caught it in a daemon that had been up for weeks after
+  a machine slept, a session was hard-killed, or a reclaim was interrupted between
+  killing the engine and clearing the marker — and the leftover collides with the
+  next `ABS START`. A periodic sweep now reclaims one, conservatively: only when
+  the marker is old, BOTH liveness signals are silent, and the poller is not in
+  SESSION_LIVE (where `watch_once` already decides, with more context). An engine
+  that cannot answer counts as alive — this is the one path that can end a session
+  someone is using, and guessing there would destroy work. `stale_handoff_after_s`
+  is validated to sit at or above the launch grace, so a session that is still
+  booting can never be swept.
+
+- **Lifecycle chaos test** (Step 2.3's critique gate): seeded random walks over
+  message/start/hard-kill/daemon-restart/409/clock-jump, asserting after every
+  single operation that no message consumed from Telegram exists nowhere in the
+  pool, that the offset never goes backwards, and that a quiesced poller always
+  converges to IDLE with no marker left behind. `ABS_CHAOS_ITERS=500` runs the
+  plan's full length.
+  Two of its invariants were vacuous when first written — one read the pool to
+  decide what the pool should contain, the other pointed at `pool.json` when the
+  file is `pool.jsonl` — and both survived deliberate mutants (a pool that drops
+  one write in five, a sweep that never clears the marker). They are derived from
+  the server side now, and every mutant is caught.
 
 - **`abs config reply text|both|voice` — "always answer me in voice", enforced.**
   Asking the assistant to always reply with a voice note worked until the session

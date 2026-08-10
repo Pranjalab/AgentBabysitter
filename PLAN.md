@@ -440,6 +440,21 @@ waiting for input/approval — `abs attach <p>` or answer via Telegram." `done` 
   phone pings within ~30 s; approving via Telegram clears it.
 - **Critique gate:** false-positive rate acceptable? (report observed pings over a day)
 
+> **BUILT** (see `docs/v3/critique/2.1-2.3.md`, manual checklist
+> `docs/v3/manual-tests/2.1-2.3.md`). `absd/agentstatus.py` (pure `StatusWatcher`) +
+> `HerdrEngine.agent_status()` + `Poller._check_agent_status()` on the SESSION_LIVE
+> watch tick. Config `blocked_notify` / `blocked_debounce_s` / `done_notify`; events
+> `session_blocked` / `session_done`. **Deviation, deliberate:** samples `pane list`
+> (which already carries `agent_status`) instead of subscribing to
+> `pane.agent_status_changed`. Against a ≥20s debounce push buys no accuracy, and
+> costs a reconnect path, a second long-lived task, and a window where a dropped
+> connection silently stops the pings. `agent_status` is deliberately NOT on the
+> `Engine` protocol (D4) — tmux stays a complete backend and the feature is absent
+> there. `unknown` neither starts nor ends a blocked episode ("no information"), so
+> one bad sample cannot cancel a real pending block. **Not verified by the agent:**
+> that herdr reports `blocked` at the right moment — same gap as Step 0.2, deferred
+> to human observation; and the false-positive gate, which needs a day of use.
+
 ### Step 2.2 — Pool & flow UX polish
 Inline-keyboard pool selection (multi-select toggles + Send/Skip buttons) replacing the
 text protocol; `ABS STATUS` shows per-profile session/pool/usage glance; statusline dot
@@ -466,6 +481,18 @@ reflects daemon state; menu registration (`abs menu`) adds the new commands to T
 - **Pranjal verify:** the full phone flow feels good — his subjective sign-off is the gate.
 - **Critique gate:** UX review with Pranjal; list of paper cuts → fix before Phase 3.
 
+> **COMPLETE** — the two remaining pieces built 2026-08-10 (see
+> `docs/v3/critique/2.1-2.3.md`). **(a) Inline-keyboard pool selection:** a ☐/☑
+> toggle per message (`as:pool:t:<i>`), repainted in place via `editMessageText` so
+> a burst of taps leaves one screen; the action row reads "📤 Send N" once anything
+> is ticked and "📤 Send all" while nothing is, so the one-tap common case survives
+> what a pure multi-select would have cost it. Past `POOL_TOGGLE_MAX` (8) the
+> toggles yield to the typed protocol rather than walling the screen. Skip
+> overrules a tick. **(b) Statusline daemon dot:** `● Daemon` in `cmd_statusline`,
+> green while absd has refreshed this profile's status file within 3 minutes
+> (mtime via `find -mmin`, not ISO parsing — this runs on every render). Shown only
+> where a daemon dir exists, so a v2 install sees the bar it always saw.
+
 ### Step 2.3 — Session lifecycle completeness
 Crash vs clean-exit distinction in the "session ended" notice (exit code from engine when
 available); `ABS START` on an already-live profile offers attach hint instead; max
@@ -476,6 +503,28 @@ session → warn + reclaim).
   token (fake-telegram asserts), pool never loses an acked message.
 - **Pranjal verify:** none beyond spot checks — this step is agent-verification-heavy.
 - **Critique gate:** chaos-test report reviewed.
+
+> **BUILT** (see `docs/v3/critique/2.1-2.3.md`). Most of this list was already in
+> the tree from earlier steps and was verified rather than rebuilt: crash-vs-clean
+> exit (`_session_end_reason` → distinct `failed_start` /`sandbox_channel_down` /
+> `foreign_takeover_cleared` notices), `ABS START` on a live profile
+> (`ALREADY_LIVE_MSG` + attach hint), and the concurrency cap (`_at_session_cap` /
+> `AT_CAP_MSG`). **New:** `sweep_stale_handoff()` — the boot-time check now also runs
+> periodically, so a marker cannot outlive its session in a daemon that has been up
+> for weeks (slept machine, hard kill, a reclaim interrupted between killing the
+> engine and clearing the marker) and collide with the next ABS START. Deliberately
+> conservative: marker older than `stale_handoff_after_s` AND both liveness signals
+> silent AND not SESSION_LIVE (where `watch_once` decides with more context); an
+> engine that cannot answer counts as ALIVE, because this is the one path that can
+> end a session someone is using. `stale_handoff_after_s` is validated to be ≥
+> `session_start_grace_s` so a still-booting session is never swept. Event:
+> `stale_handoff`. **Chaos test** `tests/test_chaos_lifecycle.py` — seeded random
+> walks (message/start/hard-kill/daemon-restart/409/clock-jump), invariants checked
+> after EVERY operation: no consumed message exists nowhere in the pool, the offset
+> never regresses, no marker outlives a session-less poller, the machine always
+> converges to IDLE. `ABS_CHAOS_ITERS=500` for the plan's stated length. Two of its
+> invariants were vacuous as first written and survived deliberate mutants; both
+> fixed and re-verified against those mutants (written up in the critique).
 
 ## 9. Phase 3 — Sandbox (`abs sandbox`)
 
