@@ -3493,11 +3493,25 @@ cmd_start() {
 # here at the terminal — the bot's users cannot drive it.
 
 _restricted_py() {
-  # Echoes the venv python; dies if the v3 stack isn't installed.
+  # Echoes the venv python on stdout; returns non-zero (having explained itself on
+  # stderr) when the v3 stack isn't installed — a curl/pipx install has abs.sh
+  # alone, with no checkout beside it.
+  #
+  # It must NOT `die` here. Every caller reads this as `py="$(_restricted_py)"`,
+  # and `exit` inside a command substitution ends only the subshell: the parent
+  # sailed on with an empty $py, ran `env … "" -m absd.restricted`, and printed a
+  # second, uglier "Unexpected failure (exit 1) at line N" from the ERR trap on
+  # top of the real message. Callers use `|| return 1` and the dispatch site turns
+  # that into the exit status.
   local root py
   root="$(dirname "$SCRIPT_PATH")"; py="$root/.venv/bin/python"
   if [ ! -x "$py" ] || [ ! -d "$root/absd" ]; then
-    die "abs restricted needs $root/.venv (Python 3.11+)."
+    printf '%s✗%s %s\n' "$c_red" "$c_reset" \
+      "abs restricted needs the full checkout (Python 3.11+ venv at $root/.venv)." >&2
+    info "  It isn't in a single-file install. Get it with:"
+    info "    ${c_bold}git clone https://github.com/Pranjalab/AgentBabysitter${c_reset}"
+    info "    ${c_bold}cd AgentBabysitter && ./install.sh${c_reset}"
+    return 1
   fi
   printf '%s' "$py"
 }
@@ -3516,7 +3530,7 @@ cmd_restricted_create() {
   command -v docker >/dev/null 2>&1 || die "abs restricted create needs Docker."
   profile_exists "$name" && die "A profile named '$name' already exists."
 
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
 
   # 1) dedicated sandbox, NO host credentials copied (separate login inside the box).
   step "Creating the dedicated sandbox '$name' (no host credentials)…"
@@ -3567,7 +3581,7 @@ cmd_restricted_login() {
   profile_exists "$name" || die "No such restricted profile: '$name'."
   command -v docker >/dev/null 2>&1 || die "abs restricted login needs Docker."
   [ -t 0 ] || die "abs restricted login is interactive — run it at a terminal."
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
 
   step "Logging Claude in inside sandbox '$name'"
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
@@ -3577,7 +3591,7 @@ cmd_restricted_login() {
 
 # abs restricted list — every restricted profile + its sandbox/model/paused state.
 cmd_restricted_list() {
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.restricted list --abs-home "$ABS_HOME"
 }
 
@@ -3589,7 +3603,7 @@ cmd_restricted_stop() {
   profile_exists "$name" || die "No such restricted profile: '$name'."
   use_profile "$name"
   state_set '.paused = true'
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox stop "$name" >/dev/null 2>&1 || true
   ok "Restricted assistant '$name' paused (keep-alive off) and its box stopped."
   info "${c_dim}Resume with: abs restricted start $name${c_reset}"
@@ -3602,7 +3616,7 @@ cmd_restricted_start() {
   profile_exists "$name" || die "No such restricted profile: '$name'."
   use_profile "$name"
   state_set 'del(.paused)'
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
   ok "Restricted assistant '$name' resumed — the daemon will bring it back online shortly."
 }
@@ -3612,7 +3626,7 @@ cmd_restricted_destroy() {
   local name="${1:-}"
   [ -n "$name" ] || die "Usage: abs restricted destroy <name>"
   profile_exists "$name" || die "No such restricted profile: '$name'."
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)"
+  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
   # Pause first so the daemon stops relaunching while we tear down.
   use_profile "$name"; state_set '.paused = true' 2>/dev/null || true
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox destroy "$name" --purge >/dev/null 2>&1 || true
@@ -4262,7 +4276,9 @@ main() {
   case "$cmd" in
     run)       shift || true; cmd_run "$@" ;;
     start)     shift; cmd_start "$@" ;;
-    restricted) shift; cmd_restricted "$@" ;;
+    # Tested, so a subcommand's `return 1` (e.g. no v3 checkout) becomes a clean
+    # exit status instead of tripping the ERR trap with a second, uglier message.
+    restricted) shift; cmd_restricted "$@" || exit $? ;;
     setup)     cmd_setup ;;
     status)    cmd_status ;;
     profiles)  cmd_profiles ;;
