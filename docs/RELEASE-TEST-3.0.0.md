@@ -33,7 +33,7 @@ what you saw, and stop the release if it's in the Must-pass block.
 | # | Do | Expect |
 | --- | --- | --- |
 | A1 | `./install.sh` in the checkout | `Agent Babysitter 3.0.0 installed`, links `~/.local/bin/abs` → the checkout |
-| A2 | `abs --version` (or `abs help` header) | `3.0.0` |
+| A2 | `abs --version` | `Agent Babysitter 3.0.0` |
 | A3 | `PREFIX=/tmp/absbin ./install.sh` | Installs to `/tmp/absbin/abs`, doesn't touch your real one |
 | A4 | `cp abs.sh /tmp/absbin/abs && /tmp/absbin/abs restricted list` | **One** `✗` saying it needs the full checkout, plus a `git clone` line. **No** "Unexpected failure" |
 | A5 | `abs doctor` | Core deps ✓, daemon ✓, engines ✓, config ✓ |
@@ -126,11 +126,17 @@ Full checklist: **`docs/v3/manual-tests/restricted.md`** — run it as written; 
 summary below is what it proves, so you know what a FAIL means.
 
 **You need:** Docker running, and a **throwaway bot token from @BotFather**. This
-is the third bot; C1–C5 have been blocked on it since July.
+is the third bot; the restricted checklist has been blocked on it since July.
+
+The image is **already built** on this machine (`absd-sandbox:v4`, which is what
+`absd/sandbox.py` expects), so you do **not** need to rebuild — a rebuild is ~10
+minutes for nothing. Confirm and move on:
 
 ```sh
-abs sandbox build --rebuild     # once — Stage 3 needs the v3 image
+docker images | grep absd-sandbox     # expect v4
 ```
+
+Only if that shows no v4: `abs sandbox build`.
 
 | Section | Proves |
 | --- | --- |
