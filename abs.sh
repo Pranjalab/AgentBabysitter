@@ -428,7 +428,19 @@ use_profile() {
 
   # An explicit TELEGRAM_STATE_DIR still wins, for anyone already using the
   # documented two-bot trick from before profiles existed.
-  if [ -n "${TELEGRAM_STATE_DIR:-}" ]; then
+  #
+  # But ONLY when it is genuinely the user's. `cmd_run` exports this at launch so
+  # the plugin can find the token, which means every `abs` command typed INSIDE a
+  # session inherits it — and it used to be applied to whatever profile was being
+  # resolved, so `abs profiles` from inside a session showed every profile as
+  # "live (pid N)" with the running bot's pid, and `abs --profile work` resolved
+  # work's token and allowlist to the *default* bot's directory.
+  #
+  # ABS_SESSION_PROFILE (exported beside it) names the profile the variable
+  # belongs to. Unset means nobody launched through abs, so it is the user's own
+  # export and the legacy trick still works untouched.
+  if [ -n "${TELEGRAM_STATE_DIR:-}" ] \
+     && { [ -z "${ABS_SESSION_PROFILE:-}" ] || [ "${ABS_SESSION_PROFILE}" = "$name" ]; }; then
     TG_DIR="$TELEGRAM_STATE_DIR"
   elif [ -f "$ABS_STATE" ] && TG_DIR="$(jq -r '.tg_dir // empty' "$ABS_STATE" 2>/dev/null)" && [ -n "$TG_DIR" ]; then
     : # took it from the profile
@@ -3774,6 +3786,10 @@ cmd_run() {
   # The plugin reads this to find the token and the allowlist. Exporting it is
   # what makes profiles work — without it every profile would drive one bot.
   export TELEGRAM_STATE_DIR="$TG_DIR"
+  # …and which profile it belongs to, so an `abs` command run inside this session
+  # doesn't apply this one bot's directory to every other profile it resolves
+  # (see use_profile).
+  export ABS_SESSION_PROFILE="$PROFILE"
 
   # Check for a newer release and, if one exists, offer to update-and-relaunch
   # before we commit to this launch. Placed ahead of the background warm-ups so a
