@@ -179,8 +179,12 @@ def test_garbage_in_the_state_file_reads_as_text_not_as_a_broken_mode(abs_home):
 
 
 def test_the_mode_shows_up_in_config(abs_home):
+    """The listing reports the two channels, not the internal three-way mode — that
+    is how the setting is actually reasoned about ("text on, voice on")."""
     abs_run(abs_home, "config", "reply", "both")
-    assert "reply mode     both" in abs_run(abs_home, "config").stderr
+    out = abs_run(abs_home, "config").stderr
+    assert "reply text     on" in out
+    assert "reply voice    on" in out
 
 
 # --- turning markdown into something worth hearing ---------------------------

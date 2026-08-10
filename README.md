@@ -130,11 +130,21 @@ assistant to always reply with a voice note works until the session gets long an
 the instruction drifts out of the model's attention. `abs config reply` stores it
 instead, and the session hooks enforce it whether the model remembers or not:
 
+Two switches, one per channel:
+
 ```sh
-abs config reply text     # text only (the default)
-abs config reply both     # every reply also arrives as a voice note
-abs config reply voice    # the voice note IS the reply — the text is suppressed
+abs config reply-text on|off     # send replies as text  (default on)
+abs config reply-voice on|off    # send replies as a voice note (default off)
 ```
+
+Both on and **every finished result goes out as text *and* as a voice note**. Turn
+text off and the voice note *is* the reply. (`abs config reply text|both|voice`
+still works as the one-line shorthand.)
+
+Turning both off is refused — that isn't a delivery mode, it's silence, and it's
+the one state where a message you were waiting for never arrives with nothing
+saying why. `abs quiet on` already means "mute the reports", says so, and can be
+undone from either side.
 
 `voice` still lets a message through as text when it carries a code block, a link,
 or an attachment: a voice note can't carry any of those, and a blocked message is
@@ -260,7 +270,9 @@ abs --model opus        # any claude flag is passed straight through
 | ⚙️ `abs config guard on` / `off` | Block destructive commands on Telegram turns (default on) |
 | ⚙️ `abs config voice standard` / `turbo` | Default TTS model — expressive vs. ~1.8× faster |
 | ⚙️ `abs config voice-sample <file>` | Clone a voice for spoken replies (both models) |
-| ⚙️ `abs config reply text\|both\|voice` | Whether replies arrive as text, both, or voice only |
+| ⚙️ `abs config reply-text on` / `off` | Send replies as text (default on) |
+| ⚙️ `abs config reply-voice on` / `off` | Send replies as a voice note (default off) |
+| ⚙️ `abs config auto-silent on` / `off` | Pause reports while you're driving the terminal (default on) |
 | 🔕 `abs quiet on` / `off` | Mute / unmute reports (inbound still works) |
 | 🛑 `abs off` / `on` | Drop / re-enable all inbound + outbound Telegram |
 | 🚪 `abs exit` | End the running session (restart with `abs`) |

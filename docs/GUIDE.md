@@ -95,12 +95,36 @@ gets long and the instruction drifts out of the model's attention — the failur
 mode of every standing preference kept in a prompt. `abs config reply` stores it,
 and the session hooks act on it whether the model remembers or not.
 
+It's two switches, one per channel:
+
 ```sh
-abs config reply text     # text only (default)
-abs config reply both     # the text goes out, and a voice note of it follows
-abs config reply voice    # the voice note IS the reply; the text is suppressed
-abs config                # shows the current mode
+abs config reply-text on|off      # text replies (default on)
+abs config reply-voice on|off     # voice-note replies (default off)
+abs config                        # shows both, and the mode they add up to
 ```
+
+| text | voice | What arrives |
+| --- | --- | --- |
+| on | off | text only — the default |
+| on | on | **both**, on every finished result |
+| off | on | the voice note *is* the reply |
+| off | off | refused — see below |
+
+The three-way shorthand still works if you prefer it:
+
+```sh
+abs config reply text | both | voice
+```
+
+**Why both-off is refused.** It isn't a delivery mode, it's silence — and it's the
+one state where something you were waiting for never arrives and nothing says why.
+`abs quiet on` already means "mute the reports", it says so when you set it, and it
+lifts from either the terminal or the phone. You get pointed there instead.
+
+**Setting a voice mode also turns auto-silent off** (below), and says so when it
+does. Asking for a voice note on every result and then having a heuristic decide
+you didn't want to be told is the exact contradiction this feature exists to end.
+It's a one-time action, not a lock — `abs config auto-silent on` puts it back.
 
 `both` mirrors from a `PostToolUse` hook; `voice` intercepts at `PreToolUse`,
 speaks the message, and blocks the text. The model is *told* which mode is on —
@@ -176,6 +200,41 @@ ABS_AWAY=1 abs
 That runs with `--permission-mode acceptEdits` — file edits no longer prompt.
 Bash and other tools still ask. It's a real trade: you give up the review step on
 edits in exchange for not being blocked. Use it when you trust the task.
+
+## Auto-silent — why the pings sometimes stop on their own
+
+There are two ways reports go quiet, and they behave differently.
+
+**`abs quiet on`** is the explicit one. Absolute, obvious, lifts with
+`abs quiet off` from the terminal or "unmute the reports" from the phone.
+
+**Auto-silent** is a heuristic. After three consecutive prompts typed *at the
+terminal*, ABS assumes you're at the desk watching output and holds proactive
+pings. It lifts only when you reach for your phone — a Telegram message clears it —
+deliberately **not** on idle, because reading Claude's output for a minute
+shouldn't start your phone buzzing. `abs quiet off` is the escape hatch that
+doesn't need the phone.
+
+That's a sensible default and a bad fit for one specific case: you've said *"report
+every result, as text and as voice"*, and a guess about whether you wanted to know
+overrules you. So:
+
+```sh
+abs config auto-silent off    # every finished result reports, however long you've been at the desk
+abs config auto-silent on     # back to the heuristic (the default)
+abs config auto-silent        # which is it right now
+```
+
+Setting `reply-voice on` (or `reply both`/`reply voice`) turns it off for you and
+prints that it did. `abs config` always shows the effective state, so it's never a
+hidden coupling.
+
+One honest caveat: quiet and auto-silent are **advisory**, not enforced. The prompt
+tells the session to check `abs is-quiet` before a proactive send, and the model
+complies — but nothing in a hook blocks the message the way reply mode blocks it.
+That's also why muting can feel slightly inconsistent, and it's why "always send me
+both" belongs in `reply-text`/`reply-voice`, which *are* hook-enforced, rather than
+in how you phrase a request.
 
 ## Staying alive while you're out
 

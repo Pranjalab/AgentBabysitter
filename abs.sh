@@ -1253,7 +1253,13 @@ cmd_is_quiet() {
   # Auto-silent, tripped by sustained terminal activity, holds until you reach
   # for your phone: a Telegram message clears it (or `abs quiet off`). It does
   # NOT lift on idle — reading at the desk should not start a buzz.
-  if [ "$(state_get '.auto_silent')" = "true" ]; then echo "quiet"; return 0; fi
+  #
+  # Skipped entirely when the operator has turned the heuristic off
+  # (`abs config auto-silent off`, which `abs config reply both|voice` also does):
+  # once you have said "always send me every result", a guess about whether you
+  # want it is not an improvement, it is the thing that loses messages.
+  if [ "$(state_get '.no_auto_silent')" != "true" ] \
+     && [ "$(state_get '.auto_silent')" = "true" ]; then echo "quiet"; return 0; fi
   echo "active"
 }
 
@@ -1348,6 +1354,66 @@ readonly VOICE_MIRROR_MAX="${ABS_VOICE_MAX_CHARS:-1200}"
 reply_mode() {
   local m; m="$(state_get '.reply_mode')"
   case "$m" in both|voice) printf '%s' "$m" ;; *) printf 'text' ;; esac
+}
+
+# The three modes above, seen as the two switches people actually reason about.
+# `text` is off only in voice-only mode; `voice` is on in both and voice.
+reply_text_on()  { [ "$(reply_mode)" != "voice" ]; }
+reply_voice_on() { [ "$(reply_mode)" != "text" ]; }
+
+# --- the two channels as independent on/off switches -------------------------
+#
+# `abs config reply-text on|off` and `abs config reply-voice on|off`. Three of the
+# four combinations map onto an existing reply_mode:
+#
+#   text on,  voice off  ->  text    (the default)
+#   text on,  voice on   ->  both
+#   text off, voice on   ->  voice
+#   text off, voice off  ->  REFUSED — see below
+#
+# The fourth is not a delivery mode, it is silence, and it is the one state where
+# a message the operator was waiting for simply never arrives with nothing saying
+# so. `abs quiet on` already means "mute the reports", says what it does, and is
+# reversible from either side; routing people there is honest, whereas letting
+# both switches sit off would ship a footgun disguised as a configuration.
+_reply_channel_set() {   # $1 = text|voice   $2 = on|off|""
+  local chan="$1" val="$2" t v
+  reply_text_on  && t=on || t=off
+  reply_voice_on && v=on || v=off
+  if [ -z "$val" ]; then
+    info "Reply channels: text $t · voice $v  (mode: $(reply_mode))"
+    return 0
+  fi
+  case "$val" in
+    on|true|yes)  [ "$chan" = text ] && t=on  || v=on ;;
+    off|false|no) [ "$chan" = text ] && t=off || v=off ;;
+    *) die "Usage: abs config reply-$chan on|off" ;;
+  esac
+  if [ "$t" = off ] && [ "$v" = off ]; then
+    die "That would leave nothing to send with. If you want the reports muted, say so directly: abs quiet on"
+  fi
+  if [ "$v" = on ]; then
+    if [ "$t" = off ]; then
+      voice_can_speak || die "Turning text off leaves only voice, and nothing here can speak. Run: abs voice setup"
+    else
+      voice_can_speak || warn "Voice isn't installed here — set it up with 'abs voice setup' or the notes won't send."
+    fi
+  fi
+  if   [ "$t" = on ]  && [ "$v" = off ]; then state_set 'del(.reply_mode)'
+  elif [ "$t" = on ]  && [ "$v" = on  ]; then state_set '.reply_mode = "both"'
+  else                                        state_set '.reply_mode = "voice"'
+  fi
+  # Any explicit choice here is a statement about what should reach the phone, so
+  # the terminal-activity heuristic stops overruling it.
+  if [ "$v" = on ]; then
+    state_set '.no_auto_silent = true | .auto_silent = false | .terminal_streak = 0'
+  fi
+  ok "Reply channels: text $t · voice $v  (mode: $(reply_mode)). Takes effect next session."
+  [ "$v" = on ] && [ "$t" = on ] \
+    && info "Every finished result now goes out as text and as a voice note."
+  [ "$t" = off ] \
+    && info "Code, links and attachments still go as text — a voice note can't carry them."
+  return 0
 }
 
 # Markdown reads terribly out loud: asterisks become "star", a URL becomes a
@@ -1525,7 +1591,14 @@ _silent_terminal() {   # a terminal command → count toward auto-silence
   streak="$(state_get '.terminal_streak')"
   case "$streak" in ''|null|*[!0-9]*) streak=0 ;; esac
   streak=$((streak + 1))
-  if [ "$streak" -ge "$SILENT_STREAK" ]; then
+  # With the heuristic disabled, keep counting (the streak is still useful in the
+  # log and in `abs status`) but never flip auto_silent. Not flipping it, rather
+  # than flipping it and ignoring it, means `abs status` cannot show "auto-muted"
+  # for a profile that will never be auto-muted.
+  if [ "$(state_get '.no_auto_silent')" = "true" ]; then
+    state_set --argjson s "$streak" --argjson t "$now" \
+      '.terminal_streak = $s | .last_terminal_ts = $t | .auto_silent = false' 2>/dev/null || true
+  elif [ "$streak" -ge "$SILENT_STREAK" ]; then
     state_set --argjson s "$streak" --argjson t "$now" \
       '.terminal_streak = $s | .last_terminal_ts = $t | .auto_silent = true' 2>/dev/null || true
   else
@@ -1853,6 +1926,22 @@ cmd_config() {
         "")        info "Default silent: $(state_get '.default_quiet' | sed 's/^null$/false/')" ;;
         *)         die "Usage: abs config silent on|off" ;;
       esac ;;
+    auto-silent)
+      # The terminal-activity heuristic: after SILENT_STREAK consecutive terminal
+      # prompts, hold proactive pings until you reach for your phone. Good default
+      # for someone sitting at the desk; wrong for someone who has explicitly said
+      # "report every result", which is why setting a voice reply mode turns it off.
+      case "$val" in
+        on|true)
+          state_set 'del(.no_auto_silent)'
+          ok "Auto-silent ON — reports pause while you're driving from the terminal." ;;
+        off|false)
+          state_set '.no_auto_silent = true | .auto_silent = false | .terminal_streak = 0'
+          ok "Auto-silent OFF — every finished result reports, however long you've been at the desk." ;;
+        "")
+          info "Auto-silent: $([ "$(state_get '.no_auto_silent')" = "true" ] && echo off || echo "on (after $SILENT_STREAK terminal prompts)")" ;;
+        *) die "Usage: abs config auto-silent on|off" ;;
+      esac ;;
     start-menu)
       case "$val" in
         on|true)   state_set 'del(.no_start_menu)';    ok "Start menu ON — interactive 'abs' offers resume when you have recents." ;;
@@ -1946,7 +2035,23 @@ cmd_config() {
         "")
           info "Replies: $(reply_mode)" ;;
         *) die "Usage: abs config reply text|both|voice" ;;
+      esac
+      # Asking for a voice note on every result and then having a heuristic decide
+      # you didn't want to be told is the exact contradiction this is meant to end.
+      case "$val" in
+        both|voice+text|on|voice|only|voice-only)
+          state_set '.no_auto_silent = true | .auto_silent = false | .terminal_streak = 0'
+          info "Auto-silent turned off too — every finished result now reports." ;;
       esac ;;
+    reply-text|text)
+      # The two channels as independent switches, which is how they are actually
+      # thought about ("text on, voice on"). They write the same .reply_mode the
+      # hooks already enforce, rather than adding a fourth code path through the
+      # message-delivery logic — that path is where a dropped reply costs you a
+      # message, and it is not the place for new untested branches.
+      _reply_channel_set text "$val" ;;
+    reply-voice)
+      _reply_channel_set voice "$val" ;;
     kokoro-voice)
       # Which built-in kokoro voice to speak with. Ignored by chatterbox, which
       # takes its voice from the sample instead.
@@ -1987,13 +2092,15 @@ cmd_config() {
       info "  conversation log $([ "$(state_get '.no_log')" = "true" ] && echo off || echo on)"
       info "  command guard  $([ "$(state_get '.no_guard')" = "true" ] && echo off || echo on)"
       info "  start menu     $([ "$(state_get '.no_start_menu')" = "true" ] && echo off || echo on)"
-      info "  reply mode     $(reply_mode)"
+      info "  reply text     $(reply_text_on && echo on || echo off)"
+      info "  reply voice    $(reply_voice_on && echo on || echo off)"
+      info "  auto-silent    $([ "$(state_get '.no_auto_silent')" = "true" ] && echo off || echo on)"
       info "  voice engine   $(state_get '.tts_engine' | sed 's/^null$/auto/')"
       info "  kokoro voice   $(state_get '.kokoro_voice' | sed 's/^null$/af_heart (default)/')"
       info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
       info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply text|both|voice  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 
@@ -3999,6 +4106,9 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
 
   ${c_bold}abs${c_reset} config model <name>  Default model for new sessions (--clear to unset)
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
+  ${c_bold}abs${c_reset} config reply-text on|off   Send replies as text (default on)
+  ${c_bold}abs${c_reset} config reply-voice on|off  Send replies as a voice note (default off)
+  ${c_bold}abs${c_reset} config auto-silent on|off  Pause reports while you drive the terminal (default on)
   ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot + usage (default on)
   ${c_bold}abs${c_reset} config usage-refresh <min>  How often the usage glance refreshes (default 5)
   ${c_bold}abs${c_reset} config update-check on|off  On-launch "update now?" prompt (default on)
