@@ -64,6 +64,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   operator can't see. An unreadable state file now reads as empty, which every
   caller already handles.
 
+- **Fixed: a running session made every OTHER profile resolve to its bot.**
+  `abs run` exports `TELEGRAM_STATE_DIR` so the plugin can find the token, and
+  every `abs` command typed inside that session inherited it — but `use_profile`
+  applied it to whatever profile it was *resolving*, not just the session's own.
+  Visibly, `abs profiles` marked every profile `live (pid N)` with the running
+  bot's pid. The half that actually mattered: `TG_DIR` is where the token and the
+  allowlist are read from, so `abs --profile work …` inside a `default` session
+  drove the wrong bot with the wrong allowlist. The export now carries
+  `ABS_SESSION_PROFILE` naming who it belongs to; with that absent it is the
+  user's own variable and the documented pre-profiles two-bot trick is unchanged.
+
+- **Fixed: `abs restricted` printed two errors on a single-file install.**
+  `_restricted_py` called `die` while being read as `py="$(_restricted_py)"`, and
+  `exit` inside a command substitution ends only the subshell — so the parent
+  carried on with an empty `$py` and the ERR trap added `Unexpected failure (exit
+  1) at line N` underneath the real message. Two errors, the useless one last, on
+  the first v3 command a `curl | bash` user tries. Now one message, naming the
+  fix (`git clone …`).
+
+- **Reply-channel changes say WHEN they land.** `abs config reply-text|reply-voice`
+  answered "Takes effect next session" to everything, which is wrong in both
+  directions: voice is decided at send time and lands on the very next message,
+  while suppressing text needs the PreToolUse gate and so waits for a relaunch.
+  A blanket message either sends you restarting for nothing or teaches you to
+  skip the line — and then a live session that correctly still sends text reads
+  as broken.
+
 - **A handoff marker can no longer outlive its session.** Boot recovery caught
   that at startup; nothing caught it in a daemon that had been up for weeks after
   a machine slept, a session was hard-killed, or a reclaim was interrupted between
