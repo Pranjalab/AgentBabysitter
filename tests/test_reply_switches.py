@@ -269,3 +269,49 @@ def test_both_switches_show_up_in_the_config_listing(abs_home):  # noqa: F811
     assert "reply text     on" in out
     assert "reply voice    on" in out
     assert "auto-silent    off" in out
+
+
+# ---- when the change actually lands ------------------------------------------
+#
+# The two halves differ, and the command used to say "Takes effect next session"
+# for both. That is wrong in opposite directions: it sends someone restarting for
+# a voice change that was already live, and — because a line you have learned to
+# ignore stops being read — it is exactly how a live session gets mis-scored as
+# broken. Voice is decided at send time by the PostToolUse mirror. Suppressing
+# text needs the PreToolUse gate, which is written into the settings file when
+# the session launches.
+
+
+@needs_tts
+def test_turning_voice_on_says_it_is_live_now(abs_home):  # noqa: F811
+    out = abs_run(abs_home, "config", "reply-voice", "on")
+    assert out.returncode == 0, out.stderr
+    assert "Takes effect now" in out.stderr
+    assert "NEW session" not in out.stderr
+
+
+def test_turning_voice_off_says_it_is_live_now(abs_home):  # noqa: F811
+    abs_run(abs_home, "config", "reply-voice", "on")
+    out = abs_run(abs_home, "config", "reply-voice", "off")
+    assert out.returncode == 0, out.stderr
+    assert "Takes effect now" in out.stderr
+
+
+@needs_tts
+def test_turning_text_off_says_a_new_session_is_needed(abs_home):  # noqa: F811
+    """The one case that genuinely waits for a relaunch, and the only one the
+    operator has to be told about."""
+    abs_run(abs_home, "config", "reply-voice", "on")
+    out = abs_run(abs_home, "config", "reply-text", "off")
+    assert out.returncode == 0, out.stderr
+    assert "NEW session" in out.stderr
+
+
+@needs_tts
+def test_turning_text_back_on_is_live_now(abs_home):  # noqa: F811
+    abs_run(abs_home, "config", "reply-voice", "on")
+    abs_run(abs_home, "config", "reply-text", "off")
+    out = abs_run(abs_home, "config", "reply-text", "on")
+    assert out.returncode == 0, out.stderr
+    assert "Takes effect now" in out.stderr
+    assert "NEW session" not in out.stderr

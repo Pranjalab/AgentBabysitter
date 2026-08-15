@@ -1482,7 +1482,18 @@ _reply_channel_set() {   # $1 = text|voice   $2 = on|off|""
   if [ "$v" = on ]; then
     state_set '.no_auto_silent = true | .auto_silent = false | .terminal_streak = 0'
   fi
-  ok "Reply channels: text $t · voice $v  (mode: $(reply_mode)). Takes effect next session."
+  # Precise about WHEN, because the two halves differ and a blanket "next
+  # session" sends people restarting for no reason — or, worse, teaches them to
+  # ignore the line and then mis-read a live session as broken.
+  #
+  # Voice is decided at send time: the PostToolUse mirror reads `reply_mode` on
+  # every reply, so turning it on or off lands on the very next message.
+  # Suppressing TEXT is different — it needs the PreToolUse gate, and hooks are
+  # written into the settings file when the session launches. Until then the mode
+  # is stored and text keeps flowing.
+  local when="Takes effect now."
+  [ "$t" = off ] && when="Voice is live now; text stops being suppressed only in a NEW session."
+  ok "Reply channels: text $t · voice $v  (mode: $(reply_mode)). $when"
   [ "$v" = on ] && [ "$t" = on ] \
     && info "Every finished result now goes out as text and as a voice note."
   [ "$t" = off ] \

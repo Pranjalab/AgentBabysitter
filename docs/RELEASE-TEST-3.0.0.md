@@ -1,7 +1,7 @@
 # Release test — Agent Babysitter 3.0.0
 
 The one checklist to run before publishing. Everything here is a **manual** test:
-740 automated tests already cover what a machine can check, and none of them can
+744 automated tests already cover what a machine can check, and none of them can
 tell you whether a real Telegram bot, a real Docker container, or a real Claude
 login behaves. That is what this is for.
 
@@ -50,9 +50,9 @@ tries. Two errors there is a FAIL.
 | B1 | `abs config` | `reply text on` · `reply voice on` · `auto-silent off` |
 | B2 | Start a session. Ask it something small ("what's 18% of 240?") | Answer arrives **as text AND as a voice note** |
 | B3 | Type 4–5 commands at the terminal, then have it finish a task | The report **still arrives**. This is the old bug — before, it went silent after 3 |
-| B4 | `abs config reply-voice off`, new session, finish a task | Text only, no voice |
-| B5 | `abs config reply-voice on` again | Both again; `abs config` shows `auto-silent off` |
-| B6 | `abs config reply-text off` | Voice only. Ask for something with a **code block** → still arrives as text |
+| B4 | `abs config reply-voice off`, then ask something **in the same session** | Text only, no voice — **immediately**, no relaunch. The command says `Takes effect now` |
+| B5 | `abs config reply-voice on`, ask again | Both again; `abs config` shows `auto-silent off` |
+| B6 | `abs config reply-text off`, **then start a new session** | Voice only. Ask for something with a **code block** → that one still arrives as text |
 | B7 | With text off, `abs config reply-voice off` | **Refused**, pointing at `abs quiet on`. Mode unchanged |
 | B8 | `abs config reply-text on`, then `abs quiet on`, finish a task | No report. `abs quiet off` → reports resume |
 | B9 | Look at the status bar with both switches on | `● Text` **and** `● Voice` both green — and they **stay** green when nothing has been said for 10 minutes |
@@ -61,6 +61,13 @@ tries. Two errors there is a FAIL.
 
 B3 is the whole point of today's change. If it goes quiet, the release is not
 ready.
+
+**B4 vs B6 — the one asymmetry, and the easiest way to mis-score this block.**
+Voice is decided at *send* time, so turning it on or off lands on the very next
+message. Suppressing *text* needs a PreToolUse hook, and hooks are written into
+the settings file when a session **launches** — so B6 without a relaunch will
+show you text *and* voice, which is the mode working as stored, not a bug. The
+command now tells you which one you just did.
 
 B9 is the fix for the grey Voice dot: it used to mean "a note went out in the
 last 2 minutes", so it went dim while voice was working perfectly. Both dots now
