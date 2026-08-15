@@ -266,6 +266,7 @@ abs --model opus        # any claude flag is passed straight through
 | ⚙️ `abs config model <name>` | Default model for new sessions (`--clear` to unset) |
 | ⚙️ `abs config silent on` / `off` | Whether new sessions start muted |
 | ⚙️ `abs config statusline on` / `off` | Bottom-bar Text/Voice/Daemon dots + usage (default on) |
+| ⚙️ `abs config label <name>` | Name before the colon in the bar — `auto` takes your Claude one |
 | ⚙️ `abs config usage-refresh <min>` | How often the usage glance refreshes (default 5) |
 | ⚙️ `abs config guard on` / `off` | Block destructive commands on Telegram turns (default on) |
 | ⚙️ `abs config voice standard` / `turbo` | Default TTS model — expressive vs. ~1.8× faster |
@@ -321,6 +322,14 @@ daemon (a systemd user service) that polls every one of your idle bots, so you c
 
   Voice is dim on a machine with no TTS even with the switch on — the switch is
   what you asked for, TTS is whether it can happen.
+
+  The name before the colon is yours to set:
+
+  ```sh
+  abs config label auto      # → Pran:@yourbot   (from your Claude display name)
+  abs config label Pran      # or say it directly
+  abs config label --clear   # back to abs:
+  ```
 
 Setup (a checkout install):
 

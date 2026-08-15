@@ -1,7 +1,7 @@
 # Release test — Agent Babysitter 3.0.0
 
 The one checklist to run before publishing. Everything here is a **manual** test:
-718 automated tests already cover what a machine can check, and none of them can
+740 automated tests already cover what a machine can check, and none of them can
 tell you whether a real Telegram bot, a real Docker container, or a real Claude
 login behaves. That is what this is for.
 
@@ -55,6 +55,7 @@ tries. Two errors there is a FAIL.
 | B8 | `abs config reply-text on`, then `abs quiet on`, finish a task | No report. `abs quiet off` → reports resume |
 | B9 | Look at the status bar with both switches on | `● Text` **and** `● Voice` both green — and they **stay** green when nothing has been said for 10 minutes |
 | B10 | `abs config reply-voice off` → look again | `● Voice` goes dim, `● Text` stays green. Turn it back on → green again |
+| B11 | `abs config label auto` | `Status-bar label: Pran`; a new session's bar reads `Pran:@Claudepranbot`. `abs config label --clear` → back to `abs:` |
 
 B3 is the whole point of today's change. If it goes quiet, the release is not
 ready.

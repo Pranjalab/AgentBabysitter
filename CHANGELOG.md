@@ -49,6 +49,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ABS_VOICE_ACTIVE_SECS` no longer does anything; `.last_voice_ts` is still
   stamped as a record of when audio last worked end-to-end.
 
+- **The status-bar label is yours: `abs config label`.** `abs:@yourbot` becomes
+  `Pran:@yourbot`. `auto` takes the display name off your Claude account —
+  exactly that one field of `~/.claude.json`, resolved once and stored, so no
+  render reads the file and the label can't change under you. The value is
+  **sanitised, not validated**: it is reprinted into a terminal status bar
+  surrounded by real ESC bytes on every render, where a control character would
+  move the cursor rather than merely look wrong. Cleaning happens on the way out
+  too, so a hand-edited `rc.json` can't inject either.
+
 - **A corrupt `rc.json` no longer breaks the status bar.** `state_get` passed
   jq's exit 5 up through `x="$(state_get …)"`, tripping the ERR trap — two
   `Unexpected failure` lines on *every* Claude Code render, naming a file the

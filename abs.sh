@@ -1282,6 +1282,48 @@ cmd_is_quiet() {
   echo "active"
 }
 
+# --- the status-bar label -----------------------------------------------------
+#
+# The bit before the colon: `abs:@Claudepranbot`, or `Pran:@Claudepranbot` once
+# you have set your own. Cosmetic, but it sits in the operator's eyeline all day.
+#
+# SANITISED, not merely validated. This string is printed into a terminal status
+# bar with real ESC bytes around it, so a control character in it would not be
+# "an odd-looking label" — it would move the cursor, repaint, or swallow the rest
+# of the line, on every render. Keep printable ASCII and strip the rest; `:` goes
+# too, since the colon is the separator. Length is capped because the bar already
+# competes for room with three dots and three usage figures.
+BAR_LABEL_DEFAULT="abs"
+BAR_LABEL_MAX=12
+
+# Reduce an arbitrary string to something safe to print. Empty output means "not
+# usable as a label" — the caller decides whether that is a refusal or a default.
+bar_label_clean() {
+  printf '%s' "$1" | LC_ALL=C tr -cd '[:alnum:]._@ -' | cut -c1-"$BAR_LABEL_MAX" \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+bar_label() {
+  local v; v="$(state_get '.bar_label')"
+  case "$v" in ''|null) printf '%s' "$BAR_LABEL_DEFAULT"; return 0 ;; esac
+  # Clean on the way OUT as well as in. A profile edited by hand, or written by an
+  # older abs, must not be able to inject escapes into every single render.
+  v="$(bar_label_clean "$v")"
+  printf '%s' "${v:-$BAR_LABEL_DEFAULT}"
+}
+
+# The name on the Claude account, when there is one — `abs config label auto`.
+# Read from ~/.claude.json, which also holds account tokens: take exactly the one
+# field, never the file. Resolved ONCE at config time and stored, so no render
+# ever pays for reading it and the label can't silently change under you.
+claude_display_name() {
+  local f="$HOME/.claude.json" n
+  [ -f "$f" ] || return 1
+  n="$(jq -r '.oauthAccount.displayName // empty' "$f" 2>/dev/null)" || return 1
+  [ -n "$n" ] || return 1
+  printf '%s' "$n"
+}
+
 # Bottom-bar indicator, wired into the session via the settings file's statusLine
 # key (see cmd_run). Claude Code re-runs this on every render, so it MUST be fast
 # and MUST never error, hang, or exit non-zero — always print one short line.
@@ -1307,13 +1349,14 @@ cmd_is_quiet() {
 cmd_statusline() {
   local off=$'\033[0m' dim=$'\033[38;5;244m'
   local c_abs=$'\033[38;5;141m' c_tg=$'\033[38;5;74m' c_on=$'\033[38;5;71m'
-  [ -f "$ABS_STATE" ] || { printf 'abs:%s' "$PROFILE"; return 0; }
-  local bot label
+  # No state file: nothing to read a label out of, so the built-in name it is.
+  [ -f "$ABS_STATE" ] || { printf '%s:%s' "$BAR_LABEL_DEFAULT" "$PROFILE"; return 0; }
+  local bot label name; name="$(bar_label)"
   bot="$(state_get '.bot')"
   if [ -n "$bot" ] && [ "$bot" != "null" ]; then
-    label="${c_abs}abs:${off}${c_tg}@${bot}${off}"
+    label="${c_abs}${name}:${off}${c_tg}@${bot}${off}"
   else
-    label="${c_abs}abs:${PROFILE}${off}"
+    label="${c_abs}${name}:${PROFILE}${off}"
   fi
   # Channel state. `abs off` (dmPolicy=disabled) kills both; quiet mutes text only.
   local off_state=0 muted=0
@@ -1989,6 +2032,34 @@ cmd_config() {
         "")        info "Status-bar indicator: $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)" ;;
         *)         die "Usage: abs config statusline on|off" ;;
       esac ;;
+    label)
+      case "$val" in
+        "")
+          info "Status-bar label: $(bar_label)$([ "$(bar_label)" = "$BAR_LABEL_DEFAULT" ] && echo " (default)")"
+          info "  Set yours:  ${c_bold}abs config label <name>${c_reset}   or   ${c_bold}abs config label auto${c_reset}" ;;
+        --clear|clear)
+          state_set 'del(.bar_label)'
+          ok "Status-bar label back to '$BAR_LABEL_DEFAULT' — the bar reads ${BAR_LABEL_DEFAULT}:@$(state_get '.bot')." ;;
+        auto)
+          local n; n="$(claude_display_name)" \
+            || die "No display name on the Claude account here. Set one directly: abs config label <name>"
+          local c; c="$(bar_label_clean "$n")"
+          [ -n "$c" ] || die "The Claude display name ('$n') has nothing usable in it. Set one directly: abs config label <name>"
+          state_set --arg l "$c" '.bar_label = $l'
+          ok "Status-bar label: $c — from your Claude account. The bar reads ${c}:@$(state_get '.bot')." ;;
+        *)
+          local c; c="$(bar_label_clean "$val")"
+          # Refuse rather than silently substitute: someone who typed an emoji
+          # label should be told it won't render, not left wondering why the bar
+          # still says abs.
+          [ -n "$c" ] || die "Nothing usable in that label. Letters, digits, . _ @ - and spaces, up to $BAR_LABEL_MAX characters."
+          state_set --arg l "$c" '.bar_label = $l'
+          if [ "$c" != "$val" ]; then
+            ok "Status-bar label: $c  ${c_dim}(trimmed from '$val' — max $BAR_LABEL_MAX chars, printable only)${c_reset}"
+          else
+            ok "Status-bar label: $c — the bar reads ${c}:@$(state_get '.bot')."
+          fi ;;
+      esac ;;
     usage-refresh)
       case "$val" in
         "")       info "Usage refresh: $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min" ;;
@@ -2117,6 +2188,7 @@ cmd_config() {
       info "  model          $(state_get '.model' | sed 's/^null$/(Claude Code default)/')"
       info "  default silent $(state_get '.default_quiet' | sed 's/^null$/false/')"
       info "  statusline     $([ "$(state_get '.no_statusline')" = "true" ] && echo off || echo on)"
+      info "  bar label      $(bar_label)$([ "$(bar_label)" = "$BAR_LABEL_DEFAULT" ] && echo " (default)")"
       info "  usage refresh  $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min"
       info "  update check   $([ "$(state_get '.no_update_check')" = "true" ] && echo off || echo on)"
       info "  instant ack    $([ "$(state_get '.no_ack')" = "true" ] && echo off || echo on)"
@@ -4161,6 +4233,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config reply-voice on|off  Send replies as a voice note (default off)
   ${c_bold}abs${c_reset} config auto-silent on|off  Pause reports while you drive the terminal (default on)
   ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot + usage (default on)
+  ${c_bold}abs${c_reset} config label <name>  Name before the colon in the bar ('auto' = your Claude name)
   ${c_bold}abs${c_reset} config usage-refresh <min>  How often the usage glance refreshes (default 5)
   ${c_bold}abs${c_reset} config update-check on|off  On-launch "update now?" prompt (default on)
   ${c_bold}abs${c_reset} config ack on|off    👀 the moment a Telegram message lands (default on)

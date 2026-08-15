@@ -41,6 +41,12 @@ GREEN = "38;5;71"
 DIM = "38;5;244"
 
 _DOT = re.compile(r"\x1b\[(38;5;\d+)m●\x1b\[0m (Text|Voice|Daemon)")
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(s: str) -> str:
+    """The bar with abs's own colour codes removed — what a human reads."""
+    return _SGR.sub("", s)
 
 
 @pytest.fixture
@@ -269,3 +275,62 @@ def test_the_bar_survives_a_corrupt_rc_file(bar):
     (bar.home / "profiles" / PROFILE / "rc.json").write_text("{not json")
     out = bar.render()
     assert out.strip()
+
+
+# ---- the label before the colon ----------------------------------------------
+#
+# Cosmetic, except for one thing: it is printed into a terminal status bar with
+# real ESC bytes around it, on every render. So it is sanitised, not validated.
+
+
+def test_the_label_defaults_to_abs(bar):
+    assert "abs:@b" in _plain(bar.render())
+
+
+def test_a_set_label_replaces_it(bar):
+    bar.rc(bar_label="Pran")
+    assert "Pran:@b" in _plain(bar.render())
+    assert "abs:" not in _plain(bar.render())
+
+
+def test_a_label_with_escape_bytes_cannot_reach_the_bar(bar):
+    """The one that matters. An ESC in the label would not look odd — it would
+    move the cursor or eat the rest of the line, every render. Cleaning happens
+    on the way OUT too, so a hand-edited rc.json (or one written by an older abs)
+    is covered, not just what `abs config label` would have let through."""
+    bar.rc(bar_label="\x1b[31mPWN\x1b[0m")
+    out = bar.render()
+    assert "\x1b[31m" not in out          # the injected colour is gone
+    assert "\x1b" not in _plain(out)      # and no ESC survives anywhere else
+    # What's left is the printable residue, capped at 12: ESC and [ are stripped,
+    # the digits and letters of the sequence are not. Ugly, and that is the right
+    # trade — the render path must never fail, so it cleans rather than refuses.
+    # `abs config label` rejects this input outright; only a hand-edited rc.json
+    # gets here.
+    assert "31mPWN0m:@b" in _plain(out)
+
+
+def test_a_newline_in_the_label_cannot_break_the_single_line(bar):
+    """Claude Code renders one line; a newline would split the bar in two."""
+    bar.rc(bar_label="Pran\nEVIL")
+    out = bar.render()
+    assert "\n" not in out.strip()
+
+
+def test_an_over_long_label_is_truncated(bar):
+    bar.rc(bar_label="A" * 200)
+    plain = _plain(bar.render())
+    assert "A" * 12 + ":" in plain
+    assert "A" * 13 not in plain
+
+
+def test_a_label_of_only_unusable_characters_falls_back(bar):
+    """An emoji-only label survives storage but can't be rendered as a name;
+    falling back beats printing an empty `:@bot`."""
+    bar.rc(bar_label="🙂🙂")
+    assert "abs:@b" in _plain(bar.render())
+
+
+def test_the_label_shows_when_the_profile_has_no_bot_yet(bar):
+    bar.rc(bar_label="Pran", bot=None)
+    assert "Pran:" + PROFILE in _plain(bar.render())
