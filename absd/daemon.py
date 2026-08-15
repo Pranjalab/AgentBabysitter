@@ -2402,6 +2402,18 @@ class Poller:
                 self.profile.name,
             )
             lived = int(self._marker_age_s(marker))
+            # Restore the box BEFORE killing, or the in-container half is never
+            # reaped. `_kill_engine_session` reaps it through `_session_sandbox`,
+            # and on this path that field is still None — nothing has run since
+            # the process started. The surviving branch above sets it from the
+            # same marker; this one forgot, so the orphan-poller fix worked for
+            # the life of one daemon and was undone by every restart.
+            #
+            # The cost is silent: the in-box claude keeps its Telegram plugin
+            # polling the profile's token, so it and the next session split
+            # `getUpdates` between them and roughly half the operator's messages
+            # vanish with nothing erroring anywhere.
+            self._session_sandbox = sandbox
             self._kill_engine_session()
             self._emit(EVENT_SESSION_END, reason=END_EXITED, lived_s=lived)
             self._clear_handoff_marker()
