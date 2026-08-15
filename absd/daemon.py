@@ -797,7 +797,7 @@ class Poller:
         record = {
             "profile": self.profile.name,
             "state": state,
-            "pool_count": self.pool.count(),
+            "pool_count": self.pool.pending_count(),
             "session_pid": self.profile.live_session_pid(),
             "last_poll_at": self.last_poll_at,
             "updated_at": utc_now_iso(),
@@ -947,7 +947,7 @@ class Poller:
             return
         if is_clear_pool(ex.text):
             self._emit(EVENT_COMMAND, name="ABS CLEAR POOL")
-            n = self.pool.count()
+            n = self.pool.pending_count()
             self.pool.clear()
             await self._reply(ex, CLEAR_POOL_ACK.format(n=n))
             return
@@ -992,10 +992,10 @@ class Poller:
 
     async def _reply_status(self, ex: Extracted) -> None:
         pid = self.profile.live_session_pid()
-        await self._reply(ex, render_status(self.profile.name, pid, self.pool.count()))
+        await self._reply(ex, render_status(self.profile.name, pid, self.pool.pending_count()))
 
     async def _reply_pool(self, ex: Extracted) -> None:
-        await self._reply(ex, render_pool(self.pool.read_all()))
+        await self._reply(ex, render_pool(self.pool.unforwarded()))
 
     # ---- observability (structured event log) ----------------------------
 
@@ -2331,7 +2331,7 @@ class Poller:
             return
         if self.profile.is_blocked() or self.profile.is_off() or self.profile.keep_alive():
             return
-        await self._safe_send(int(chat_id), REBOOT_NOTICE.format(label=label, n=self.pool.count()))
+        await self._safe_send(int(chat_id), REBOOT_NOTICE.format(label=label, n=self.pool.pending_count()))
 
     async def boot_recover_and_notify(self) -> str:
         """Re-derive full session state from disk at boot (Step 1.8), and send the

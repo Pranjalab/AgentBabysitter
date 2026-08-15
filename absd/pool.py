@@ -179,12 +179,30 @@ class Pool:
         return out
 
     def count(self) -> int:
-        """Total number of well-formed records currently pooled."""
+        """Total well-formed records on disk, forwarded ones included.
+
+        This is the FILE's size, not "how many messages are waiting" — forwarding
+        stamps ``forwarded_at`` rather than deleting, so the two diverge the
+        moment anything is delivered. Everything the operator sees must use
+        :meth:`pending_count`; this one is for storage-level callers.
+        """
         return len(self.read_all())
 
     def unforwarded(self) -> list[PooledMessage]:
         """Records not yet delivered into a session (``forwarded_at is None``)."""
         return [m for m in self.read_all() if m.forwarded_at is None]
+
+    def pending_count(self) -> int:
+        """How many messages are actually waiting — the only count worth showing.
+
+        `ABS POOL`, `ABS STATUS` and the daemon dashboard all used
+        :meth:`count`, so a profile whose four pooled messages had long since
+        been delivered still advertised "Pool (4) … Send ABS START to act on
+        them" — and `ABS START`, which correctly reads
+        :meth:`unforwarded`, then offered nothing. Two answers to one question,
+        with the wrong one in every place the operator looks.
+        """
+        return len(self.unforwarded())
 
     def existing_update_ids(self) -> set[int]:
         """The set of ``update_id`` values already pooled — for dedupe on
