@@ -195,10 +195,37 @@ Don't file these as FAILs:
 # Sign-off
 
 ```
-Must-pass  A ___  B ___  C ___
-Should     D ___  E ___  F ___
-Restricted ___    Containment ___
+Must-pass  A PASS   B partial   C ___
+Should     D ___    E ___       F ___
+Restricted ___      Containment ___
 ```
 
 Release when A, B and C pass and the containment spot-check passes. Anything else
 that failed goes in the release notes as a known issue rather than silently.
+
+## Run log — 16 Aug 2026, Pranjal + Claudex
+
+| Step | Result | Note |
+| --- | --- | --- |
+| A1 | PASS | `3.0.0 installed`, symlink to the checkout |
+| A2–A5 | PASS | A4 gives one `✗` + `git clone`, no ERR-trap follow-up |
+| B1, B2 | PASS | text+voice both arriving |
+| B3 | **PASS** | report landed after **six** consecutive terminal turns — the bug this release exists to fix |
+| B4, B5 | PASS | voice off → silent, back on → both. "Takes effect now", no relaunch |
+| B8 | PASS | silent under quiet; report resumed after `quiet off` |
+| B9, B10, B11 | PASS | dot colours read from the SGR bytes, not by eye |
+| B6, B7, C | pending | need one relaunch |
+| D, E, F | not started | |
+| Restricted | blocked | needs a throwaway @BotFather token |
+
+**Found and fixed during this run** — none of these were in the release when the
+checklist was written:
+
+| | |
+| --- | --- |
+| `a6f577c` | a session's `TELEGRAM_STATE_DIR` resolved *every* profile to its bot — wrong token, wrong allowlist |
+| `99db30b` | `abs restricted` printed two errors on a single-file install |
+| `6daf190` | the Voice dot reported activity while Text reported config; Text ignored its own switch; a corrupt `rc.json` errored twice per render |
+| `06a852a` | "Takes effect next session" was wrong for the voice half, and would have mis-scored B4/B6 |
+
+Automated tests over the same period: 693 → 744.
