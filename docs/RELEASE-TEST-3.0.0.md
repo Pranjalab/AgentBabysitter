@@ -195,10 +195,17 @@ Don't file these as FAILs:
 # Sign-off
 
 ```
-Must-pass  A PASS   B partial   C ___
-Should     D ___    E ___       F ___
+Must-pass  A PASS   B PASS*   C UNTESTED
+Should     D ___    E ___     F ___
 Restricted ___      Containment ___
 ```
+
+**\* and the UNTESTED are deliberate, not oversights.** B6/B7 (voice-only mode)
+and all of section C (the arrow-key menus) were skipped by the operator's
+decision on 16 Aug. They are covered by automated tests — `test_reply_voice.py`,
+`test_reply_switches.py`, `test_menu_tty.py` — but nothing has driven the real
+terminal UI or watched a real voice-only reply. Ship them as *unverified by
+hand*, and say so in the release notes rather than implying a human checked.
 
 Release when A, B and C pass and the containment spot-check passes. Anything else
 that failed goes in the release notes as a known issue rather than silently.
@@ -214,7 +221,11 @@ that failed goes in the release notes as a known issue rather than silently.
 | B4, B5 | PASS | voice off → silent, back on → both. "Takes effect now", no relaunch |
 | B8 | PASS | silent under quiet; report resumed after `quiet off` |
 | B9, B10, B11 | PASS | dot colours read from the SGR bytes, not by eye |
-| B6, B7, C | pending | need one relaunch |
+| B6, B7 | **UNTESTED** | skipped by operator decision — voice-only mode never driven by hand |
+| C1–C5 | **UNTESTED** | skipped by operator decision — the arrow menus never driven by hand |
+| C6 | PASS | piped through `cat -v`, no escape bytes leak |
+| D1 | PASS | up 3h, 2 profiles, `default: yielding-to-session` |
+| E7 | PASS (so far) | 0 `session_blocked` events, as expected before E runs |
 | D, E, F | not started | |
 | Restricted | blocked | needs a throwaway @BotFather token |
 
