@@ -100,7 +100,14 @@ class Pool:
     # ---- writes ----------------------------------------------------------
 
     def append(self, message: PooledMessage) -> int:
-        """Append one message durably; return the new total pool count.
+        """Append one message durably; return how many are now WAITING.
+
+        Not the file total. The one caller puts this number straight into "saved
+        to pool (n)" — the single most-read number ABS produces — and to the
+        person reading it, n is how many messages are queued for the next
+        session. Returning the file total meant a profile with four long-since
+        delivered messages announced "(5)" for the first new one, and "(6)" for
+        the second.
 
         Creates the parent dir and the file 0600 if absent; a single
         ``O_APPEND`` write of one JSON line keeps concurrent/partial writes from
@@ -116,7 +123,7 @@ class Pool:
             os.close(fd)
         # Tighten perms even if the file pre-existed with a looser mode.
         os.chmod(self.path, _MODE)
-        return self.count()
+        return self.pending_count()
 
     def mark_forwarded(self, update_ids: list[int], forwarded_at: str | None = None) -> None:
         """Stamp the given records as forwarded, keeping them (D14).

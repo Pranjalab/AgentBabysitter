@@ -30,12 +30,20 @@ from tests.harness.fake_telegram import FakeTelegram
 from tests.test_flow_e2e import FakeEngine, make_poller
 
 
+#: Seeded update_ids start well above anything FakeTelegram will hand out. The
+#: poller dedupes new messages against ids already pooled (crash re-delivery),
+#: so a low-numbered seed silently swallows the very message a test then sends.
+_SEED_BASE = 10_000
+
+
 def _seed(poller: Poller, texts, forwarded: int = 0):
     """Pool `texts`, marking the first `forwarded` of them as delivered."""
-    for i, t in enumerate(texts, start=1):
+    for i, t in enumerate(texts, start=_SEED_BASE):
         poller.pool.append(PooledMessage(i, 42, t, utc_now_iso()))
     if forwarded:
-        poller.pool.mark_forwarded(list(range(1, forwarded + 1)))
+        poller.pool.mark_forwarded(
+            list(range(_SEED_BASE, _SEED_BASE + forwarded))
+        )
 
 
 # ---- the storage layer -------------------------------------------------------
@@ -67,7 +75,58 @@ def test_pending_count_matches_count_when_nothing_was_delivered(tmp_path: Path) 
     assert pool.pending_count() == pool.count() == 3
 
 
+def test_append_returns_what_is_waiting_not_the_file_total(tmp_path: Path) -> None:
+    """`append` feeds the "saved to pool (n)" ack directly — the most-read number
+    ABS produces. It returned the file total, so a profile holding four delivered
+    messages announced "(5)" for the first new one."""
+    pool = Pool(tmp_path / "pool.jsonl")
+    for i in range(1, 5):
+        pool.append(PooledMessage(i, 42, "old", utc_now_iso()))
+    pool.mark_forwarded([1, 2, 3, 4])
+
+    assert pool.append(PooledMessage(5, 42, "new", utc_now_iso())) == 1
+    assert pool.append(PooledMessage(6, 42, "newer", utc_now_iso())) == 2
+    assert pool.count() == 6          # the file really does hold six
+
+
 # ---- every place the operator reads a number ---------------------------------
+
+
+async def test_the_pool_ack_counts_only_what_is_waiting(
+    abs_home: Path, fake: FakeTelegram, client_factory
+) -> None:
+    """The exact message Pranjal saw. Four delivered on 5 August, one new — the
+    ack said (5), then (6). It must say (1), then (2)."""
+    write_profile(abs_home, allow_ids=[42])
+    poller = make_poller(abs_home, client_factory, engine=FakeEngine())
+    _seed(poller, ["hi", "hi", "hi", "hi"], forwarded=4)
+
+    fake.queue_message("hello", from_id=42)
+    await poller.poll_once()
+    fake.queue_message("hello again", from_id=42)
+    await poller.poll_once()
+
+    acks = [m["text"] for m in fake.sent_messages if "saved to pool" in m["text"]]
+    assert len(acks) == 2
+    assert "pool (1)" in acks[0]
+    assert "pool (2)" in acks[1]
+
+
+async def test_the_first_message_into_a_drained_pool_says_one(
+    abs_home: Path, fake: FakeTelegram, client_factory
+) -> None:
+    """A pool that has been fully delivered is, to the operator, empty. The next
+    message into it is the first one — saying otherwise makes them hunt for
+    messages that were handed over weeks ago."""
+    write_profile(abs_home, allow_ids=[42])
+    poller = make_poller(abs_home, client_factory, engine=FakeEngine())
+    _seed(poller, ["a"] * 9, forwarded=9)
+
+    fake.queue_message("only me", from_id=42)
+    await poller.poll_once()
+
+    body = "\n".join(m["text"] for m in fake.sent_messages)
+    assert "pool (1)" in body
 
 
 async def test_abs_pool_lists_only_what_is_waiting(
