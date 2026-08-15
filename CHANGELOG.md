@@ -37,6 +37,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message sent after this session ends will still land. It appears only where a
   daemon directory exists, so a v2 install sees the bar it always saw.
 
+- **The Text and Voice dots now answer the same question, and obey their own
+  switches.** Both mean: if a reply happened right now, would it go out this way?
+  Two bugs are fixed. `● Voice` reported *activity* — green only within
+  `ABS_VOICE_ACTIVE_SECS` (120s) of a real send — which was the honest signal
+  when voice was on-demand through `abs say`, but with reply switches it fires on
+  every reply, so the dot went dim two minutes after a note that had arrived
+  exactly as configured. And `● Text` never consulted `reply text off` at all,
+  because the dots predate the switches. Voice still goes dim when the machine
+  has no TTS: the switch is a wish, `voice_can_speak` is the fact.
+  `ABS_VOICE_ACTIVE_SECS` no longer does anything; `.last_voice_ts` is still
+  stamped as a record of when audio last worked end-to-end.
+
+- **A corrupt `rc.json` no longer breaks the status bar.** `state_get` passed
+  jq's exit 5 up through `x="$(state_get …)"`, tripping the ERR trap — two
+  `Unexpected failure` lines on *every* Claude Code render, naming a file the
+  operator can't see. An unreadable state file now reads as empty, which every
+  caller already handles.
+
 - **A handoff marker can no longer outlive its session.** Boot recovery caught
   that at startup; nothing caught it in a daemon that had been up for weeks after
   a machine slept, a session was hard-killed, or a reclaim was interrupted between

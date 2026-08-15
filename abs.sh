@@ -1188,7 +1188,14 @@ require_setup() {
   [ -f "$ABS_STATE" ] || die "Profile '$PROFILE' is not set up. Run: abs --profile $PROFILE setup"
 }
 
-state_get() { jq -r "$1" "$ABS_STATE" 2>/dev/null; }
+# A missing key already yields "null"; a CORRUPT rc.json used to yield exit 5,
+# and since every caller is `x="$(state_get …)"` the assignment inherited it and
+# tripped the ERR trap. The worst place that landed was the status bar, which
+# Claude Code re-renders constantly: two "Unexpected failure" lines per render,
+# for a file the operator can't see. Empty is the right answer to "what does this
+# unreadable file say" — callers already handle empty/null, and the commands that
+# genuinely need valid state (`abs run`, pairing) check for it themselves.
+state_get() { jq -r "$1" "$ABS_STATE" 2>/dev/null || true; }
 
 # state_set <jq options...> <filter> — atomic rewrite of rc.json, owner-only.
 state_set() {
@@ -1279,12 +1286,21 @@ cmd_is_quiet() {
 # key (see cmd_run). Claude Code re-runs this on every render, so it MUST be fast
 # and MUST never error, hang, or exit non-zero — always print one short line.
 #   abs:@bot · ● Text · ● Voice · Fable 2% · Week 12% (resets on Thu) · 5H 22% (…)
-# "abs:" in the theme violet, "@bot" in Telegram blue. Two channel dots, green
-# when that channel is genuinely live right now: Text = proactive reports are
-# flowing (not muted, not off); Voice = a voice note was actually sent recently
-# (within ABS_VOICE_ACTIVE_SECS, default 120), not merely that TTS is installed.
-# Voice is on-demand, so "recently active" is the honest signal — a permanently
-# green dot just because .venv-tts exists said nothing about whether audio flows.
+# "abs:" in the theme violet, "@bot" in Telegram blue. Two channel dots, each
+# answering ONE question about its own channel: if a reply happened right now,
+# would it go out this way? Green = yes. Dim = no, for any reason — the bot is
+# off, quiet is on, the switch is off, or (voice) this machine can't speak.
+#
+# Voice used to answer a different question — "did a note go out in the last
+# ABS_VOICE_ACTIVE_SECS (120)?" — which was right when voice was on-demand via
+# `abs say`: a permanently green dot just because .venv-tts existed said nothing
+# about whether audio flowed. Reply switches ended that. Voice now fires on every
+# reply, so the switch IS the honest signal, and the window only produced a dot
+# that went dim two minutes after a note that had arrived exactly as configured.
+# Two adjacent dots must also mean the same KIND of thing; one reporting config
+# and its neighbour reporting activity is how you get read as broken.
+# (.last_voice_ts is still stamped on every successful send — it is a record of
+# when audio last really worked, it just no longer drives the bar.)
 # Usage percentages are threshold-coloured (green→amber→coral→brick). Muted 256-
 # colour tones throughout — high-contrast colours read badly in a status bar.
 # Real ESC bytes are emitted (printf '%s'), so the colour survives to Claude Code.
@@ -1306,18 +1322,21 @@ cmd_statusline() {
     off_state=1
   fi
   [ "$(cmd_is_quiet)" = "quiet" ] && muted=1
-  local text_dot voice_dot
-  if [ "$off_state" = 0 ] && [ "$muted" = 0 ]; then text_dot="${c_on}●${off}"; else text_dot="${dim}●${off}"; fi
-  # Voice is green only if a note was actually sent within the recency window —
-  # cmd_say stamps .last_voice_ts on every successful send. Dim covers both
-  # "installed but idle" and "not installed at all", which is what we want.
-  local voice_active=0 lvt now_s voice_win="${ABS_VOICE_ACTIVE_SECS:-120}"
-  lvt="$(state_get '.last_voice_ts')"
-  case "$lvt" in ''|null|*[!0-9]*) lvt=0 ;; esac
-  case "$voice_win" in ''|*[!0-9]*) voice_win=120 ;; esac
-  now_s="$(date +%s)"
-  [ "$lvt" -gt 0 ] && [ "$(( now_s - lvt ))" -le "$voice_win" ] && voice_active=1
-  if [ "$off_state" = 0 ] && [ "$voice_active" = 1 ]; then voice_dot="${c_on}●${off}"; else voice_dot="${dim}●${off}"; fi
+  # Both dots gate on the same two globals first, then on their own switch. The
+  # switches are what the operator actually set, so a dot that ignored them was
+  # reporting on a channel nobody had asked for: `reply text off` used to leave
+  # Text green.
+  local text_dot voice_dot live=0
+  [ "$off_state" = 0 ] && [ "$muted" = 0 ] && live=1
+  if [ "$live" = 1 ] && reply_text_on; then text_dot="${c_on}●${off}"; else text_dot="${dim}●${off}"; fi
+  # voice_can_speak is a few stat calls plus `command -v ffmpeg`, which is cheap
+  # enough for a per-render path — and it is the difference between "voice is on"
+  # and "voice will actually arrive" on a machine with no TTS installed.
+  if [ "$live" = 1 ] && reply_voice_on && voice_can_speak; then
+    voice_dot="${c_on}●${off}"
+  else
+    voice_dot="${dim}●${off}"
+  fi
   local sep="${dim} · ${off}"
   # Daemon dot (v3). Green when absd has refreshed THIS profile's status file
   # recently, which is the only thing that matters from the bar: it means the bot
@@ -1512,7 +1531,7 @@ _voice_mirror() {
 
   if [ "$rc" -eq 0 ]; then
     # Stamped only on success, and only here: .last_voice_ts (cmd_say's) means "a
-    # note really went out" and drives the status bar. Recording the hash before
+    # note really went out". Recording the hash before
     # the attempt would let one failed synthesis suppress every retry of that
     # sentence for five minutes.
     state_set --arg h "$hash" --argjson t "$(date +%s)" \
@@ -3122,8 +3141,10 @@ cmd_say() {
   }
 
   if tg_send_voice "$cid" "$out"; then
-    # Stamp the send so the status-bar Voice dot can light up as "recently active"
-    # rather than merely "TTS installed" (see cmd_statusline).
+    # A record of when audio last really worked end-to-end. It drove the status
+    # bar until the reply switches made the switch itself the honest signal (see
+    # cmd_statusline); kept because "did voice ever actually send?" is the first
+    # question worth asking when someone reports silence.
     state_set --argjson t "$(date +%s)" '.last_voice_ts = $t' 2>/dev/null || true
     ok "Voice note sent to @$(state_get '.bot')."
   else

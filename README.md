@@ -39,7 +39,7 @@ Telegram plugin. No daemon, no webhook, no second copy of your session.
 - 🎤 **Voice both ways** — send a voice note, or ask for the answer spoken back.
 - 📊 **Check usage remotely** — your Claude limits, one tap away, no browser.
 - 🔒 **Your own private bot** — PIN-paired, so only you can reach it.
-- 🟢 **See the state at a glance** — a dot in Claude's status bar shows whether reports are flowing or muted, plus your 5-hour and weekly usage.
+- 🟢 **See the state at a glance** — dots in Claude's status bar answer one question per channel: if a reply happened right now, would it go out this way? Plus your 5-hour and weekly usage.
 - 🖥 **Runs anywhere** — laptop, SSH, `tmux`, a headless Linux server.
 - 🗂 **Multiple projects** — one bot per project, babysat side by side.
 
@@ -310,6 +310,17 @@ daemon (a systemd user service) that polls every one of your idle bots, so you c
 - **The status bar grows a third dot.** `● Daemon` is green while absd is watching
   this bot, so you can see at a glance that a message sent after this session ends
   will still land.
+
+  All three read the same way — green means *this is live right now*:
+
+  | Dot | Green when |
+  | --- | --- |
+  | `● Text` | `reply text on`, not quiet, bot not off |
+  | `● Voice` | `reply voice on`, not quiet, bot not off, **and** this machine has TTS installed |
+  | `● Daemon` | absd has refreshed this profile's status in the last 3 minutes |
+
+  Voice is dim on a machine with no TTS even with the switch on — the switch is
+  what you asked for, TTS is whether it can happen.
 
 Setup (a checkout install):
 

@@ -1,7 +1,7 @@
 # Release test — Agent Babysitter 3.0.0
 
 The one checklist to run before publishing. Everything here is a **manual** test:
-693 automated tests already cover what a machine can check, and none of them can
+718 automated tests already cover what a machine can check, and none of them can
 tell you whether a real Telegram bot, a real Docker container, or a real Claude
 login behaves. That is what this is for.
 
@@ -53,9 +53,15 @@ tries. Two errors there is a FAIL.
 | B6 | `abs config reply-text off` | Voice only. Ask for something with a **code block** → still arrives as text |
 | B7 | With text off, `abs config reply-voice off` | **Refused**, pointing at `abs quiet on`. Mode unchanged |
 | B8 | `abs config reply-text on`, then `abs quiet on`, finish a task | No report. `abs quiet off` → reports resume |
+| B9 | Look at the status bar with both switches on | `● Text` **and** `● Voice` both green — and they **stay** green when nothing has been said for 10 minutes |
+| B10 | `abs config reply-voice off` → look again | `● Voice` goes dim, `● Text` stays green. Turn it back on → green again |
 
 B3 is the whole point of today's change. If it goes quiet, the release is not
 ready.
+
+B9 is the fix for the grey Voice dot: it used to mean "a note went out in the
+last 2 minutes", so it went dim while voice was working perfectly. Both dots now
+mean the same thing — *if a reply happened right now, would it go out this way?*
 
 ## C. Terminal menus (5 min)
 
