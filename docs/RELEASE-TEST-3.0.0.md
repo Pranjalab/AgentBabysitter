@@ -226,6 +226,8 @@ that failed goes in the release notes as a known issue rather than silently.
 | C6 | PASS | piped through `cat -v`, no escape bytes leak |
 | D1 | PASS | up 3h, 2 profiles, `default: yielding-to-session` |
 | D2 | PASS | 👀 + `saved to pool (3)` — the correct count, after three fixes |
+| D3, D4, D7 | PASS | `ABS START` → picker → handoff → `session_end reason=exited` after 114s |
+| F1–F7 | PASS | corroborated in `pool.jsonl`: of three pooled, the two ticked are stamped `forwarded_at`, the third still `WAIT` after `ABS EXIT` |
 | E7 | PASS (so far) | 0 `session_blocked` events, as expected before E runs |
 | D, E, F | not started | |
 | Restricted | blocked | needs a throwaway @BotFather token |
