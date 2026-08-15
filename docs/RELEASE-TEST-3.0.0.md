@@ -7,19 +7,21 @@ login behaves. That is what this is for.
 
 **Time:** ~75 minutes for everything. ~35 for the Must-pass block alone.
 
-**Before you start — two things, or several sections will lie to you:**
+**Before you start** — ✅ *done on this machine, 16 Aug 00:17. Re-run only if you
+come back to this checklist after further changes.*
 
 ```sh
 cd ~/Projects/research/AgentBabysitter
-rm tests/test_dbg_tmp.py                    # my debug leftover; the guard blocked me removing it
+rm -f tests/test_dbg_tmp.py                 # debug leftover
 systemctl --user restart absd               # ⚠️ see below
 abs doctor                                  # everything green except the stale-error note
 ```
 
-> **The daemon restart is not optional.** `absd` has been up since 5 August and is
-> running code from *before* the sandbox orphan-poller fix — the bug where roughly
-> half your replies stopped arriving. Sections D, E and F test code that isn't
-> loaded until you restart it.
+> **The daemon restart is not optional.** A long-running `absd` holds the code it
+> started with, so sections D, E and F would test a build that predates the
+> sandbox orphan-poller fix — the bug where roughly half the replies stopped
+> arriving. `systemctl --user show absd -p ActiveEnterTimestamp` tells you when
+> the running one actually started.
 
 Record each step as **PASS / FAIL / SKIP**. A FAIL is worth more than a PASS: note
 what you saw, and stop the release if it's in the Must-pass block.
