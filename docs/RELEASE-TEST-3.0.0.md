@@ -1,7 +1,7 @@
 # Release test — Agent Babysitter 3.0.0
 
 The one checklist to run before publishing. Everything here is a **manual** test:
-744 automated tests already cover what a machine can check, and none of them can
+764 automated tests already cover what a machine can check, and none of them can
 tell you whether a real Telegram bot, a real Docker container, or a real Claude
 login behaves. That is what this is for.
 
@@ -225,6 +225,7 @@ that failed goes in the release notes as a known issue rather than silently.
 | C1–C5 | **UNTESTED** | skipped by operator decision — the arrow menus never driven by hand |
 | C6 | PASS | piped through `cat -v`, no escape bytes leak |
 | D1 | PASS | up 3h, 2 profiles, `default: yielding-to-session` |
+| D2 | PASS | 👀 + `saved to pool (3)` — the correct count, after three fixes |
 | E7 | PASS (so far) | 0 `session_blocked` events, as expected before E runs |
 | D, E, F | not started | |
 | Restricted | blocked | needs a throwaway @BotFather token |
@@ -238,5 +239,14 @@ checklist was written:
 | `99db30b` | `abs restricted` printed two errors on a single-file install |
 | `6daf190` | the Voice dot reported activity while Text reported config; Text ignored its own switch; a corrupt `rc.json` errored twice per render |
 | `06a852a` | "Takes effect next session" was wrong for the voice half, and would have mis-scored B4/B6 |
+| `9c6d397` · `bf6dd68` | five places, then a sixth, reported the pool's FILE size as "messages waiting" — `saved to pool (6)` when 2 were queued |
+| `21d4704` | the sandbox orphan reaper never survived a daemon restart: a `claude` from 5 Aug was still polling `abs_test_001_bot` from inside `absd-sbx-v4box`, splitting every message with the daemon |
 
-Automated tests over the same period: 693 → 744.
+**The pattern in the last three.** Each was in a well-covered area and the full
+suite was green throughout. The pool tests always started from an EMPTY pool, so
+no operator-facing count was ever checked against a pool holding delivered
+records — six such paths, all unverified, all looking tested. The orphan tests
+assigned `_session_sandbox` by hand, proving the reaper worked and never that
+anything reached it. Coverage of the mechanism is not coverage of the path.
+
+Automated tests over the same period: 693 → 764.
