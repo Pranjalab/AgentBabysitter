@@ -191,15 +191,39 @@ The most likely way this disappoints you: Claude hits a permission prompt
 mid-task while you're out, and blocks. You get silence, not a report.
 
 The injected prompt tells Claude to message you when it's blocked, which covers
-most of it. If you want fewer stops:
+most of it. If you want no stops at all:
 
 ```sh
-ABS_AWAY=1 abs
+ABS_AWAY=1 abs          # or pick "Away" on the ABS START keyboard
 ```
 
-That runs with `--permission-mode acceptEdits` — file edits no longer prompt.
-Bash and other tools still ask. It's a real trade: you give up the review step on
-edits in exchange for not being blocked. Use it when you trust the task.
+That runs with `--permission-mode bypassPermissions`: **nothing prompts**. Not
+file edits, not Bash, not anything.
+
+Until 3.0.0 this was `acceptEdits`, which only auto-approved file edits — and
+since the thing that actually halts a session is a Bash approval, Away didn't
+deliver what its name promised. You'd come back to a session that had been
+waiting on a prompt for an hour.
+
+**What stands in for the prompts.** The command guard, which in an Away session
+is not optional:
+
+- `abs config guard off` **cannot** disable it. An Away launch turns it on
+  regardless and says so.
+- It bites on **every** turn, not just Telegram-driven ones. Unattended is a
+  property of the session — attaching at the desk to type one command must not
+  disarm the remaining hours.
+- It blocks the irreversible set: `sudo`, `rm -rf`, force-push, `reset --hard`,
+  service stops, container/volume removal, machine-wide package installs,
+  publishing, writes to block devices, `shutdown`, reading `.env`. Ordinary work
+  — `npm install`, `docker stop`, a scoped `DELETE ... WHERE`, `rm` of one file —
+  runs untouched.
+
+**Be clear-eyed about it.** A blocklist is never complete. This stops the small
+set of things that cannot be undone from happening quietly while nobody is
+watching; it is not proof against a determined adversary, and it does not make
+Away safe for a task you wouldn't leave alone. Use Away when you trust the task,
+not because the guard is there.
 
 ## Auto-silent — why the pings sometimes stop on their own
 

@@ -49,6 +49,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ABS_VOICE_ACTIVE_SECS` no longer does anything; `.last_voice_ts` is still
   stamped as a record of when audio last worked end-to-end.
 
+- **Away mode actually means away now.** It launched with `acceptEdits`, which
+  auto-approves file edits and nothing else — so a session left running still
+  stopped dead on the first Bash approval, which is the thing that actually
+  halts work. Away didn't deliver the one thing its name promises. It now
+  launches `bypassPermissions` on both the host and in-sandbox paths: nothing
+  prompts.
+  What replaces the prompts is the **command guard, made non-optional for Away**.
+  `abs config guard off` can't disable it there, and it bites on *every* turn
+  rather than only Telegram-driven ones — unattended is a property of the
+  session, so attaching at the desk to type one command no longer disarms the
+  remaining hours. (Verified against a real `claude -p` run that PreToolUse
+  hooks still fire under `bypassPermissions`; the whole design rests on it.)
+  The guard grew to match its new job: `sudo`/`doas`/`pkexec`, `shutdown`/
+  `reboot`, `systemctl stop|disable|mask` and `service … stop`, `docker rm|rmi|
+  prune|volume rm|compose down -v`, machine-wide package install/remove,
+  publishing (`npm publish`, `docker push`, `gh release create`, `cargo
+  publish`), writes to block devices or `/etc`, `crontab -r`, `kill -9 -1`.
+  Project-local work is deliberately untouched — `npm install`, `pip install`,
+  `cargo add`, `docker stop`, `compose down` without `-v`, `rm` of a single
+  file, `DELETE … WHERE`. That half matters as much as the blocks: a guard that
+  cries wolf gets switched off, and off is exactly what must not happen here.
+  **A blocklist is never complete.** This keeps irreversible things from
+  happening quietly while nobody watches; it is not adversary-proof.
+
 - **The status-bar label is yours: `abs config label`.** `abs:@yourbot` becomes
   `Pran:@yourbot`. `auto` takes the display name off your Claude account —
   exactly that one field of `~/.claude.json`, resolved once and stored, so no

@@ -1240,8 +1240,10 @@ cmd_exit() {
     kill -TERM "$pid" 2>/dev/null && ok "Session ($pid) signalled to exit — restart with 'abs' from the terminal." \
       || die "Could not signal session $pid."
     rm -f "$ABS_DIR/session.pid" 2>/dev/null || true
+    state_set 'del(.session_away)' 2>/dev/null || true
   else
     rm -f "$ABS_DIR/session.pid" 2>/dev/null || true
+    state_set 'del(.session_away)' 2>/dev/null || true
     die "No live session (PID $pid is gone)."
   fi
 }
@@ -1865,8 +1867,23 @@ cmd_silent_hook() {
 }
 
 # High-confidence "this could wreck something" test for a Bash command string.
-# Deliberately small — a false block on legit work is worse than missing an edge
-# case (the terminal is always trusted, so only Telegram-driven turns hit this).
+#
+# It used to be deliberately SMALL, and the reason was sound: Claude's own
+# permission prompts were the real safety net, this was a backstop for the
+# lower-trust Telegram path, and a false block on legit work costs more than a
+# missed edge case.
+#
+# Away mode now means `--permission-mode bypassPermissions` — nothing prompts,
+# ever — so that reasoning no longer holds. This list IS the safety net for an
+# unattended session, and it has to be sized for that job rather than inherit
+# the role by accident. The second block below is what that added.
+#
+# It is still a blocklist, and a blocklist is never complete: a determined or
+# unlucky command will get through. What it buys is that the small set of things
+# that are irreversible — the machine, the packages, the containers, the
+# published artefacts — do not happen silently while nobody is watching. Keep
+# every pattern high-confidence; a guard that cries wolf gets switched off, and
+# `abs config guard off` is exactly the wrong outcome here.
 _is_destructive() {
   local c="$1"
   printf '%s' "$c" | grep -qE '(^|[;&|`(])[[:space:]]*rm[[:space:]]+(-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]|-[a-zA-Z]*[rf][a-zA-Z]*$)' && return 0
@@ -1883,6 +1900,63 @@ _is_destructive() {
   printf '%s' "$c" | grep -qE '(chmod|chown)[[:space:]]+(-[a-zA-Z]*R|--recursive)' && return 0
   # reading a secret file out (exfil), or piping it somewhere.
   printf '%s' "$c" | grep -qE '(cat|less|more|head|tail|cp|mv|scp|rsync|curl|wget|base64)[[:space:]][^|]*(\.env([[:space:]./]|$)|credentials\.json|\.pem([[:space:]./]|$)|id_[dr]sa([[:space:]./]|$))' && return 0
+
+  # ---- added when Away became true auto-approve --------------------------
+  # Everything below was previously left to Claude's permission prompt. With
+  # bypassPermissions there is no prompt, so it lands here instead.
+
+  # Privilege escalation. Anything after `sudo` is unreviewable by this guard —
+  # the patterns above all assume an unprivileged shell — so the escalation
+  # itself is the thing to stop.
+  printf '%s' "$c" | grep -qE '(^|[;&|`(][[:space:]]*)(sudo|doas|pkexec)[[:space:]]' && return 0
+
+  # Machine state. No amount of context makes an unattended reboot correct.
+  printf '%s' "$c" | grep -qE '(^|[;&|`(][[:space:]]*)(shutdown|reboot|halt|poweroff|init[[:space:]]+0|init[[:space:]]+6)([[:space:]]|$)' && return 0
+
+  # Service control — stopping/disabling is what breaks things; status/show/list
+  # are read-only and must stay allowed or the guard becomes noise.
+  printf '%s' "$c" | grep -qE 'systemctl([[:space:]]+--user)?[[:space:]]+(stop|disable|mask|kill)([[:space:]]|$)' && return 0
+  # sysvinit puts the verb LAST: `service postgresql stop`, not `service stop x`.
+  printf '%s' "$c" | grep -qE '(^|[;&|`(][[:space:]]*)service[[:space:]]+[A-Za-z0-9_.@-]+[[:space:]]+(stop|disable)([[:space:]]|$)' && return 0
+
+  # Container and volume destruction. `docker stop` is deliberately NOT here:
+  # it is routine and reversible. Removal and pruning are neither.
+  printf '%s' "$c" | grep -qE 'docker([[:space:]]+compose)?[[:space:]]+(rm|rmi)([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE 'docker[[:space:]]+(system|image|volume|network|container)[[:space:]]+prune' && return 0
+  printf '%s' "$c" | grep -qE 'docker[[:space:]]+volume[[:space:]]+rm([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE 'docker([[:space:]]+compose)?[[:space:]]+down[[:space:]].*(-v([[:space:]]|$)|--volumes)' && return 0
+
+  # Changing what is installed on the MACHINE. The line is machine-wide vs
+  # project-local, not install vs remove: a background `apt install` can hold
+  # the dpkg lock, pull in half a desktop, or replace a toolchain the operator
+  # was mid-way through, and none of that is undone by uninstalling later.
+  #
+  # Project-local installs are deliberately NOT here — `npm install`, `pip
+  # install`, `uv pip install`, `cargo add`. They are the actual work, they land
+  # in a project or a venv, and a lockfile plus git already describes them. The
+  # global variants are the ones that escape the project, so -g and --global are
+  # the whole distinction. `sudo pip install` is caught by the sudo rule above.
+  printf '%s' "$c" | grep -qE '(apt|apt-get|dnf|yum|zypper|pacman|apk|brew)[[:space:]]+([a-z-]+[[:space:]]+)*(install|remove|purge|erase|autoremove|-S|-R)([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE '(npm|pnpm|yarn|bun)[[:space:]]+(install|add|remove|uninstall)[[:space:]].*(-g([[:space:]]|$)|--global)' && return 0
+  printf '%s' "$c" | grep -qE '(pip|pip3|uv)[[:space:]]+(pip[[:space:]]+)?install[[:space:]].*--(system|target|prefix)([[:space:]]|=)' && return 0
+
+  # Publishing — outward-facing and effectively irreversible once the world has
+  # seen it. A version yanked from a registry has still been downloaded.
+  printf '%s' "$c" | grep -qE '(npm|pnpm|yarn)[[:space:]]+publish([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE 'docker[[:space:]]+push([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE 'gh[[:space:]]+release[[:space:]]+(create|delete)([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE '(twine[[:space:]]+upload|cargo[[:space:]]+publish|gem[[:space:]]+push)([[:space:]]|$)' && return 0
+
+  # Writing over a block device or into system config.
+  printf '%s' "$c" | grep -qE '>[[:space:]]*/dev/(sd[a-z]|nvme[0-9]|mmcblk[0-9]|vd[a-z])' && return 0
+  printf '%s' "$c" | grep -qE '>[[:space:]]*/(etc|boot|sys|proc)/' && return 0
+
+  # Scheduled work: `crontab -r` wipes the table with no confirmation and no undo.
+  printf '%s' "$c" | grep -qE 'crontab[[:space:]]+(-[a-zA-Z]*r|--remove)([[:space:]]|$)' && return 0
+
+  # Signalling everything. `kill -9 -1` ends the operator's whole session.
+  printf '%s' "$c" | grep -qE 'kill[[:space:]]+(-[0-9]+|-[A-Z]+)[[:space:]]+-1([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE 'pkill[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*(-9|-KILL)([[:space:]]|$)' && return 0
   return 1
 }
 
@@ -1896,16 +1970,29 @@ cmd_guard_hook() {
   tool="$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)"
   # Two unrelated PreToolUse jobs share this entry point because they share a
   # matcher list. The guard's own off-switch must not silence the voice gate.
+  # An Away session runs under bypassPermissions with nobody watching, so the
+  # guard is unconditional there: neither `abs config guard off` nor a turn
+  # typed at the desk may disarm it. "Unattended" is a property of the SESSION,
+  # not of who spoke last — otherwise attaching to type one command would leave
+  # the remaining hours auto-approving with nothing in front of them.
+  local away=0
+  [ "$(state_get '.session_away')" = "true" ] && away=1
   case "$tool" in
-    Bash) if [ "$(state_get '.no_guard')" = "true" ]; then return 0; fi ;;
+    Bash) if [ "$away" = 0 ] && [ "$(state_get '.no_guard')" = "true" ]; then return 0; fi ;;
     *telegram*reply*) _reply_voice_gate "$input"; return 0 ;;
     *) return 0 ;;
   esac
-  [ "$(state_get '.last_origin')" = "telegram" ] || return 0
+  if [ "$away" = 0 ]; then
+    [ "$(state_get '.last_origin')" = "telegram" ] || return 0
+  fi
   cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
   [ -n "$cmd" ] || return 0
   if _is_destructive "$cmd"; then
-    printf '%s\n' "⛔ Blocked by Agent Babysitter: this command looks destructive and the turn came from Telegram. Run it at the terminal (where you're proven to be at the desk), or confirm there." >&2
+    if [ "$away" = 1 ]; then
+      printf '%s\n' "⛔ Blocked by Agent Babysitter: this command looks destructive and this is an Away session (nothing prompts, so the guard is the only check). Run it at the terminal in a normal session." >&2
+    else
+      printf '%s\n' "⛔ Blocked by Agent Babysitter: this command looks destructive and the turn came from Telegram. Run it at the terminal (where you're proven to be at the desk), or confirm there." >&2
+    fi
     exit 2
   fi
   return 0
@@ -3853,9 +3940,16 @@ cmd_run() {
   # Telegram-driven turns), and — in reply mode `voice` only — the gate that turns
   # an outbound message into a voice note instead of text.
   local pretool='[]'
-  [ "$(state_get '.no_guard')" = "true" ] \
-    || pretool="$(jq -n --argjson p "$pretool" --arg g "$guard_cmd" \
+  # In Away mode the guard is NOT optional. Away means bypassPermissions —
+  # nothing prompts — so `abs config guard off` would launch an unattended
+  # session with nothing whatsoever between a Telegram message and the machine.
+  # The setting stays honoured for a normal session, where Claude still asks.
+  if [ "$(state_get '.no_guard')" != "true" ] || [ "${ABS_AWAY:-0}" = "1" ]; then
+    pretool="$(jq -n --argjson p "$pretool" --arg g "$guard_cmd" \
          '$p + [{matcher:"Bash", hooks:[{type:"command", command:$g, timeout:5}]}]')"
+    [ "$(state_get '.no_guard')" = "true" ] && [ "${ABS_AWAY:-0}" = "1" ] \
+      && warn "Command guard is off, but Away mode needs it — enabled for this session."
+  fi
   if [ "$(reply_mode)" = "voice" ]; then
     pretool="$(jq -n --argjson p "$pretool" --arg g "$guard_cmd" \
       '$p + [{matcher:"mcp__plugin_telegram_telegram__reply", hooks:[{type:"command", command:$g, timeout:5}]}]')"
@@ -3870,10 +3964,18 @@ cmd_run() {
 
   local perm_args=()
   if [ "${ABS_AWAY:-0}" = "1" ]; then
-    # Away mode trades a real safety net for not blocking while you're out:
-    # file edits stop prompting. Bash and other tools still ask.
-    perm_args=(--permission-mode acceptEdits)
-    warn "Away mode: file edits will not prompt for approval."
+    # Away means the session runs while nobody is at the desk, so NOTHING may
+    # stop to ask. It used to be `acceptEdits`, which only auto-approves file
+    # edits — and the thing that actually halts a session is a Bash approval, so
+    # Away didn't deliver the one thing its name promises: you'd come back to a
+    # session that had been waiting on a prompt for an hour.
+    #
+    # What makes this acceptable is the command guard, which is forced ON above
+    # for Away sessions. PreToolUse hooks still fire under bypassPermissions
+    # (measured, not assumed), so the guard remains the backstop for the small
+    # set of irreversible things while ordinary work runs unattended.
+    perm_args=(--permission-mode bypassPermissions)
+    warn "Away mode: nothing will prompt. Destructive commands are still blocked by the guard."
   fi
 
   # A stored default model, unless the caller already passed --model on the CLI.
@@ -3951,6 +4053,18 @@ cmd_run() {
   # lift on a deliberate `abs setup`.
   printf '%s\n' "$$" > "$ABS_DIR/session.pid" 2>/dev/null || true
   chmod 600 "$ABS_DIR/session.pid" 2>/dev/null || true
+  # `.session_away` records that THIS session is unattended, for the guard hook
+  # — which runs as a separate process and so cannot see $ABS_AWAY. Two things
+  # depend on it: the guard bites on every turn rather than only Telegram ones
+  # (attaching at the desk to type one command must not disarm the rest of an
+  # unattended session), and `abs config guard off` cannot silence it.
+  # Written per launch and cleared when the session ends, so a stale flag can
+  # only ever make the guard stricter than needed.
+  if [ "${ABS_AWAY:-0}" = "1" ]; then
+    state_set '.session_away = true' 2>/dev/null || true
+  else
+    state_set 'del(.session_away)' 2>/dev/null || true
+  fi
   state_set 'del(.last_origin)' 2>/dev/null || true
 
   # ABS_EXTRA_SYSTEM_PROMPT: an extra system prompt MERGED into the ABS one rather

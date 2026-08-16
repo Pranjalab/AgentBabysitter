@@ -324,7 +324,12 @@ def build_sandbox_launcher_argv(
     if append_system_prompt:
         argv += ["--append-system-prompt", append_system_prompt]
     if away:
-        argv += ["--permission-mode", "acceptEdits"]
+        # bypassPermissions, not acceptEdits: Away means nobody is at the desk,
+        # and the thing that actually halts a session is a Bash approval, not a
+        # file edit. `absd-session` forces the command guard on for an away
+        # launch, and PreToolUse hooks still fire under bypassPermissions, so
+        # the guard remains the backstop. Matches abs.sh's host path.
+        argv += ["--permission-mode", "bypassPermissions"]
     if resume:
         argv.append("--continue")
     if initial_prompt:

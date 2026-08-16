@@ -125,11 +125,14 @@ def test_launcher_argv_restricted_haiku() -> None:
     assert argv[argv.index("--model") + 1] == "haiku"
 
 
-def test_launcher_argv_normal_unchanged() -> None:
-    # A normal sandbox session (3.2) passes none of the new options → byte-for-byte
-    # what 3.2 built.
+def test_launcher_argv_carries_no_restricted_options_for_a_normal_session() -> None:
+    # A normal sandbox session passes none of the restricted options — no
+    # --restricted, no --model, no --append-system-prompt. The permission mode
+    # here is Away's, and it is bypassPermissions rather than the original
+    # acceptEdits (see test_flow.py for why); what this pins is that the
+    # restricted-assistant work never leaked into a plain session's argv.
     assert build_sandbox_launcher_argv("p", away=True, resume=True) == [
-        "p", "--permission-mode", "acceptEdits", "--continue",
+        "p", "--permission-mode", "bypassPermissions", "--continue",
     ]
 
 

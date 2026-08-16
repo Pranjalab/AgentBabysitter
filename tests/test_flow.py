@@ -278,11 +278,23 @@ def test_choose_recent_callback_and_text() -> None:
 
 
 def test_build_sandbox_launcher_argv() -> None:
+    # Away is bypassPermissions, not acceptEdits: nobody is at the desk, and what
+    # actually halts a session is a Bash approval, not a file edit. The command
+    # guard is forced on for an away launch and still fires under
+    # bypassPermissions, so it remains the backstop.
     assert flow.build_sandbox_launcher_argv("default", away=False) == ["default"]
     away = flow.build_sandbox_launcher_argv("work", away=True)
-    assert away == ["work", "--permission-mode", "acceptEdits"]
+    assert away == ["work", "--permission-mode", "bypassPermissions"]
     full = flow.build_sandbox_launcher_argv("default", away=True, resume=True, initial_prompt="hi\nthere")
-    assert full == ["default", "--permission-mode", "acceptEdits", "--continue", "hi\nthere"]
+    assert full == ["default", "--permission-mode", "bypassPermissions", "--continue", "hi\nthere"]
+
+
+def test_a_normal_launch_never_bypasses_permissions() -> None:
+    """The blast radius of the Away change must stop at Away. A normal session
+    still prompts for everything it always did."""
+    argv = flow.build_sandbox_launcher_argv("default", away=False, resume=True)
+    assert "--permission-mode" not in argv
+    assert "bypassPermissions" not in argv
 
 
 def test_enumerate_with_sandbox_adds_entry(tmp_path: Path) -> None:
