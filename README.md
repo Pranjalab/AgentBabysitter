@@ -283,6 +283,7 @@ abs --model opus        # any claude flag is passed straight through
 | 🔕 `abs quiet on` / `off` | Mute / unmute reports (inbound still works) |
 | 🛑 `abs off` / `on` | Drop / re-enable all inbound + outbound Telegram |
 | 🚪 `abs exit` | End the running session (restart with `abs`) |
+| 💬 `abs send "text"` | Send plain text to your chat — works even if the Telegram plugin is down (`abs send -` reads stdin) |
 | 🎤 `abs say [--turbo] "text"` | Speak it and send as a voice note (`--audio-prompt` to clone) |
 | ♻️ `abs reset` | Remove this profile's token, allowlist, and state |
 | ❓ `abs help` | The full list |

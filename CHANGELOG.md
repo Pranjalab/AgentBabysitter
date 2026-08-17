@@ -27,6 +27,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
+- **`abs send "text"` — an outbound path that does not depend on the plugin.** The
+  operator finished a session waiting for a report that never arrived: the Telegram
+  plugin's MCP server had dropped, the `reply` tool went with it, and the session
+  wrote its report to a terminal nobody was watching. MCP servers dropping is not the
+  bug; having no other way to send text was. `abs say` needs the TTS venvs and ffmpeg
+  and delivers audio, and `abs usage --send` sends one fixed report.
+  This is plain text to the paired chat over the same sender the daemon already uses,
+  needing nothing but the token. `abs send -` reads stdin, because a report has
+  newlines and quoting a wall of text through a shell is the friction that makes a
+  fallback go unused. Past Telegram's 4096-character ceiling it trims and says so —
+  sending nothing is the failure being fixed, so it never fails quietly.
+  The injected prompt now tells a session to use it whenever the reply tool is
+  missing or errors, and to say that the bridge dropped so the different-looking
+  delivery is explained.
+
+- **The agent reports like a colleague, with emoji that mean something.** A fixed,
+  small vocabulary tied to state rather than decoration — 🔍 diagnosing, 🛠 building,
+  🧪 testing, 🔊 audio, ✅ worked, ❌ failed, ⚠️ works-but-know-this, ⛔ refused,
+  ⏸ waiting on you, 🚀 shipped, 📊 numbers, 🤔 a question for you, 🐛 a bug,
+  🔒 security-relevant. One per line at most: on a phone this is the difference
+  between reading a message and seeing it, and a message that is all emoji stops
+  meaning anything.
+  The tone section asks for warm, direct and good-humoured — and says outright what
+  that never licenses: praising an idea before thinking about it, manufacturing
+  enthusiasm for a plan the agent thinks is wrong, or softening a real problem so it
+  goes down easier. Warmth and honesty are not in tension; flattery and honesty are.
+
 - **Security: two ways the Away guard could be walked past, both fixed.** Found by
   a security pass over this branch before release, and both were introduced by this
   branch — which matters because Away now means `bypassPermissions`, so this guard is

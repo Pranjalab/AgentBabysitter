@@ -1301,6 +1301,53 @@ If a task will run long, send one short "started" line, then use \`edit_message\
 update it rather than a stream of new messages. Being blocked silently is the worst
 outcome when they are away.
 
+IF THE REPLY TOOL IS GONE, DO NOT GO SILENT
+The Telegram plugin runs as an MCP server, and MCP servers drop. When that happens
+the \`reply\` tool disappears mid-task and every word you write reaches a terminal
+nobody is watching. That has actually happened and it is the worst failure this
+tool has: the operator waited for a report that was never coming.
+
+So if the reply tool is missing, errors, or you are unsure it went through, send it
+yourself:
+
+    bash "${SCRIPT_PATH}" --profile ${PROFILE} send "your message"
+    bash "${SCRIPT_PATH}" --profile ${PROFILE} send - <<'EOF'
+    a multi-line report
+    EOF
+
+It goes straight to the chat over the Bot API and needs nothing but the token — no
+plugin, no voice install. Say plainly that the bridge dropped, so they know why the
+delivery looks different. Reaching them late beats not reaching them.
+
+EMOJI — SAY WHAT YOU ARE DOING WITH ONE GLYPH
+Lead a line with an emoji when it tells the operator something at a glance. On a
+phone this is the difference between reading a message and seeing it. Use them for
+STATE, not for decoration:
+
+    🔍 looking into it / diagnosing        🔊 generating or sending audio
+    🛠 building / changing code            🧪 running tests
+    ✅ done, and it worked                 ❌ failed, and here is why
+    ⚠️ works, but you should know this     ⛔ refused, deliberately
+    ⏸ waiting on you                      🚀 shipped / launched
+    📊 numbers / results                   🤔 a real question for you
+    🐛 found a bug                         🔒 security-relevant
+
+One per line at most, and only where it earns its place — a message that is all
+emoji reads as noise and stops meaning anything. Never put one in front of a
+sentence whose tone it contradicts.
+
+TONE
+Warm, direct, and good-humoured. You are a colleague they like working with, not a
+status page. So: say when something was a good catch, and mean it — when they find
+a bug you missed, that is worth acknowledging in a sentence, not a paragraph. Show
+the pleasure of a thing finally working. Keep it light where lightness fits.
+
+What that never means: praising an idea before you have thought about it,
+manufacturing enthusiasm for a plan you think is wrong, or softening a real problem
+so it goes down easier. If the plan looks wrong, say so early, in plain words — that
+is the most useful thing you can be. Warmth and honesty are not in tension; flattery
+and honesty are.
+
 WHAT MAKES A REPORT WORTH HEARING
 - The outcome first, not the process. What is true now that was not before.
 - What you verified versus what you assumed. Never say something works when you
@@ -3804,6 +3851,46 @@ cmd_voice() {
 # file to download rather than a voice bubble you can tap. Only sendVoice gives
 # the bubble and waveform. That's a Bot API call, so it belongs here next to the
 # token — not in a Python script that would need its own copy.
+# `abs send "text"` — put a plain text message in the chat, without the plugin.
+#
+# This exists because of a failure the operator hit: the Telegram plugin's MCP
+# server dropped mid-task, the session's `reply` tool went with it, and the session
+# had NO other way to reach him. It finished the work, reported to a terminal
+# nobody was looking at, and he sat in silence — from a tool whose entire promise is
+# that you hear from it.
+#
+# `abs say` was the only outbound path and it is not a substitute: it needs the TTS
+# venvs and ffmpeg, it sends audio, and it is useless for a link or a command. This
+# is the plain-text one, over the same `tg_send` the daemon has always used, and it
+# depends on nothing but the token.
+#
+# Reading from stdin matters as much as the argument form: a report is usually
+# multi-line, and `abs send -` avoids quoting a wall of text through a shell.
+cmd_send() {
+  require_setup
+  load_token || die "No bot token at $TG_ENV. Run: abs setup"
+  local cid text
+  cid="$(state_get '.chat_id')"
+  [ -n "$cid" ] && [ "$cid" != "null" ] || die "No chat_id in $ABS_STATE."
+
+  if [ "${1:-}" = "-" ] || [ $# -eq 0 ]; then
+    text="$(cat)"
+  else
+    text="$*"
+  fi
+  [ -n "$text" ] || die "Nothing to send. Usage: abs send \"text\"   |   abs send - < file"
+
+  # Telegram's own ceiling is 4096 characters per message; splitting is the caller's
+  # business, but silently sending nothing would be the worst outcome here.
+  if [ "${#text}" -gt 4096 ]; then
+    warn "Message is ${#text} characters; Telegram's limit is 4096. Sending the first 4096."
+    text="${text:0:4096}"
+  fi
+
+  tg_send "$cid" "$text" || die "Telegram rejected it: $TG_ERR"
+  ok "Sent."
+}
+
 cmd_say() {
   require_setup
   load_token || die "No bot token at $TG_ENV. Run: abs setup"
@@ -4981,6 +5068,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} menu               Re-register the Telegram "/" command menu
   ${c_bold}abs${c_reset} voice setup         Install the local voice engines (speech in + out)
   ${c_bold}abs${c_reset} voice status        Show which voice pieces are installed
+  ${c_bold}abs${c_reset} send "text"          Send a plain text message to your chat (works even
+                          if the Telegram plugin is down; \`abs send -\` reads stdin)
   ${c_bold}abs${c_reset} say [--turbo] "text" Speak it and send as a voice note (needs 'abs voice
                           setup'; --turbo = faster model, --device cuda|mps|cpu)
   ${c_bold}abs${c_reset} log [--list|--clear]  Read or delete your local conversation backup
@@ -5183,6 +5272,7 @@ main() {
     usage)     shift; cmd_usage "${1:-}" ;;
     menu)      shift; cmd_menu ;;
     say)       shift; cmd_say "$@" ;;
+    send)      shift; cmd_send "$@" ;;
     voice)     shift; cmd_voice "$@" ;;
     quiet)     shift; cmd_quiet "${1:-}" ;;
     is-quiet)  cmd_is_quiet ;;
