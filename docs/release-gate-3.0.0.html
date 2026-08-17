@@ -333,34 +333,67 @@
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; animation: none !important; }
   }
+
+  /* ---- added 17 Aug: machine-verified chips, optional steps ---- */
+
+  .id.auto { background: var(--pass-soft); color: var(--pass); }
+
+  li.step.opt {
+    border-style: dashed;
+    background: transparent;
+  }
+
+  .verified {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .verified li {
+    display: grid;
+    grid-template-columns: 1.2rem 1fr;
+    gap: 0 0.6rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
+    font-size: 0.92rem;
+  }
+  .verified .tick { color: var(--pass); font-family: var(--mono); }
+  .verified b { font-family: var(--mono); font-size: 0.85em; font-weight: 600; }
+  .verified span.how { display: block; color: var(--dim); font-size: 0.86rem; }
 </style>
 
 <div class="wrap">
 
   <header>
-    <p class="eyebrow">Agent Babysitter · v3-daemon · 16 Aug 2026</p>
+    <p class="eyebrow">Agent Babysitter · v3-daemon · 17 Aug 2026</p>
     <h1>ABS 3.0.0 Release Gate</h1>
-    <p class="lede">Everything still untested, ordered so you never restart a session you didn't have to.
-      Blocks are sessions, not checklist letters — the session lifecycle is the expensive part.</p>
+    <p class="lede">Everything that could be tested without you has been. What's below is what a machine
+      genuinely cannot reach: a real Claude session, a real approval prompt, and a bot token only you can
+      create.</p>
   </header>
 
   <dl class="state">
-    <div class="ok"><dt>Tests green</dt><dd>789</dd></div>
-    <div class="ok"><dt>Bugs fixed today</dt><dd>8</dd></div>
-    <div class="todo"><dt>Blocks left</dt><dd>5</dd></div>
-    <div class="todo"><dt>Minutes</dt><dd>~45</dd></div>
+    <div class="ok"><dt>Tests green</dt><dd>803</dd></div>
+    <div class="ok"><dt>Closed today</dt><dd>C · D8 · E3/5/6/7</dd></div>
+    <div class="todo"><dt>Left for you</dt><dd>2 + 1</dd></div>
+    <div class="todo"><dt>Minutes</dt><dd>~14</dd></div>
   </dl>
 
-  <section>
+  <p class="note"><strong>Read this first.</strong> Two short sessions is the whole release gate now —
+    roughly fourteen minutes. The restricted assistant is a third block that needs a @BotFather token; its
+    containment, the part that would matter if it broke, I verified here on a throwaway box, so you can
+    ship without it and note it as unverified by hand.</p>
+
+  <section style="margin-top: calc(var(--step) * 6);">
     <div class="block-head">
-      <span class="block-n">BLOCK 1</span>
+      <span class="block-n">SESSION 1</span>
       <h2>Away is now true auto-approve</h2>
-      <span class="mins">8 min</span>
+      <span class="mins">6 min</span>
     </div>
-    <p class="why">Newest and riskiest thing in the release — I changed it an hour ago and no human has
-      run it. Away used to be <code>acceptEdits</code>; it is now <code>bypassPermissions</code>, so
-      <em>nothing</em> prompts and the command guard is the only check left. Both halves need proving:
-      that ordinary work runs untouched, and that the guard still stops the irreversible.</p>
+    <p class="why">The newest and riskiest thing in the release. Away used to launch
+      <code>acceptEdits</code>; it now launches <code>bypassPermissions</code>, so <em>nothing</em> prompts
+      and the command guard is the only check left. The guard logic is driven directly by 24 tests — what
+      those cannot prove is that a real Claude session honours a hook that says no.</p>
 
     <ol class="steps">
       <li class="step">
@@ -369,7 +402,7 @@
           <div class="ids"><span class="id">AWAY-1</span></div>
           <p class="do" id="s1a-l"><span class="where phone">Phone</span>
             <code>ABS START</code> on <strong>@abs_test_001_bot</strong> → pick a project → <strong>Away</strong></p>
-          <p class="expect">Session starts. The launch warns that nothing will prompt.</p>
+          <p class="expect">Session starts, with a warning that nothing will prompt.</p>
         </div>
       </li>
       <li class="step">
@@ -378,27 +411,28 @@
           <div class="ids"><span class="id">AWAY-2</span></div>
           <p class="do" id="s1b-l"><span class="where phone">Phone</span> Ask it to run a real command</p>
           <pre><code>run: curl -s https://example.com | head -5</code></pre>
-          <p class="expect">It just runs. No approval request, no pause. This is the whole point of the change.</p>
+          <p class="expect">It just runs. No approval request, no pause — this is the point of the change,
+            and the symptom you reported yesterday was this step stopping to ask.</p>
         </div>
       </li>
       <li class="step gate">
         <input type="checkbox" id="s1c" aria-labelledby="s1c-l">
         <div class="step-body">
           <div class="ids"><span class="id must">AWAY-3 · BLOCKER</span></div>
-          <p class="do" id="s1c-l"><span class="where phone">Phone</span> Now ask it for something destructive</p>
+          <p class="do" id="s1c-l"><span class="where phone">Phone</span> Now ask for something irreversible</p>
           <pre><code>run: sudo apt install cowsay</code></pre>
-          <p class="expect">⛔ <strong>Blocked</strong>, with a message saying this is an Away session and nothing
-            prompts. If this runs, stop the release — auto-approve has no backstop.</p>
+          <p class="expect">⛔ <strong>Blocked</strong>, saying this is an Away session and nothing prompts.
+            If it runs, stop the release: auto-approve would have no backstop.</p>
         </div>
       </li>
-      <li class="step">
+      <li class="step gate">
         <input type="checkbox" id="s1d" aria-labelledby="s1d-l">
         <div class="step-body">
-          <div class="ids"><span class="id">AWAY-4</span></div>
-          <p class="do" id="s1d-l"><span class="where desk">Desk</span> Attach, then ask it the same destructive thing from the terminal</p>
+          <div class="ids"><span class="id must">AWAY-4 · BLOCKER</span></div>
+          <p class="do" id="s1d-l"><span class="where desk">Desk</span> Attach, and ask for the same thing from the terminal</p>
           <pre><code>abs attach abs_test_001_bot</code></pre>
-          <p class="expect">Still blocked. This is the hole I closed — being at the desk must not disarm
-            a session that is still auto-approving.</p>
+          <p class="expect">Still blocked. This is the hole I closed — sitting at the desk for one command
+            must not disarm the hours of auto-approving that follow.</p>
         </div>
       </li>
       <li class="step">
@@ -414,13 +448,15 @@
 
   <section>
     <div class="block-head">
-      <span class="block-n">BLOCK 2</span>
-      <h2>One Normal session — attach, detach, blocked pings</h2>
-      <span class="mins">12 min</span>
+      <span class="block-n">SESSION 2</span>
+      <h2>One Normal session — attach, detach, one real ping</h2>
+      <span class="mins">8 min</span>
     </div>
-    <p class="why">Must be <strong>Normal</strong>, not Away — Away auto-approves, so nothing will ever
-      stop and ask, and every ping test below would silently pass as a false negative. One session covers
-      four daemon checks and five ping checks.</p>
+    <p class="why">Must be <strong>Normal</strong>, not Away: Away auto-approves, so nothing would ever
+      stop to ask and the ping test would pass for the wrong reason. The ping <em>logic</em> is now covered
+      end to end, including the two cases you were going to sit and time. What is left is whether herdr
+      recognises a real Claude prompt at all — one ping proves that, and the rest is arithmetic already
+      under test.</p>
 
     <ol class="steps">
       <li class="step">
@@ -435,70 +471,51 @@
       <li class="step">
         <input type="checkbox" id="s2b" aria-labelledby="s2b-l">
         <div class="step-body">
-          <div class="ids"><span class="id">D5</span></div>
-          <p class="do" id="s2b-l"><span class="where desk">Desk</span> <code>abs attach abs_test_001_bot</code></p>
-          <p class="expect">Drops straight into the live session.</p>
+          <div class="ids"><span class="id">D5</span><span class="id">D6</span></div>
+          <p class="do" id="s2b-l"><span class="where desk">Desk</span>
+            Attach, then detach with <code>Ctrl-b q</code></p>
+          <pre><code>abs attach abs_test_001_bot</code></pre>
+          <p class="expect">Drops into the live session; after detaching it is still running and
+            <code>abs sessions</code> still lists it.</p>
         </div>
       </li>
-      <li class="step">
+      <li class="step gate">
         <input type="checkbox" id="s2c" aria-labelledby="s2c-l">
         <div class="step-body">
-          <div class="ids"><span class="id">D8</span></div>
-          <p class="do" id="s2c-l"><span class="where desk">Desk</span> Look at the status bar in that session</p>
-          <p class="expect"><span class="dot green">●</span> <code>Daemon</code> is <strong>green</strong> —
-            the bot is being watched, so a message sent after this session ends still lands.</p>
+          <div class="ids"><span class="id must">E2 · the feature</span></div>
+          <p class="do" id="s2c-l"><span class="where phone">Phone</span> Give it something needing approval,
+            then put the phone down</p>
+          <pre><code>run: curl -s https://example.com | head -5</code></pre>
+          <p class="expect">Within ~20–30s: "⏸ … is waiting for input or approval". The delay is the
+            debounce, not lag. <strong>This is the one step in this session that isn't covered by a
+            test</strong> — everything else here is corroboration.</p>
         </div>
       </li>
       <li class="step">
         <input type="checkbox" id="s2d" aria-labelledby="s2d-l">
         <div class="step-body">
-          <div class="ids"><span class="id">D6</span></div>
-          <p class="do" id="s2d-l"><span class="where desk">Desk</span> Detach with <code>Ctrl-b q</code> (herdr)</p>
-          <p class="expect">Session keeps running — <code>abs sessions</code> still lists it.</p>
-        </div>
-      </li>
-      <li class="step gate">
-        <input type="checkbox" id="s2e" aria-labelledby="s2e-l">
-        <div class="step-body">
-          <div class="ids"><span class="id must">E2 · the feature</span></div>
-          <p class="do" id="s2e-l"><span class="where phone">Phone</span> Give it something needing approval</p>
-          <pre><code>run: curl -s https://example.com | head -5</code></pre>
-          <p class="expect">Within ~20–30s: "⏸ … is waiting for input or approval". The delay is the
-            debounce, not lag.</p>
-        </div>
-      </li>
-      <li class="step gate">
-        <input type="checkbox" id="s2f" aria-labelledby="s2f-l">
-        <div class="step-body">
-          <div class="ids"><span class="id must">E3 · no nagging</span></div>
-          <p class="do" id="s2f-l"><span class="where phone">Phone</span>
-            Wait <strong>two full minutes</strong> without answering</p>
-          <p class="expect"><strong>No second ping.</strong> A repeat is a FAIL — one ping per block, not
-            one per check.</p>
-        </div>
-      </li>
-      <li class="step">
-        <input type="checkbox" id="s2g" aria-labelledby="s2g-l">
-        <div class="step-body">
           <div class="ids"><span class="id">E4</span></div>
-          <p class="do" id="s2g-l"><span class="where phone">Phone</span> Answer in the chat</p>
+          <p class="do" id="s2d-l"><span class="where phone">Phone</span> Answer in the chat</p>
           <p class="expect">The task proceeds.</p>
         </div>
       </li>
-      <li class="step">
-        <input type="checkbox" id="s2h" aria-labelledby="s2h-l">
+      <li class="step opt">
+        <input type="checkbox" id="s2e" aria-labelledby="s2e-l">
         <div class="step-body">
-          <div class="ids"><span class="id">E5</span></div>
-          <p class="do" id="s2h-l"><span class="where phone">Phone</span> Trigger a second approval in the same session</p>
-          <p class="expect">Pinged again — a new block is a new episode, not a suppressed repeat.</p>
+          <div class="ids"><span class="id">E3</span><span class="id">E5</span><span class="id auto">covered</span></div>
+          <p class="do" id="s2e-l"><span class="where phone">Phone</span>
+            <em>Optional, free while you're here:</em> before answering, wait two minutes — no second ping.
+            After answering, trigger a second approval — pinged again.</p>
+          <p class="expect">Both are now pinned by tests through the real poller, and both were
+            mutation-checked. Skip them without cost to the release.</p>
         </div>
       </li>
       <li class="step">
-        <input type="checkbox" id="s2i" aria-labelledby="s2i-l">
+        <input type="checkbox" id="s2f" aria-labelledby="s2f-l">
         <div class="step-body">
           <div class="ids"><span class="id">D7</span></div>
-          <p class="do" id="s2i-l"><span class="where phone">Phone</span> <code>ABS EXIT</code></p>
-          <p class="expect">Clean shutdown, bot goes back to listening.</p>
+          <p class="do" id="s2f-l"><span class="where phone">Phone</span> <code>ABS EXIT</code></p>
+          <p class="expect">Clean shutdown; the bot goes back to listening.</p>
         </div>
       </li>
     </ol>
@@ -506,71 +523,20 @@
 
   <section>
     <div class="block-head">
-      <span class="block-n">BLOCK 3</span>
-      <h2>The silence test</h2>
-      <span class="mins">4 min</span>
-    </div>
-    <p class="why">This matters more than E2. A feature that cries wolf gets muted, and then it never
-      works on the day it counts. E2 proves the ping fires; this proves it stays quiet when it should.</p>
-
-    <ol class="steps">
-      <li class="step gate">
-        <input type="checkbox" id="s3a" aria-labelledby="s3a-l">
-        <div class="step-body">
-          <div class="ids"><span class="id must">E6 · false positives</span></div>
-          <p class="do" id="s3a-l"><span class="where desk">Desk</span>
-            Start a Normal session and work in it normally, answering every prompt within a few seconds</p>
-          <p class="expect"><strong>No pings at all.</strong> Anything reaching your phone here is a FAIL
-            even though nothing is broken — it's the failure mode that gets the feature turned off.</p>
-        </div>
-      </li>
-    </ol>
-  </section>
-
-  <section>
-    <div class="block-head">
-      <span class="block-n">BLOCK 4</span>
-      <h2>The daemon dot, and the record</h2>
-      <span class="mins">5 min</span>
-    </div>
-    <p class="why">The dot is the only thing telling you whether a message sent after a session ends
-      will land. The event log is where you check that pings are logged as metadata, with no message
-      text leaving the machine.</p>
-
-    <ol class="steps">
-      <li class="step">
-        <input type="checkbox" id="s4a" aria-labelledby="s4a-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">D9</span></div>
-          <p class="do" id="s4a-l"><span class="where desk">Desk</span> Stop the daemon, start a session, wait 3 minutes</p>
-          <pre><code>systemctl --user stop absd</code></pre>
-          <p class="expect"><span class="dot grey">●</span> <code>Daemon</code> goes <strong>dim</strong>.
-            Then <code>systemctl --user start absd</code> → back to
-            <span class="dot green">●</span> green within ~3 min.</p>
-        </div>
-      </li>
-      <li class="step">
-        <input type="checkbox" id="s4b" aria-labelledby="s4b-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">E7</span></div>
-          <p class="do" id="s4b-l"><span class="where desk">Desk</span> Check what the pings recorded</p>
-          <pre><code>grep session_blocked ~/.abs/daemon/events.jsonl</code></pre>
-          <p class="expect">One line per block, <code>blocked_for_s</code> present, and
-            <strong>no message text</strong> anywhere in it.</p>
-        </div>
-      </li>
-    </ol>
-  </section>
-
-  <section>
-    <div class="block-head">
-      <span class="block-n">BLOCK 5</span>
+      <span class="block-n">NEEDS A TOKEN</span>
       <h2>The restricted assistant</h2>
       <span class="mins">25 min</span>
     </div>
-    <p class="why">The only section blocked on something you have to fetch: a <strong>throwaway bot token
-      from @BotFather</strong>. It's been parked on that since July. Run
-      <code>docs/v3/manual-tests/restricted.md</code> as written; the summary here is what a failure would mean.</p>
+    <p class="why">The one feature in 3.0.0 that no human has ever run, and it has been parked since July
+      on a <strong>throwaway bot token from @BotFather</strong>. Its containment I verified here today
+      without a token, by creating a <code>--no-creds</code> box and looking: no credentials file, no
+      <code>~/.claude</code> at all, no view of your home or your projects. A control check on a normal box
+      returned creds-present, so that test can actually fail.</p>
+
+    <p class="note" style="margin-bottom: calc(var(--step) * 3);"><strong>Ship-or-wait, your call.</strong>
+      Waiting gains you the bot provisioning, the in-box login and the Haiku refusal prompt — all
+      recoverable in a patch. Shipping now means the release notes say the restricted assistant is
+      automated-tested and containment-verified, but never driven by hand. I would ship and say so.</p>
 
     <ol class="steps">
       <li class="step">
@@ -587,66 +553,65 @@ abs restricted login assistant</code></pre>
       <li class="step">
         <input type="checkbox" id="s5b" aria-labelledby="s5b-l">
         <div class="step-body">
-          <div class="ids"><span class="id">R3–R4</span></div>
-          <p class="do" id="s5b-l"><span class="where phone">Phone</span> Ask it everyday things, then ask it to write code</p>
-          <p class="expect">Answers Q&amp;A and arithmetic on Haiku. Refuses code verbatim:
-            "This is a restricted assistant — ask the operator to upgrade your profile to build projects."</p>
+          <div class="ids"><span class="id">R3–R5</span></div>
+          <p class="do" id="s5b-l"><span class="where phone">Phone</span> Ask it everyday things, then ask
+            it to write code, then send <code>ABS START</code></p>
+          <p class="expect">Answers Q&amp;A and arithmetic on Haiku; refuses code with the upgrade line;
+            refuses to launch a host session. If you talk it into writing code that is <em>not</em> a
+            blocker — the prompt was never the containment.</p>
         </div>
       </li>
       <li class="step">
         <input type="checkbox" id="s5c" aria-labelledby="s5c-l">
         <div class="step-body">
-          <div class="ids"><span class="id">R5</span></div>
-          <p class="do" id="s5c-l"><span class="where phone">Phone</span> Send <code>ABS START</code> from that bot</p>
-          <p class="expect">Refused. A restricted bot can never launch a host session.</p>
-        </div>
-      </li>
-      <li class="step gate">
-        <input type="checkbox" id="s5d" aria-labelledby="s5d-l">
-        <div class="step-body">
-          <div class="ids"><span class="id must">CONTAINMENT · BLOCKER</span></div>
-          <p class="do" id="s5d-l"><span class="where desk">Desk</span> Prove the box holds no credentials</p>
+          <div class="ids"><span class="id">CONTAINMENT</span><span class="id auto">verified</span></div>
+          <p class="do" id="s5c-l"><span class="where desk">Desk</span> Re-run it on the real box once it exists</p>
           <pre><code>docker exec absd-sbx-assistant \
   test -e /home/dev/.claude/.credentials.json; echo $?</code></pre>
-          <p class="expect"><code>1</code> before login. <strong>This is the real containment</strong> —
-            if it fails, stop. The refusal prompt in R4 is bypassable and was never the protection.</p>
+          <p class="expect"><code>1</code> before login. Already proven on a throwaway box today, so this
+            is confirmation on the real one rather than the gate it used to be.</p>
         </div>
       </li>
     </ol>
-
-    <p class="note warn" style="margin-top: 1.25rem;"><strong>Be honest about R4.</strong> It's a prompt, and
-      prompts can be talked around. If you succeed in getting code out of it, that is <em>not</em> a release
-      blocker — the containment is the throwaway box with none of your files and none of your credentials,
-      which is what the check above proves.</p>
   </section>
 
   <section>
     <div class="block-head">
-      <span class="block-n">DONE</span>
-      <h2>Already passed today</h2>
-      <span class="mins">no action</span>
+      <span class="block-n">CLOSED</span>
+      <h2>Verified here today, no operator time</h2>
+      <span class="mins">17 Aug</span>
     </div>
-    <ul class="done-list">
-      <li><span class="tick">✓</span> A1–A5 · install &amp; upgrade</li>
-      <li><span class="tick">✓</span> B1–B5 · reply switches</li>
-      <li><span class="tick">✓</span> B3 · reports survive terminal use</li>
-      <li><span class="tick">✓</span> B8 · quiet mode both ways</li>
-      <li><span class="tick">✓</span> B9–B11 · status dots &amp; label</li>
-      <li><span class="tick">✓</span> C6 · no escapes through a pipe</li>
-      <li><span class="tick">✓</span> D1–D3 · daemon &amp; remote start</li>
-      <li><span class="tick">✓</span> F1–F7 · pool multi-select</li>
-      <li><span class="cross">—</span> B6, B7, C1–C5 · skipped by choice</li>
+    <ul class="verified">
+      <li><span class="tick">✓</span><div><b>C1–C6</b> · the arrow-key menus, driven in a real pty
+        <span class="how">11 tests against <code>bash abs.sh</code> itself: arrows, wrap, <code>q</code>,
+          digit jump, out-of-range digit, the collapse, the <code>ABS_NO_TUI</code> fallback, no escape
+          bytes through a pipe. C4 had no coverage at all before this, and my first attempt at it was
+          vacuous — it passed with the screen-clearing removed.</span></div></li>
+      <li><span class="tick">✓</span><div><b>D8</b> · the daemon dot is green in this session
+        <span class="how">Read off the bar's actual SGR bytes (<code>38;5;71</code>), not by eye.</span></div></li>
+      <li><span class="tick">✓</span><div><b>E3 · E5 · E6 · E7</b> · the ping cases you were going to time
+        <span class="how">Three new tests through the real poller: silence while you answer at the desk, a
+          second block pinging again, and the event carrying no message text — not even the project
+          label.</span></div></li>
+      <li><span class="tick">✓</span><div><b>Containment</b> · a <code>--no-creds</code> box holds nothing of yours
+        <span class="how">No credentials file, no <code>~/.claude</code>, host home and projects invisible,
+          only <code>workspace</code> mounted. Box destroyed afterwards; the empty folder at
+          <code>~/Projects/sandboxes/credcheck</code> is mine to clean up.</span></div></li>
+      <li><span class="tick">✓</span><div><b>D9</b> · dim-versus-green logic
+        <span class="how">Unit-tested at both ends of the freshness window. Stopping your daemon to watch it
+          happen is yours if you want it; I did not stop a service I didn't start.</span></div></li>
+      <li><span class="tick">✓</span><div><b>A · B · D1–D4 · D7 · F1–F7</b> · yesterday's run
+        <span class="how">Still standing. B6/B7 remain skipped by your decision and are recorded as
+          UNTESTED, not quietly ticked.</span></div></li>
     </ul>
-    <p class="note" style="margin-top:1.25rem;">The skipped ones are recorded as <strong>UNTESTED</strong>
-      in the sign-off, not quietly ticked. They have automated coverage, but no human drove the arrow menus
-      or watched a real voice-only reply arrive.</p>
   </section>
 
   <footer>
-    <p><strong>Release when</strong> Block 1 passes, E2/E3/E6 pass, and the containment check passes.
-      Anything else that fails goes into the release notes as a known issue rather than silently.</p>
-    <p>Eight bugs were found and fixed during testing today — three of them in code the full suite
-      reported green. Tests went 693 → 789.</p>
+    <p><strong>Release when</strong> Session 1 passes and E2 fires once. Everything else on this page is
+      either covered by a test or a known gap worth a line in the release notes.</p>
+    <p>Eight bugs were found during testing yesterday, three of them in code the full suite reported green.
+      Tests went 693 → 803. Nothing is pushed: <code>origin/v3-daemon</code> doesn't exist yet, and merging
+      to <code>main</code> is yours to authorise.</p>
     <p style="margin-top:1.25rem;"><button class="reset" type="button" id="reset">Clear ticks</button></p>
   </footer>
 
