@@ -231,3 +231,55 @@ Doing neither ships a release whose own quick-start contradicts its release note
 Before the push, everything is local: `git checkout v3-daemon`, `git branch -f main
 origin/main`, `git tag -d v3.0.0`. After the push, prefer a `3.0.1` over rewriting
 a published tag — someone may already have fetched it.
+
+### 8. What the security pass checked
+
+A security review ran over the whole branch on 17 Aug before release: one pass to
+find candidates, then each candidate attacked independently to discard the ones that
+could not actually be reached. It found **two HIGH issues, both in code this branch
+added, and both now fixed** — see the changelog entry "two ways the Away guard could
+be walked past". They are recorded here rather than quietly repaired, because the
+same pass is worth repeating and its negative results are worth keeping:
+
+Verified correct, with the reason:
+
+- **Tokens never reach argv.** `tg_api`/`tg_get`/`tg_send_voice` hand the URL to
+  `curl -K -` on stdin specifically so the token cannot be read out of `ps`; the
+  token file is written 0600; `absd/telegram.py` redacts it in `__repr__`.
+- **`skipDangerousModePermissionPrompt` is per-session only** — written into
+  `$ABS_DIR/hooks.json` and passed with `--settings`. Nothing in abs.sh writes
+  `~/.claude.json` or any project `settings.json`, so an Away session never changes
+  how an ordinary `claude` behaves.
+- **The voice path never puts message text into a command.** The worker payload is
+  built with `jq -n --arg` (values, not program text) and travels over stdin; the
+  only interpolation into the spawned command line is `printf '%q'`-quoted.
+- **The allowlist is enforced first** on every inbound path, before any command
+  parsing or pooling, and updates that are not messages or callbacks are dropped
+  while still advancing the offset. The daemon never writes the allowlist.
+- **Launcher arguments are built as a list, never a shell string**, and pooled
+  Telegram text can never become a `claude` flag: it always goes through
+  `build_offline_prompt`, which prefixes it.
+- **Folder and sandbox names from Telegram are double-gated** — an allow-list regex
+  plus a structural parent check — so neither can escape the sandbox root.
+- **The sandbox has one bind mount** (its own workdir), runs `--user dev`, is not
+  privileged, and mounts no docker socket. `--no-creds` skips the credential copy
+  entirely, and session preparation syncs only ABS code plus an `rc.json` with the
+  host paths stripped.
+- **A restricted profile cannot launch a host session**; `ABS START`/`EXIT`/`OFF`/
+  `BLOCK` are refused for it explicitly.
+- **`--reclaim` only ever signals a pid that looks like the plugin's poller**, and
+  never an owned one without the operator's flag. The pid comes from the plugin's own
+  file, not from anything a message controls.
+- **The conversation log is redacted before writing** — token shapes, JWTs, `sk-`/
+  `gh_`/`AKIA`/`AIza` keys, `user:pass@` URLs — and the event log carries metadata
+  only, never message text.
+- **Self-update is not an execution path**: a fetched VERSION that is not digits and
+  dots is discarded, the update itself is `git pull --ff-only` or a fixed HTTPS
+  installer behind an interactive prompt, and it is skipped entirely for
+  Telegram-triggered launches.
+
+Two things the pass raised that are **not** fixed and are release notes rather than
+blockers: adding a `--` separator before the initial prompt in the launcher argv
+(currently safe only because the prompt is always prefixed), and rejecting a leading
+`--` in the in-container launcher's positional. Both are defence-in-depth on a path
+that has no reachable exploit today.
