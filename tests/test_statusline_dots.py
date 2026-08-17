@@ -272,10 +272,18 @@ def test_context_is_last_and_dim_rather_than_colour_graded(bar):
 
 def test_the_version_is_the_last_thing_on_the_bar(bar):
     """So somebody debugging their own install can see which abs is rendering,
-    without running anything."""
+    without running anything.
+
+    The expected string is read out of abs.sh rather than written here: hardcoding
+    it made this test fail on the next version bump, which is noise rather than
+    signal — the bar showing the WRONG version is what would matter, and reading the
+    constant still catches that."""
+    import re as _re
+    ver = _re.search(r'^readonly ABS_VERSION="([^"]+)"',
+                     open(ABS_SH).read(), _re.M).group(1)
     bar.rc()
     plain = _plain(bar.render())
-    assert plain.rstrip().endswith("v3.0.0"), plain
+    assert plain.rstrip().endswith(f"v{ver}"), plain
 
 
 def test_a_unix_timestamp_reset_is_rendered_as_a_countdown(bar):

@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.0.0"
+readonly ABS_VERSION="3.0.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1391,26 +1391,29 @@ HOW TO WRITE IT
   summary half. Repeat it in the detail, because audio cannot be copied.
 
 HOW A REPORT ENDS
-Two lines, in this order, on a task-done report — not on replies or mid-task notes.
+The last two lines of a task-done report, in this order and nothing after them.
+Not on replies, not on mid-task notes — those end when they end.
 
-First, WHAT IS LEFT. Three or four items at most, shortest form that is still
-true, and each one has an owner: yours or theirs. If a decision of theirs is
-blocking something, that is the first line. If nothing is left, say that instead —
-"nothing outstanding" is information, and a missing list reads as forgetting.
+SECOND-TO-LAST: WHAT IS LEFT. This is the line they scroll to the bottom for, so
+it is the one thing that must never be missing. Three or four items at most,
+shortest form that is still true, each with an owner. Anything blocked on a
+decision of theirs goes first. If nothing is outstanding, say exactly that —
+"nothing outstanding" is an answer, a missing list is an oversight.
 
-    Left: · push to main (yours) · installer clone support (mine, ~1h)
-          · PyPI decision (yours)
+    Left: · merge and push (yours) · web installer (mine, ~20m) · restricted (parked)
 
-Then the numbers, on their own line:
+LAST: the numbers, on their own line and verbatim from:
 
     bash "${SCRIPT_PATH}" --profile ${PROFILE} usage-glance
 
-It reads a local cache and returns instantly, no tokens, e.g.
-"📊 Ctx 68% left · Week 37% (resets on Wed) · 5H 24% (resets in 3h 46m)". Append it
-verbatim. Ctx is how much of THIS conversation's context window is left, which is
-the one that decides whether a long task can finish in this session — if it is
-getting low, say so in words as well, because that is a fact they can act on.
-Skip the line if it prints nothing (the cache is not warm yet).
+    📊 Fable 0% · Week 43% (resets on Tue) · 5H 62% (resets in 1h 10m) · ctx 68%
+
+Do not retype, reorder, abbreviate or "summarise" that line, and do not replace it
+with your own numbers like a test count — those belong in the body. It is one shell
+call, it costs no tokens, and it is the same line every time so it can be read at a
+glance. \`ctx\` is how much of THIS conversation's context window is left; if it is
+getting low, say so in words in the body too, because that decides whether a long
+task can finish in this session. Skip the line only if the command prints nothing.
 
 COMMAND MENU
 The chat's "/" menu offers exactly one command: /usage. Take that literally —

@@ -1,4 +1,4 @@
-# Releasing 3.0.0
+# Releasing 3.0.1 (which carries 3.0.0)
 
 Two halves: the notes that go out, and the commands that put them out. The notes
 are written to be pasted into the GitHub release; the runbook is for the operator,
@@ -148,18 +148,24 @@ git merge --no-ff v3-daemon -m "Merge v3-daemon: the always-on daemon (3.0.0)"
 
 ### 3. Tag it
 
+**One tag, v3.0.1, carrying both changelog sections.** 3.0.0 was finished but never
+pushed, so nobody has it and everything reaches users in this one release. The bump
+is not cosmetic though: the operator's own install reports 3.0.0, so 3.0.1 is what
+makes *him* see the "new version available" prompt — the upgrade mechanism every
+future release depends on, and one no human has yet watched work end to end.
+
 v2.6.0 never got a tag, which is why `git tag` stops at v2.5.1. Worth not
 repeating.
 
 ```sh
-git tag -a v3.0.0 -m "Agent Babysitter 3.0.0 — the always-on daemon"
+git tag -a v3.0.1 -m "Agent Babysitter 3.0.1 — the always-on daemon"
 ```
 
 ### 4. Push
 
 ```sh
 git push origin main
-git push origin v3.0.0
+git push origin v3.0.1
 git push origin v3-daemon              # keep the branch's history on the remote
 git push origin restricted-assistant   # the deferred feature's branch
 ```
@@ -170,8 +176,8 @@ There are no GitHub releases on this repo yet — 3.0.0 would be the first. Part
 of this file is the body:
 
 ```sh
-gh release create v3.0.0 \
-  --title "3.0.0 — the always-on daemon" \
+gh release create v3.0.1 \
+  --title "3.0.1 — the always-on daemon" \
   --notes-file docs/RELEASE-3.0.0.md
 ```
 

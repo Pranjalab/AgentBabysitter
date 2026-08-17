@@ -25,7 +25,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
-## [3.0.0] — 2026-08-17 — v3: the always-on daemon
+## [3.0.1] — 2026-08-17 — the shape of the thing, corrected in use
+
+3.0.0 was finished and unpushed when the operator started using it in earnest, and
+everything below came out of that: a security pass over the branch, two bugs he hit
+by simply launching sessions, and the reporting surface reworked around how he
+actually reads it — by ear. Released together with 3.0.0, since 3.0.0 never shipped.
 
 - **The status bar, as the operator wanted it read.** Four changes, all from seeing
   it in use:
@@ -139,6 +144,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   controls; what it cannot do any more is any of the one-step versions.
   Five mutations, each caught by the intended test. What the same pass checked and
   found already correct is recorded in `docs/RELEASE-3.0.0.md`.
+
+## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
 - **"Already being polled" now tells you what is holding the bot, and takes it
   back when nothing is.** One flat refusal covered four different situations, and
