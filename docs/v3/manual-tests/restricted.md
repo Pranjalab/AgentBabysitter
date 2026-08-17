@@ -4,11 +4,18 @@ Prereq: Docker; the daemon installed + running; an existing paired `default` pro
 (so the pairing PIN relays to your phone); a phone with Telegram; a throwaway bot from
 @BotFather ready to pair.
 
-> One-time: Stage 3 needs the **v3** image (bakes in the restricted prompt + extends
-> `absd-session`). Rebuild it once:
+> **No rebuild needed** — checked on 17 Aug 2026. `absd/sandbox.py` expects
+> `absd-sandbox:v4`, that image is present, and it already carries the restricted
+> prompt at `/usr/local/share/absd/restricted-prompt.txt` plus `absd-session` on
+> PATH. An earlier draft of this file said to rebuild for "the v3 image"; that is
+> stale and costs ten minutes for nothing. Confirm and move on:
 > ```sh
-> abs sandbox build --rebuild
+> docker images | grep absd-sandbox        # expect v4
 > ```
+> `abs.sh` **and** `absd-session` are re-copied into the box before every session,
+> so a launcher fix on the host reaches a long-running container without a rebuild.
+> Only a change to the image itself (the prompt file, installed packages) needs
+> `abs sandbox build --rebuild`.
 
 ## 1. Create the restricted assistant
 
@@ -26,6 +33,26 @@ Expected, in order:
   confirmation, and the `/` menu registered.
 - Ends with: profile `assistant` (Haiku, sandbox `assistant`, no host creds) and the
   next step — `abs restricted login assistant`. It does NOT launch yet.
+
+## 1b. Containment — do this BEFORE logging in
+
+Out of order in the old draft, and the order is the whole point: the check only
+proves anything *before* step 2 puts the box's own credentials there.
+
+```sh
+docker exec absd-sbx-assistant test -e /home/dev/.claude/.credentials.json; echo $?   # 1
+docker exec absd-sbx-assistant test -e /home/dev/.claude;                    echo $?   # 1
+docker exec absd-sbx-assistant test -e /home/pranjal;                        echo $?   # 1
+docker exec absd-sbx-assistant ls -a /home/dev                                          # .bashrc, .bun, workspace
+```
+
+All three `1` means the box has none of your credentials, no `~/.claude` at all,
+and no view of your home. **If any of them is `0`, stop** — that is the release
+blocker, and everything else in this file is a prompt that can be talked around.
+
+Verified this way on a throwaway `--no-creds` box on 17 Aug, including a control
+check on a normal sandbox that returned creds-present, so the test can fail. What
+is left here is confirming it on the real one.
 
 ## 2. Log Claude in inside the box (one time)
 
@@ -90,12 +117,15 @@ abs restricted destroy assistant    # remove the sandbox + profile
 - After `destroy`, `abs daemon status` drops the profile within ~60s (rescan). Delete
   the bot in @BotFather if it was a throwaway.
 
-## Containment spot-check (optional, reassuring)
+## Containment — see §1b
 
-The restricted box holds NO host credentials:
-```sh
-docker exec absd-sbx-assistant test -e /home/dev/.claude/.credentials.json; echo $?
-# 1 (absent) BEFORE you run `abs restricted login`; after login it's the box's OWN creds,
-# never a copy of your host ~/.claude.
-docker exec absd-sbx-assistant ls /home/dev        # no copy of your host home
-```
+Moved to §1b, because after step 2 the box has credentials of its own and the check
+stops meaning anything. It is not optional either: it is the only thing in this file
+that would block a release.
+
+## What a FAIL is worth here
+
+Sections 3–6 are behaviour, and §4 in particular is a *prompt*. Prompts can be
+talked around, so if you get code out of it that is a note in the release, not a
+blocker — the containment was never the prompt. §1b is the containment. That is the
+one to stop on.
