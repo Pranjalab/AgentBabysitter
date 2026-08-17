@@ -602,19 +602,222 @@ ensure_plugin() {
 # session is already polling this profile's bot, so pairing would fight it
 # (HTTP 409) and updates would land in whichever poller won the race.
 assert_no_live_session() {
-  local pid
-  pid="$(profile_live_pid)"
-  if [ -n "$pid" ]; then
-    die "Profile '$PROFILE' already has a live poller (pid $pid).
-  Telegram permits only one poller per bot, so pairing would collide with it.
-  Quit that session, then run setup again."
-  fi
+  # Same three-way decision as a launch: an orphaned poller is reclaimed rather
+  # than blocking a pairing, and a real session is named.
+  require_profile_free
   # bot.pid is a plugin internal and could move on upgrade. Keep the old process
   # check as a backstop — it can't tell which bot, hence a warning not a die.
   if pgrep -af "channels[[:space:]]+plugin:telegram" >/dev/null 2>&1; then
     warn "A Claude Code session with a Telegram channel is running."
     warn "If it's using this profile's bot, pairing will collide with it (409)."
   fi
+}
+
+# --- who is holding this bot? ------------------------------------------------
+#
+# `profile_live_pid` answers "is the token taken", which is the wrong question on
+# its own: it names a `bun server.ts` pid that means nothing to the operator, and
+# "quit that session first" is useless advice when the session in question might be
+# their own live one, a bare `claude` they started outside abs, or a corpse.
+#
+# The pid file cannot tell those apart. The process tree can: the plugin's poller
+# is a grandchild of the `claude` that loaded the plugin, so walking up from the
+# poller finds the session that owns it — or finds nothing, which is the orphan
+# case (the poller was reparented when its session died and is still holding the
+# token, deaf).
+#
+# session.pid is deliberately NOT used here. It is written by `cmd_run`, so a
+# `claude` started by hand never has one, and that is exactly the confusing case:
+# a live session abs did not launch, with a stale session.pid from the last one it
+# did. The tree is the truth.
+
+POLLER_VERDICT=""
+POLLER_FORCED=0
+POLLER_OWNER_PID=""
+POLLER_OWNER_AGE=""
+POLLER_OWNER_CWD=""
+
+# Does `$1` actually look like the plugin's Telegram poller?
+#
+# This is the check that makes the rest trustworthy, and it exists because pids
+# are recycled. This machine wrapped from ~3.8M back to ~1.2M in a single day, so
+# `kill -0 "$(cat bot.pid)"` succeeding proves only that *something* has that
+# number now — quite possibly a browser tab. Treating that as "the bot is taken"
+# is a refusal the operator can never clear, because there is nothing to quit.
+#
+# The poller is `bun server.ts` out of the plugin's cache directory, so the name
+# of the running command is the discriminator. Anything else means the pid file is
+# describing a process that no longer exists.
+poller_looks_real() {
+  local args comm
+  args="$(ps -o args= -p "$1" 2>/dev/null || true)"
+  case "$args" in *server.ts*|*plugins/cache*telegram*) return 0 ;; esac
+  comm="$(ps -o comm= -p "$1" 2>/dev/null | tr -d '[:space:]')"
+  case "$comm" in bun|node) return 0 ;; esac
+  return 1
+}
+
+# The pid of the claude/absd that owns `$1`, by walking up the tree. Empty when
+# there is none (orphan) or when we ran out of hops. Never fails.
+poller_owner_pid() {
+  local pid="$1" hops=0 comm
+  while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ] && [ "$hops" -lt 8 ]; do
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    case "$comm" in
+      claude|absd) printf '%s' "$pid"; return 0 ;;
+    esac
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    hops=$((hops + 1))
+  done
+  return 0
+}
+
+# Sets POLLER_VERDICT (and POLLER_OWNER_* when it applies) to one of:
+#
+#   stale   — nothing is polling: the pid is dead, or alive but not a poller at all
+#             (a recycled pid). Carry on, and never signal it — that number now
+#             belongs to somebody else's process.
+#   owned   — a live claude/absd owns the poller. The refusal is correct; say whose.
+#   orphan  — a real poller whose session is gone, still holding the token. Reclaim.
+#   unknown — a real poller we cannot attribute. Refuse, and offer --reclaim; the
+#             cost of guessing "orphan" here is two pollers on one token, which is
+#             how an afternoon of messages went missing yesterday.
+#
+# Sets globals rather than printing, because it was written as
+# `verdict="$(poller_verdict …)"` first and the POLLER_OWNER_* values silently
+# vanished with the subshell — the message read "in use by a live session (pid )".
+poller_verdict() {
+  local pid="$1" owner
+  POLLER_VERDICT=""; POLLER_OWNER_PID=""; POLLER_OWNER_AGE=""; POLLER_OWNER_CWD=""
+  if ! kill -0 "$pid" 2>/dev/null || ! poller_looks_real "$pid"; then
+    POLLER_VERDICT=stale
+    return 0
+  fi
+  owner="$(poller_owner_pid "$pid")"
+  if [ -n "$owner" ]; then
+    POLLER_OWNER_PID="$owner"
+    POLLER_OWNER_AGE="$(ps -o etime= -p "$owner" 2>/dev/null | tr -d '[:space:]')"
+    # Linux only; a missing /proc just means the message carries one fewer detail.
+    POLLER_OWNER_CWD="$(readlink "/proc/$owner/cwd" 2>/dev/null || true)"
+    POLLER_VERDICT=owned
+    return 0
+  fi
+  # No owner in the tree. Reparented to init is the unambiguous orphan signature:
+  # the `bun run` wrapper and the claude above it are both gone.
+  case "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')" in
+    1) POLLER_VERDICT=orphan ;;
+    *) POLLER_VERDICT=unknown ;;
+  esac
+  return 0
+}
+
+# Free the token by ending an orphaned poller. TERM first — the plugin's server
+# closes its Telegram connection on the way out — then KILL if it ignores us.
+# Returns 0 only when the pid is really gone, so a caller can still refuse.
+poller_reclaim() {
+  local pid="$1" i
+  kill -TERM "$pid" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    poller_gone "$pid" && return 0
+    sleep 0.2
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  for i in 1 2 3 4 5; do
+    poller_gone "$pid" && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# Is `$1` really finished? `kill -0` is not enough on its own: a process whose
+# parent never reaps it stays a zombie, and signalling a zombie keeps succeeding
+# forever. It holds no socket and no token — it is dead — so anything that waits
+# for `kill -0` to fail waits for good, and reports "could not stop the poller"
+# about a process that stopped.
+poller_gone() {
+  kill -0 "$1" 2>/dev/null || return 0
+  case "$(ps -o stat= -p "$1" 2>/dev/null | tr -d '[:space:]')" in
+    Z*) return 0 ;;
+  esac
+  return 1
+}
+
+# The shared decision for every "the bot is taken" site. Prints nothing and
+# returns 0 when the profile is free to use (including after reclaiming an
+# orphan); dies with an explanation naming the actual holder otherwise.
+#
+# `--reclaim` on the command line promotes `unknown` to `orphan`, for a poller
+# that is wedged rather than dead. It never touches a poller a live session owns:
+# the plugin would just respawn it, and killing someone's working bridge to fix
+# their bot is not a trade abs gets to make.
+require_profile_free() {
+  local pid
+  pid="$(profile_live_pid)"
+  [ -n "$pid" ] || return 0
+  poller_verdict "$pid"
+  # --reclaim is the operator saying "I know what that is, take the bot back". It
+  # covers `owned` as well as `unknown`, because attribution can be wrong in the
+  # unhelpful direction: pids get recycled, and the walk up the tree finds any
+  # claude ancestor, so a poller can be blamed on a session that has nothing to do
+  # with it — and without this there is no way out of that except finding the pid
+  # by hand, which is the whole complaint.
+  #
+  # It ends the POLLER, not the session. If a live session really did own it, the
+  # plugin will notice and respawn one; nothing is lost but a reconnect.
+  if [ "${ABS_RECLAIM:-0}" = "1" ]; then
+    case "$POLLER_VERDICT" in
+      unknown) POLLER_VERDICT=orphan ;;
+      owned)
+        warn "Reclaiming the bot from a LIVE session (pid $POLLER_OWNER_PID) because --reclaim was given."
+        warn "That session's Telegram bridge will drop; it may reconnect on its own."
+        POLLER_VERDICT=orphan
+        POLLER_FORCED=1
+        ;;
+    esac
+  fi
+
+  case "$POLLER_VERDICT" in
+    stale)
+      # The pid file outlived what it described. Drop it and carry on: saying
+      # anything here would be reporting a non-event.
+      rm -f "$TG_DIR/bot.pid" 2>/dev/null || true
+      return 0
+      ;;
+    orphan)
+      if [ "${POLLER_FORCED:-0}" = "1" ]; then
+        warn "Ending the poller for '$PROFILE' (pid $pid)."
+      else
+        warn "Profile '$PROFILE' was still holding its bot (poller pid $pid) with no session behind it."
+      fi
+      if poller_reclaim "$pid"; then
+        # The file described the process we just ended; leaving it behind would
+        # make the next run diagnose a pid that is now free to be recycled.
+        rm -f "$TG_DIR/bot.pid" 2>/dev/null || true
+        ok "Reclaimed it — the bot is free. Carrying on."
+        return 0
+      fi
+      die "Could not stop the stale poller (pid $pid). End it by hand:  kill -9 $pid"
+      ;;
+    owned)
+      local who="pid $POLLER_OWNER_PID"
+      [ -n "$POLLER_OWNER_AGE" ] && who="$who, up $POLLER_OWNER_AGE"
+      [ -n "$POLLER_OWNER_CWD" ] && who="$who, in $POLLER_OWNER_CWD"
+      local how="  End it:       abs --profile $PROFILE exit"
+      [ -n "$(session_live_pid)" ] && how="  Attach to it: abs attach $PROFILE
+$how"
+      die "Profile '$PROFILE' is in use by a live Claude Code session ($who).
+  Telegram allows one poller per bot, so this one cannot be started as well.
+$how
+  Or use another bot: abs --profile <name>    (see: abs profiles)
+  If that pid is NOT a session you recognise, take the bot back:
+    abs --reclaim --profile $PROFILE"
+      ;;
+    *)
+      die "Profile '$PROFILE' looks busy: something is polling its bot (pid $pid) and
+  abs cannot tell what owns it. If you know that process is finished:
+    abs --reclaim --profile $PROFILE       (stops the poller, then starts)"
+      ;;
+  esac
 }
 
 load_token() {
@@ -4066,13 +4269,10 @@ cmd_run() {
     warn "Inbound Telegram is currently OFF. Turn it on with: abs --profile $PROFILE on"
   fi
 
-  local pid
-  pid="$(profile_live_pid)"
-  if [ -n "$pid" ]; then
-    die "Profile '$PROFILE' is already being polled (pid $pid).
-  Telegram permits one poller per bot. Quit that session first, or use a
-  different bot:  abs --profile <name>    (see: abs profiles)"
-  fi
+  # Names the holder, offers attach when there is something to attach to, and
+  # reclaims a poller that outlived its session instead of making the operator
+  # find and kill it.
+  require_profile_free
 
   # Resume-first start menu (v3): the FIX A live-session guard runs FIRST so we
   # never offer choices that would fail, then the picker (interactive TTY + recents
@@ -4631,6 +4831,13 @@ main() {
       # Away mode: don't prompt for file edits (acceptEdits). A flag form of the
       # existing ABS_AWAY env mechanism, honored by cmd_run's perm_args.
       --away)      ABS_AWAY=1; shift ;;
+      # Take the bot back from a poller abs cannot account for. An ORPHANED poller
+      # is reclaimed without this flag; --reclaim covers the wedged-but-not-dead
+      # case, where the tree gives no clear answer and only the operator knows the
+      # process is finished with. It still refuses to kill a poller that a live
+      # session owns — the plugin would respawn it, and ending someone's working
+      # bridge to fix their bot is not a trade abs gets to make.
+      --reclaim)   ABS_RECLAIM=1; shift ;;
       # v3 start-menu bypasses (interactive terminal launch): --new = skip the menu
       # and start fresh in the current folder; --resume = skip it and resume the
       # top recent. Both are no-ops when there is no menu (non-TTY / no recents).

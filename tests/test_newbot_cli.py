@@ -87,24 +87,39 @@ def test_new_bot_refuses_while_session_live(tmp_path: Path, stub_bin: Path) -> N
     home = tmp_path / "home"; home.mkdir()
     abs_home = tmp_path / "abs"
     write_profile(abs_home, "default", allow_ids=[42])
-    # A LIVE poller on the resolved (default) profile: bot.pid naming this very
-    # (alive) test process. profile_live_pid -> assert_no_live_session must die.
-    tg_dir = abs_home / "tg" / "default"
-    (tg_dir / "bot.pid").write_text(str(os.getpid()))
 
-    proc = subprocess.run(
-        ["bash", str(ABS_SH), "start", "new-bot"],
-        env=_env(abs_home, home, stub_bin),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        cwd=str(home),
-    )
+    # A LIVE poller on the resolved (default) profile. This used to point bot.pid at
+    # the pytest process itself, which stopped working for a good reason: pids are
+    # recycled, so abs now checks that the holder actually *is* the plugin's poller
+    # before refusing over it. The old fixture was passing because of the bug — any
+    # live pid counted — so it has to forge something realistic instead. `exec -a`
+    # gives the process the argv the real poller has.
+    poller = subprocess.Popen(["bash", "-c", 'exec -a "bun server.ts" sleep 60'])
+    time.sleep(0.5)
+    tg_dir = abs_home / "tg" / "default"
+    (tg_dir / "bot.pid").write_text(str(poller.pid))
+
+    try:
+        proc = subprocess.run(
+            ["bash", str(ABS_SH), "start", "new-bot"],
+            env=_env(abs_home, home, stub_bin),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(home),
+        )
+    finally:
+        poller.kill()
+        poller.wait()
 
     combined = proc.stdout + proc.stderr
     assert proc.returncode != 0, combined
-    assert "already has a live poller" in combined
+    # Which refusal depends on whether this suite runs under a claude/absd ancestor
+    # (owned) or not (unknown), so assert what both promise: the holder's pid, and
+    # the way out.
+    assert str(poller.pid) in combined or "in use by a live" in combined, combined
+    assert "--reclaim" in combined, combined
     # Never created a new profile.
     assert list((abs_home / "profiles").glob("*")) == [abs_home / "profiles" / "default"]
 

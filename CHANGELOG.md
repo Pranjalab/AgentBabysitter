@@ -27,6 +27,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
+- **"Already being polled" now tells you what is holding the bot, and takes it
+  back when nothing is.** One flat refusal covered four different situations, and
+  gave advice ("quit that session first") that only fitted one of them.
+  It now decides from the **process tree**, not from `session.pid` — a `claude`
+  started by hand never writes one, which is precisely the case where the old
+  message helped least. A live owner is named: pid, uptime, working directory, and
+  `abs attach` when there is something to attach to. A poller that outlived its
+  session is reclaimed rather than reported, because there is nothing to quit.
+  And a pid file that describes a process which no longer exists is *ignored*:
+  **pids are recycled** — this machine wrapped from ~3.8M to ~1.2M inside a day —
+  so a live pid proves only that something owns that number now. Refusing over it
+  was unclearable, and signalling it would have killed a stranger's process, so
+  abs now checks the holder really is the plugin's poller before believing the file.
+  `abs --reclaim` covers the rest: a wedged poller, or one misattributed to a live
+  session. It ends the **poller**, never the session — the plugin reconnects.
+  Also: a zombie poller counts as gone. `kill -0` succeeds on an unreaped process
+  forever, so waiting for it to fail meant reporting "could not stop the poller"
+  about a process that had stopped.
+
 - **A slow network no longer stops `abs` from starting.** The launch-time version
   check exits 28 when `raw.githubusercontent.com` cannot be reached in three
   seconds. `pipefail` reported that status even though `tr` had succeeded, and

@@ -5,6 +5,31 @@ reference: profiles, voice setup, running it while you're away, the daemon,
 sandboxes, the restricted assistant, where state lives, limits, and
 troubleshooting.
 
+## When a bot says it is already in use
+
+Telegram allows **one poller per bot token**, so `abs` refuses to start a second
+session on a profile that is already being polled. What it does about it depends on
+what is actually holding the bot:
+
+| What is holding it | What `abs` does |
+| --- | --- |
+| A live Claude Code session | Refuses, naming the pid, how long it has been up, and its folder — plus `abs attach <profile>` when there is a session to attach to |
+| A poller whose session has died | **Reclaims it** and carries on. There is nothing to quit, so it does not ask you to |
+| A pid file describing a process that no longer exists | Ignores it and carries on. Pids get recycled, so a pid being alive proves nothing about *what* is alive |
+| Something it cannot attribute | Refuses, and tells you about `--reclaim` |
+
+```sh
+abs --reclaim --profile default     # take the bot back, then start
+```
+
+`--reclaim` ends the **poller**, never the session that owns it. If a live session
+really was using that bot, its Telegram bridge drops and the plugin reconnects; you
+lose a moment of relay, not your work. It says so before doing it.
+
+The process tree is what decides this, not `session.pid` — a `claude` you started
+by hand never writes one, and that is exactly the case where the old message
+("quit that session first") was least useful.
+
 ## Profiles — more than one session at once
 
 **Telegram allows exactly one poller per bot token.** That's a hard platform
