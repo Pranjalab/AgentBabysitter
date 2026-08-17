@@ -48,10 +48,8 @@ claude_fresh=0
 # ask_yes "<prompt>" [default]
 #
 # `default` is "y" when Enter should mean yes; anything else (or omitted) keeps the
-# historic behaviour where only an explicit y counts. It exists because the clone
-# prompt is written "[Y/n]" — the full install is the recommended path — and a
-# prompt that shows a capital Y while treating Enter as "no" is a lie that would
-# quietly hand people the cut-down install they did not choose.
+# historic behaviour where only an explicit y counts. A prompt that shows a capital
+# Y while treating Enter as "no" is a lie, so any caller writing "[Y/n]" must pass it.
 ask_yes() {
   local reply="" default="${2:-n}"
   # Braces matter: `exec 3<>/dev/tty 2>/dev/null` applies redirections left to
@@ -173,53 +171,31 @@ if [ -n "$here" ] && [ -f "$here/abs.sh" ]; then
   src="$here/abs.sh"
   info "${c_dim}Installing from this checkout.${c_reset}"
 else
-  # Piped in, so there is no checkout — and a lone abs.sh cannot run v3 at all. The
-  # daemon is Python in this repo with its own venv, `abs sandbox` needs the
-  # Dockerfile, and both are gated on being a checkout further down, so the
-  # one-liner used to install a script that then had to explain what it could not
-  # do. The headline feature of 3.0.0 was unreachable by the headline install.
+  # Piped in, so there is no checkout. This used to ASK whether to clone the
+  # repository. That question is gone, for two reasons.
   #
-  # So offer the clone. Accepting gets the daemon, the sandboxes and `git pull`
-  # updates; declining still gets exactly what it always got, which is why this is
-  # a question rather than a decision made for them.
-  clone_dir="${ABS_CLONE_DIR:-$HOME/AgentBabysitter}"
-  want_clone=0
-  if command -v git >/dev/null 2>&1; then
-    info ""
-    info "${c_bold}Full install, or just the script?${c_reset}"
-    info "${c_dim}The always-on daemon (start sessions from Telegram with nothing running),"
-    info "sandboxes, and updates by \`git pull\` all need the repository. Cloning into"
-    info "$clone_dir gets them. Declining installs the single script, which"
-    info "does everything 2.x did.${c_reset}"
-    if ask_yes "Clone the repository for the full v3 install? [Y/n]" y; then want_clone=1; fi
-  fi
-
-  if [ "$want_clone" = 1 ]; then
-    if [ -d "$clone_dir/.git" ]; then
-      info "${c_dim}Updating the existing checkout at $clone_dir…${c_reset}"
-      git -C "$clone_dir" pull --ff-only >/dev/null 2>&1 \
-        || warn "Could not fast-forward $clone_dir — installing from it as it stands."
-    else
-      [ -e "$clone_dir" ] && die "$clone_dir exists and is not a git checkout. Move it, or set ABS_CLONE_DIR."
-      info "${c_dim}Cloning into $clone_dir…${c_reset}"
-      git clone --depth 1 "${ABS_GIT_URL:-https://github.com/Pranjalab/AgentBabysitter}" "$clone_dir" >/dev/null 2>&1 \
-        || die "Clone failed. Re-run and answer 'n' for the single-script install."
-    fi
-    [ -f "$clone_dir/abs.sh" ] || die "Clone produced no abs.sh at $clone_dir — refusing to continue."
-    # From here the rest of this script cannot tell the difference between this and
-    # someone who cloned by hand, which is the point: one path, already tested.
-    here="$clone_dir"
-    src="$clone_dir/abs.sh"
-    info "${c_dim}Installing from $clone_dir.${c_reset}"
-  else
-    src="$(mktemp -t abs.XXXXXX.sh)"
-    trap 'rm -f "$src"' EXIT
-    info "${c_dim}Downloading abs.sh…${c_reset}"
-    curl -fsSL "$REPO/abs.sh" -o "$src" || die "Could not download $REPO/abs.sh"
-    # A truncated download that still starts with a shebang would install cleanly
-    # and then fail at the worst moment. Parse it before trusting it.
-    bash -n "$src" 2>/dev/null || die "Downloaded file isn't valid bash — aborting rather than installing it."
-  fi
+  # It broke real upgrades: an unbraced variable in a message string,
+  # followed by a multibyte ellipsis — is read by bash 3.2, which is what macOS
+  # ships, as part of the VARIABLE NAME. Under `set -u` that aborts with
+  # "unbound variable" in the middle of an upgrade, on every Mac. It
+  # parses fine on bash 5, which is what every test here runs on, so nothing caught
+  # it and the operator hit it on the first machine that mattered.
+  #
+  # And it was the wrong question anyway: an installer should install. Making
+  # someone choose between "the script" and "the whole thing" hands a packaging
+  # problem to the person least equipped to judge it.
+  #
+  # So this is the single-script install again. The daemon and sandboxes still need
+  # the full tree, and delivering that WITHOUT a clone — unpacking the release
+  # tarball into ~/.abs/src — is the next release, not something to half-finish
+  # inside a bug fix.
+  src="$(mktemp -t abs.XXXXXX.sh)"
+  trap 'rm -f "$src"' EXIT
+  info "${c_dim}Downloading abs.sh…${c_reset}"
+  curl -fsSL "$REPO/abs.sh" -o "$src" || die "Could not download $REPO/abs.sh"
+  # A truncated download that still starts with a shebang would install cleanly
+  # and then fail at the worst moment. Parse it before trusting it.
+  bash -n "$src" 2>/dev/null || die "Downloaded file isn't valid bash — aborting rather than installing it."
 fi
 
 # --- install -----------------------------------------------------------------

@@ -224,96 +224,10 @@ def test_the_clone_prompt_defaults_to_yes(tmp_path: Path) -> None:
     assert "YES" in text and "NO2" in text, text
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
-def test_accepting_the_clone_lands_abs_inside_the_checkout(tmp_path: Path) -> None:
-    """The new DEFAULT path for every new user, driven through a pty.
-
-    The decline path is covered above without a terminal. Accepting had never been
-    run at all, which is the wrong thing to take on trust about the headline
-    install — a broken clone branch would greet everybody who follows the README.
-
-    `git` is stubbed into producing a checkout-shaped directory, so the installer's
-    own checkout branch executes for real without reaching GitHub. What is asserted
-    is the property that matters: `abs` ends up a symlink INTO the clone, which is
-    what makes `git pull` an upgrade path and what the daemon needs to exist at all.
-    """
-    import pty
-    import select
-    import time
-
-    base = tmp_path
-    (base / "bin").mkdir()
-    (base / "home").mkdir()
-    (base / "out").mkdir()
-    log = base / "git.log"
-
-    git = base / "bin" / "git"
-    git.write_text(
-        "#!/usr/bin/env bash\n"
-        'case "${1:-}" in\n'
-        "  clone)\n"
-        '    dst="${@: -1}"\n'
-        '    mkdir -p "$dst/absd"\n'
-        f'    cp {REPO / "abs.sh"} "$dst/abs.sh"\n'
-        f'    printf "cloned\\n" >> "{log}"\n'
-        "    exit 0 ;;\n"
-        "esac\n"
-        "exit 0\n"
-    )
-    git.chmod(0o755)
-    for name in ("claude", "bun", "systemctl"):
-        p = base / "bin" / name
-        p.write_text("#!/usr/bin/env bash\nexit 0\n")
-        p.chmod(0o755)
-
-    env = dict(os.environ)
-    for k in list(env):
-        if k.startswith("ABS_"):
-            env.pop(k, None)
-    env.update(
-        HOME=str(base / "home"), PREFIX=str(base / "out"),
-        PATH=f"{base / 'bin'}:{env.get('PATH', '')}",
-        ABS_CLONE_DIR=str(base / "clone"),
-        ABS_REPO="http://127.0.0.1:1/never",
-    )
-
-    pid, fd = pty.fork()
-    if pid == 0:  # pragma: no cover - execs immediately
-        os.execve("/bin/bash", ["bash", "-c", f"cat {INSTALL} | bash"], env)
-
-    out = bytearray()
-    deadline = time.time() + 60
-    answered = 0
-    while time.time() < deadline:
-        ready, _, _ = select.select([fd], [], [], 0.3)
-        if not ready:
-            continue
-        try:
-            chunk = os.read(fd, 65536)
-        except OSError:
-            break
-        if not chunk:
-            break
-        out.extend(chunk)
-        text = out.decode("utf-8", "replace")
-        if answered == 0 and "Clone the repository" in text:
-            os.write(fd, b"\r")        # Enter — the documented default
-            answered = 1
-        elif answered >= 1 and text.count("? [") > answered:
-            os.write(fd, b"n\r")       # decline the optional extras
-            answered += 1
-    try:
-        os.close(fd)
-    except OSError:
-        pass
-    try:
-        os.waitpid(pid, 0)
-    except ChildProcessError:
-        pass
-
-    transcript = out.decode("utf-8", "replace")
-    assert log.exists(), transcript                       # Enter really meant yes
-    target = base / "out" / "abs"
-    assert target.is_symlink(), transcript
-    assert str(base / "clone") in os.readlink(target), transcript
-    assert (base / "clone" / "absd").is_dir(), transcript
+# The clone prompt is gone (it crashed on macOS bash 3.2, and an installer should
+# install rather than interview), so the test that drove it went with it. What
+# replaces it is not another prompt test but the plain fact the installer must keep:
+# a piped install produces a working `abs`. That is covered by
+# `test_a_piped_install_without_a_tty_falls_back_to_the_single_script` above.
+#
+# When the tarball install lands in the next release, THIS is where its test goes.
