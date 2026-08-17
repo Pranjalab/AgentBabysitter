@@ -224,40 +224,74 @@ def test_an_allowlisted_bot_is_not_off(bar):
     assert bar.dots() == {"Text": GREEN, "Voice": GREEN}
 
 
-# ---- the daemon dot ----------------------------------------------------------
+# ---- the daemon dot, removed -------------------------------------------------
+#
+# It shipped in 3.0.0 answering a real question — is the bot being watched, so a
+# message sent after this session ends still lands — and the operator's verdict was
+# "I'm not able to understand what it is". A bar segment nobody can read costs width
+# and teaches nothing, and the bar is the most-seen surface in the tool.
+#
+# The state did not go away: `abs status` and `abs daemon status` both report it,
+# where there is room to say what it means in a sentence. These tests exist so the
+# dot is not re-added by someone reading the changelog entry that introduced it.
 
 
-def test_daemon_dot_green_when_the_status_file_is_fresh(bar):
-    bar.daemon(age_s=10)
-    assert bar.dots()["Daemon"] == GREEN
+def test_the_bar_carries_no_daemon_segment(bar):
+    bar.daemon(age_s=10)          # daemon running and watching this profile
+    out = bar.render()
+    assert "Daemon" not in out, out
+    assert "Text" in out and "Voice" in out
 
 
-def test_daemon_dot_dim_when_the_status_file_is_stale(bar):
+def test_a_stale_daemon_does_not_bring_the_segment_back(bar):
     bar.daemon(age_s=3600)
-    assert bar.dots()["Daemon"] == DIM
+    assert "Daemon" not in bar.render()
 
 
-def test_daemon_dot_dim_when_this_profile_has_no_status_file(bar):
-    """The daemon is running but isn't watching THIS profile — which is exactly
-    the case where a message sent after the session ends would be missed."""
-    bar.daemon(age_s=10)
-    (bar.home / "daemon" / f"status-{PROFILE}.json").unlink()
-    assert bar.dots()["Daemon"] == DIM
-
-
-def test_no_daemon_segment_at_all_on_a_v2_install(bar):
-    """No `daemon/` dir means absd was never installed; the bar must look exactly
-    as it did in v2 rather than growing a permanently grey dot."""
+def test_no_daemon_directory_is_also_quiet(bar):
     bar.daemon(None)
     out = bar.render()
     assert "Daemon" not in out
     assert "Text" in out and "Voice" in out
 
 
-def test_daemon_freshness_window_is_overridable(bar):
-    bar.daemon(age_s=600)
-    assert bar.dots()["Daemon"] == DIM
-    assert bar.dots(ABS_DAEMON_FRESH_MIN="30")["Daemon"] == GREEN
+# ---- the shape the operator asked for ----------------------------------------
+
+
+def test_context_is_last_and_dim_rather_than_colour_graded(bar):
+    """A limit at 90% stops your work; a context window at 30% only means this
+    conversation is getting long. It reads as a footnote: lowercase, always dim,
+    after the limits — never in the amber/red the limits use."""
+    bar.rc()
+    out = _render_with(bar, PAYLOAD)
+    plain = _plain(out)
+    assert "ctx 68%" in plain, plain
+    assert plain.index("ctx 68%") > plain.index("5H "), plain
+    assert f"\x1b[{DIM}mctx 68%" in out, out
+
+
+def test_the_version_is_the_last_thing_on_the_bar(bar):
+    """So somebody debugging their own install can see which abs is rendering,
+    without running anything."""
+    bar.rc()
+    plain = _plain(bar.render())
+    assert plain.rstrip().endswith("v3.0.0"), plain
+
+
+def test_a_unix_timestamp_reset_is_rendered_as_a_countdown(bar):
+    """The regression this batch fixed. Claude Code's payload gives `resets_at` as a
+    unix timestamp, and `date -d 1786992000` reads a bare integer as a TIME OF DAY —
+    so the bar showed the operator "(resets 1786992000)". The `/usage` output this
+    formatter was written against had always been an ISO string.
+    """
+    bar.rc()
+    soon = int(time.time()) + 4260          # 1h 11m
+    out = _plain(_render_with(bar, {
+        "rate_limits": {"five_hour": {"used_percentage": 62.0, "resets_at": soon}},
+    }))
+    assert "5H 62%" in out, out
+    assert str(soon) not in out, out        # never the raw epoch
+    assert "resets in 1h 1" in out, out
 
 
 # ---- the contract the whole bar has to keep ----------------------------------
@@ -376,8 +410,8 @@ def _render_with(bar, payload):
 
 def test_the_bar_shows_how_much_context_is_left(bar):
     bar.rc()
-    out = _render_with(bar, PAYLOAD)
-    assert "Ctx 68% left" in out, out
+    out = _plain(_render_with(bar, PAYLOAD))
+    assert "ctx 68%" in out, out
 
 
 def test_the_payload_fills_the_usage_cache(bar):

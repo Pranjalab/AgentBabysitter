@@ -277,7 +277,7 @@ abs --model opus        # any claude flag is passed straight through
 | 🗂 `abs profiles` | List your bots and which are in use |
 | ⚙️ `abs config model <name>` | Default model for new sessions (`--clear` to unset) |
 | ⚙️ `abs config silent on` / `off` | Whether new sessions start muted |
-| ⚙️ `abs config statusline on` / `off` | Bottom-bar Text/Voice/Daemon dots + usage (default on) |
+| ⚙️ `abs config statusline on` / `off` | Bottom-bar dots, usage, context and version (default on) |
 | ⚙️ `abs config label <name>` | Name before the colon in the bar — `auto` takes your Claude one |
 | ⚙️ `abs config usage-refresh <min>` | How often the usage glance refreshes (default 5) |
 | ⚙️ `abs config guard on` / `off` | Block destructive commands on Telegram turns (default on) |
@@ -322,20 +322,28 @@ daemon (a systemd user service) that polls every one of your idle bots, so you c
   herdr — tmux can't report agent status, so on tmux the feature is simply absent.
 - **The terminal keeps working unchanged** — plain `abs` still launches at the
   desk, and now shows the same resume-first picker.
-- **The status bar grows a third dot.** `● Daemon` is green while absd is watching
-  this bot, so you can see at a glance that a message sent after this session ends
-  will still land.
+- **The status bar tells you what will happen next.**
 
-  All three read the same way — green means *this is live right now*:
+  ```
+  Pran:@yourbot · ● Text · ● Voice · Week 43% (resets on Tue) · 5H 62% (resets in 1h 10m) · ctx 68% · v3.0.0
+  ```
+
+  Both dots read the same way — green means *this is live right now*:
 
   | Dot | Green when |
   | --- | --- |
   | `● Text` | `reply text on`, not quiet, bot not off |
   | `● Voice` | `reply voice on`, not quiet, bot not off, **and** this machine has TTS installed |
-  | `● Daemon` | absd has refreshed this profile's status in the last 3 minutes |
 
   Voice is dim on a machine with no TTS even with the switch on — the switch is
   what you asked for, TTS is whether it can happen.
+
+  The percentages come from Claude Code's own render payload, so they cost nothing
+  and are never stale: your weekly and five-hour limits with their resets, then
+  `ctx` — how much of *this conversation's* context window is left — dim and last,
+  because a limit at 90% stops your work while a long conversation merely means a
+  long conversation. The version is there so you can see which `abs` is rendering
+  without running anything.
 
   The name before the colon is yours to set:
 

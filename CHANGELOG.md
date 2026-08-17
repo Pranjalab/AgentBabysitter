@@ -27,6 +27,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
+- **The status bar, as the operator wanted it read.** Four changes, all from seeing
+  it in use:
+  **The `● Daemon` dot is gone.** It answered a real question — is the bot being
+  watched, so a message sent after this session ends still lands — but the verdict on
+  it was "I'm not able to understand what it is", and a segment nobody can read costs
+  width and teaches nothing on the most-seen surface in the tool. The state is still
+  in `abs status` and `abs daemon status`, where there is room for a sentence.
+  `ABS_DAEMON_FRESH_MIN` no longer does anything.
+  **A reset time showed as a raw epoch.** `(resets 1786992000)`. Absorbing Claude
+  Code's payload introduced it: `resets_at` arrives as a unix timestamp, and
+  `date -d 1786992000` reads a bare integer as a *time of day*, so a formatter that
+  had been correct for months against the `/usage` output's ISO strings silently
+  produced nonsense. Bare integers are now treated as epochs.
+  **Context moved last and went dim.** Lowercase `ctx 68%`, never colour-graded like
+  the limits: a limit at 90% stops your work, a context window at 30% only means the
+  conversation is long. It should read as a footnote.
+  **The version is on the bar**, dim and last, so anyone debugging their own install
+  can see which `abs` is rendering without running anything.
+
 - **The status bar reads Claude Code's render payload, so it can show what is left
   of the context window.** Claude Code pipes JSON to the statusline command on every
   render, and it carries `context_window` (used and remaining percentage, window

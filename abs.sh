@@ -1767,29 +1767,26 @@ cmd_statusline() {
     voice_dot="${dim}●${off}"
   fi
   local sep="${dim} · ${off}"
-  # Daemon dot (v3). Green when absd has refreshed THIS profile's status file
-  # recently, which is the only thing that matters from the bar: it means the bot
-  # is being watched, so a message sent after this session ends still lands.
-  #
-  # Freshness via the file's mtime, not the `updated_at` inside it: parsing an
-  # ISO timestamp in portable shell needs `date -d` (GNU) or `date -j -f` (BSD),
-  # and this runs on every single statusline render. `find -mmin` exists on both.
-  #
-  # Shown ONLY when the daemon dir exists — a v2 install has no absd and should
-  # see exactly the bar it saw before.
-  local daemon_seg="" dstatus="$ABS_HOME/daemon/status-$PROFILE.json"
-  if [ -d "$ABS_HOME/daemon" ]; then
-    local daemon_dot="${dim}●${off}"
-    if [ -f "$dstatus" ] \
-       && [ -n "$(find "$dstatus" -mmin -"${ABS_DAEMON_FRESH_MIN:-3}" 2>/dev/null)" ]; then
-      daemon_dot="${c_on}●${off}"
-    fi
-    daemon_seg="${sep}${daemon_dot} Daemon"
-  fi
+
+  # The `● Daemon` dot is deliberately gone. It shipped in 3.0.0 to answer "is the
+  # bot being watched, so a message sent after this session ends still lands" — a
+  # real question, but the operator's verdict was "I'm not able to understand what it
+  # is", and a bar segment nobody can read costs width and teaches nothing. The state
+  # is still there in `abs status` and `abs daemon status`, where there is room to say
+  # what it means in words. `ABS_DAEMON_FRESH_MIN` no longer does anything.
+
   # Usage glance (coloured); also kicks a lazy background refresh when stale.
+  # Context sits INSIDE the glance, last and dim: it changes every render and it is
+  # the least urgent number on the bar, so it reads as a footnote rather than
+  # competing with the limits that actually stop work.
   local g; g="$(usage_glance_str color)"
   [ -n "$g" ] && g="${sep}${g}"
-  printf '%s' "${label}${sep}${text_dot} Text${sep}${voice_dot} Voice${daemon_seg}${g}"
+
+  # Version last, dim: an operator debugging their own install should not have to run
+  # anything to find out which abs is rendering this.
+  local ver="${sep}${dim}v${ABS_VERSION}${off}"
+
+  printf '%s' "${label}${sep}${text_dot} Text${sep}${voice_dot} Voice${g}${ver}"
   return 0
 }
 
@@ -3254,7 +3251,17 @@ field() {
 # silently costs you every relative time. Normalise both spellings to
 # "Jul 16 5:29pm", which GNU and BSD both parse, before going near date(1).
 norm_stamp() {
-  printf '%s' "$1" | sed -E 's/,//g; s/ +at +/ /g; s/  +/ /g; s/^ +//; s/ +$//'
+  local s
+  s="$(printf '%s' "$1" | sed -E 's/,//g; s/ +at +/ /g; s/  +/ /g; s/^ +//; s/ +$//')"
+  # A bare integer is a unix timestamp, and `date -d 1786992000` reads that as a
+  # TIME OF DAY, not an epoch — so it silently produced nonsense and the bar showed
+  # "(resets 1786992000)" to the operator. Claude Code's statusline payload delivers
+  # `resets_at` in exactly that form, which is how absorbing the payload broke a
+  # formatter that had worked for months on the `/usage` output's ISO strings.
+  case "$s" in
+    ''|*[!0-9]*) printf '%s' "$s" ;;
+    *)           printf '@%s' "$s" ;;
+  esac
 }
 
 # "Jul 16, 5:29pm" -> "in 16h 26m". Falls back to the raw stamp if date(1)
@@ -3522,13 +3529,7 @@ usage_glance_str() {
   [ -n "$wr" ] && wday="$(reset_weekday "$wr")"
   local off=$'\033[0m' dim=$'\033[38;5;244m' sep=" · "
   [ "$color" = 1 ] && sep="${dim} · ${off}"
-  if [ -n "$ctx" ]; then
-    out="$(_glance_seg "$color" "Ctx ${ctx}% left" "$((100 - ctx))" "")"
-  fi
-  if [ -n "$fb" ]; then
-    local fseg; fseg="$(_glance_seg "$color" "Fable ${fb}%" "$fb" "")"
-    [ -n "$out" ] && out="${out}${sep}${fseg}" || out="$fseg"
-  fi
+  [ -n "$fb" ] && out="$(_glance_seg "$color" "Fable ${fb}%" "$fb" "")"
   if [ -n "$w" ]; then
     local wp=""; [ -n "$wday" ] && wp="(resets on ${wday})"
     local wseg; wseg="$(_glance_seg "$color" "Week ${w}%" "$w" "$wp")"
@@ -3540,6 +3541,15 @@ usage_glance_str() {
     [ -n "$out" ] && out="${out}${sep}${seg}" || out="$seg"
   elif [ -n "$rel" ]; then
     [ -n "$out" ] && out="${out}${sep}(resets ${rel})" || out="resets ${rel}"
+  fi
+  # Context last and always dim, never colour-graded by threshold like the limits
+  # above. It is the least urgent number here — a limit at 90% stops your work, a
+  # context window at 30% just means this conversation is getting long — and the
+  # operator asked for it to read as a footnote rather than compete.
+  if [ -n "$ctx" ]; then
+    local cseg="ctx ${ctx}%"
+    [ "$color" = 1 ] && cseg="${dim}ctx ${ctx}%${off}"
+    [ -n "$out" ] && out="${out}${sep}${cseg}" || out="$cseg"
   fi
   printf '%s' "$out"
 }
