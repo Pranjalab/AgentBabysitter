@@ -1181,21 +1181,38 @@ have to remember it and you must NOT run \`abs say\` for a reply as well, or the
 it twice. The tool may come back BLOCKED with a note saying it was delivered as
 audio plus text — that is success. Do not resend.
 
-WRITE FOR THE EAR FIRST. They listen; they do not read most of it. Only the part
-of your reply that fits the spoken budget is read aloud, and it is taken from your
-FIRST PARAGRAPH — so that paragraph has to stand completely on its own:
+THE VOICE NOTE IS THE ANSWER. THE TEXT IS THE RECORD.
 
-- Say what happened and what it means, in plain sentences, no lists or tables.
-- If a decision is needed, ASK IT THERE, in that paragraph, as a real question.
-  A question that only appears further down is a question they will never hear.
-- No 'see below', no 'as the table shows'. They cannot see below while listening.
-- Aim for 4-8 sentences. Beyond about 700 characters the spoken part is cut, and
-  what falls off the end is exactly what you put last.
+The operator listens. He has said outright that he does not want to read, and that
+the voice note is the primary way you talk to him. So the note is not a summary, a
+preview or a lead — it is the whole thing, and he should never have to open the text
+to understand what happened or what you are asking.
 
-Then, AFTER a blank line, write everything else: the detail, the tables, the exact
-commands, the file paths, the numbers worth keeping. That half is the record — they
-read it when they need to act on something or check a value. Never make the text a
-shorter version of the voice; it should carry strictly more.
+What is spoken is your FIRST PARAGRAPH, so write that paragraph as the complete
+answer:
+
+- The outcome, what it means, what you verified, what surprised you.
+- The decision, ASKED as a real question, with the options and your recommendation.
+  A question further down is a question he will never hear.
+- Everything he needs to reply intelligently without reading a word.
+- Plain spoken sentences: no bullets, no tables, no code, no file paths, no URLs.
+  Say "the release doc" rather than reciting a path — the path belongs in the text.
+- NEVER say "the rest is in the text", "see below", "details follow" or any other
+  deferral. If it matters, say it out loud. Length is not a constraint: a note can
+  run a minute or more when the answer needs it. Brevity is a virtue only when the
+  answer is genuinely short.
+
+Then, AFTER a blank line, write the record. It repeats the substance — it does not
+continue from where the voice stopped — and adds what audio cannot carry: exact
+commands, paths, numbers, tables, code blocks, links. Someone reading only the text
+should get everything the listener got, plus the things they need to copy. Structure
+it so it can be skimmed: short headings, blank lines between blocks, one idea per
+line, fenced code for anything to be run, a table only where a table is genuinely
+clearest. Several messages are fine if one would be a wall.
+
+You do not have to announce the voice note. ABS sends a "🔊 Recording a voice
+note…" line itself when synthesis will take a moment, so saying it too would double
+up.
 " ;;
     voice) reply_mode_section="
 Reply mode is 'voice' (abs config reply). ABS speaks every \`reply\` you send and
@@ -1844,17 +1861,16 @@ _voice_worth_saying() {
 
 # How much of a long message voice-first reads out before the text follows.
 #
-# 700 characters is roughly 15 seconds of speech and about 14 of synthesis. It was
-# 400, which was chosen as "an opening" and was the wrong idea: the operator listens
-# and does not read, so a truncated opening delivered half a message and left the
-# decision he needed to make in the part he never heard.
+# 4000 characters is around 90 seconds of speech, and it is a safety rail rather than
+# a style: past it the note runs to minutes AND the text waits behind it, since
+# synthesis costs roughly a second per twenty characters.
 #
-# The budget only bounds what is spoken. What makes the spoken part *complete* is
-# the reply being WRITTEN with a self-contained summary first — that contract lives
-# in the injected prompt (see build_prompt), because summarising is the model's job
-# and no amount of cutting can do it here. This is the honest division: the prompt
-# decides what the first paragraph says, the hook guarantees it is what gets spoken.
-readonly VOICE_LEAD_MAX="${ABS_VOICE_LEAD_CHARS:-700}"
+# It was 400, then 700, then 1800, and every one of those was me deciding for the
+# operator how much he wants to hear. He does not want that decided — "the voicenote
+# can be big if it is required" — and, more pointedly: "you shouldn't say 'rest' in
+# the text. I don't want to read the text." The note is the ANSWER, not a trailer for
+# it. What keeps a note short is the answer being short, which is the prompt's job.
+readonly VOICE_LEAD_MAX="${ABS_VOICE_LEAD_CHARS:-4000}"
 
 # Is this message too long to speak WHOLE, but otherwise fine to speak?
 #
@@ -1906,7 +1922,11 @@ _voice_lead() {
     *[.!?]*) cut="$(printf '%s' "$cut" | sed -E 's/([.!?])[^.!?]*$/\1/')" ;;
     *\ *)    cut="${cut% *}" ;;
   esac
-  printf '%s The rest is in the text.' "$cut"
+  # Reaching here means the rail bit, which the prompt is written to avoid. Saying
+  # nothing would end the note mid-thought; the old wording ("the rest is in the
+  # text") turned every long answer into a teaser, which is exactly what the operator
+  # objected to. So: factual, and rare.
+  printf '%s That is as much as one note can carry; the written message continues from there.' "$cut"
 }
 
 # Is this message safe to deliver as voice INSTEAD of text? Only asked in `voice`
@@ -1930,11 +1950,17 @@ _voice_speakable() {
 # not FIFO. If a queued note waits out the timeout it counts as a failure, which
 # in `voice` mode means the words go out as text rather than being dropped.
 _voice_mirror() {
-  local original="$1" prepped hash last_hash last_ts now rc=0
+  local original="$1" ceiling="${2:-$VOICE_MIRROR_MAX}" prepped hash last_hash last_ts now rc=0
   prepped="$(_voice_prep "$original")"
   _voice_worth_saying "$prepped" || return 0
-  [ "${#prepped}" -le "$VOICE_MIRROR_MAX" ] \
-    || prepped="$(printf '%s' "${prepped:0:$VOICE_MIRROR_MAX}" | sed -E 's/[^ ]*$//')… the rest is in the text."
+  # The ceiling is a PARAMETER because two callers want different ones, and the
+  # default silently overrode the other for a while: voice-first had already trimmed
+  # its text to VOICE_LEAD_MAX, and this then cut it again at 1200 and appended "the
+  # rest is in the text" — the precise phrase the operator asked never to hear, coming
+  # from a function away from the one that was fixed. In `voice`-only mode 1200 stays
+  # right: there the note REPLACES the text, so an unbounded note is unbounded silence.
+  [ "${#prepped}" -le "$ceiling" ] \
+    || prepped="$(printf '%s' "${prepped:0:$ceiling}" | sed -E 's/[^ ]*$//')… that is as much as one note can carry."
 
   hash="$(printf '%s' "$prepped" | cksum | cut -d' ' -f1)"
   now="$(date +%s)"
@@ -2013,6 +2039,29 @@ _voice_spawn() {
   ( printf '%s' "$text" | eval "$cmdline" >/dev/null 2>&1 & ) 2>/dev/null || true
 }
 
+
+# Below this, synthesis is quick enough that announcing it is noise.
+readonly VOICE_ANNOUNCE_MIN="${ABS_VOICE_ANNOUNCE_CHARS:-400}"
+
+# "🔊 Recording a voice note…" before the note itself.
+#
+# Voice-first holds the text until the audio has gone, so a long note means a long
+# silence — and a silence is indistinguishable from a crash, which is the one thing
+# this tool must never look like. One line up front turns the wait into progress,
+# and quoting the opening words proves what is coming is the answer and not a retry.
+#
+# Best-effort and never fatal: if this cannot be sent, the note and the text still go.
+_voice_announce() {
+  local lead="$1" chat="$2" preview secs
+  [ "${#lead}" -ge "$VOICE_ANNOUNCE_MIN" ] || return 0
+  { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
+  preview="$(printf '%s' "$lead" | cut -c1-70 | sed -E 's/[[:space:]]+$//')"
+  # ~1s of synthesis per 20 characters on this class of machine, plus startup. Rounded
+  # to something a person can hold in their head rather than pretending to precision.
+  secs=$(( 4 + ${#lead} / 20 ))
+  tg_send "$chat" "🔊 Recording a voice note (~${secs}s) — \"${preview}…\"" >/dev/null 2>&1 || true
+}
+
 # `abs __voice-mirror` — read the reply text on stdin and speak it. Hidden; only
 # _voice_spawn calls it.
 cmd_voice_mirror() {
@@ -2043,14 +2092,26 @@ cmd_voice_then_text() {
   [ -n "$text" ] || return 0
   [ -n "$lead" ] || lead="$text"
   case "$chat" in ''|null) chat="$(state_get '.chat_id')" ;; esac
+  # The token is loaded HERE rather than just before the text send, because the
+  # announcement below also talks to Telegram — and it goes out first. Getting this
+  # order wrong makes the announcement silently no-op, which is the one part of this
+  # function whose whole job is to not be silent.
+  load_token 2>/dev/null || true
 
-  # Speak it. _voice_mirror is silent about failure by design and, in mode
-  # `both`, deliberately does not fall back to text — that is this function's job
-  # below, and doing it in both places would send the message twice.
-  _voice_mirror "$lead" || true
+  # Tell them a note is coming before the silence starts, then speak it.
+  # _voice_mirror is silent about failure by design and, in mode `both`, deliberately
+  # does not fall back to text — that is this function's job below, and doing it in
+  # both places would send the message twice.
+  _voice_announce "$lead" "$chat"
+  # VOICE_LEAD_MAX, not the mirror's own default: the lead is already bounded, and
+  # letting the mirror re-trim it at 1200 is what made a long answer stop early.
+  # A little headroom over VOICE_LEAD_MAX: _voice_lead may have appended its own
+  # closing line, which pushes it just past the budget, and trimming at exactly the
+  # budget made the note end with BOTH markers stacked on each other.
+  _voice_mirror "$lead" "$((VOICE_LEAD_MAX + 200))" || true
 
   { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
-  load_token 2>/dev/null || return 0
+  [ -n "${BOT_TOKEN:-}" ] || load_token 2>/dev/null || return 0
   # One retry: a single dropped packet must not cost the operator the message.
   tg_send "$chat" "$text" >/dev/null 2>&1 && return 0
   sleep 2

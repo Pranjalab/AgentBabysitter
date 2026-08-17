@@ -73,7 +73,15 @@ def box(tmp_path):
     curl = bindir / "curl"
     curl.write_text(
         "#!/bin/sh\n"
-        "cat >/dev/null 2>&1\n"
+        # The url arrives on stdin via `-K -`, and it carries the token. Rejecting a
+        # tokenless url is what the real API does (that path is /bot/sendMessage, a
+        # 404) — and without it this stub answers ok:true for a request that could
+        # never have worked, which hid a real ordering bug: `_voice_announce` sends
+        # before `load_token` had run, so the announcement silently did nothing.
+        'cfg="$(cat)"\n'
+        'case "$cfg" in\n'
+        '  *"/bot/"*) printf \'{"ok":false,"description":"Not Found"}\'; exit 0 ;;\n'
+        "esac\n"
         'body=""\n'
         "while [ $# -gt 0 ]; do\n"
         '  case "$1" in --data-binary) body="$2"; shift 2 ;; *) shift ;; esac\n'
@@ -108,6 +116,23 @@ def box(tmp_path):
 
         def tags(self, wait=8.0):
             return [l.split(" ", 1)[0] for l in self.order(wait)]
+
+        def spoken(self, wait=8.0):
+            """What TTS was asked to say. Read by tag, never by position: a long
+            answer is now preceded by a "🔊 Recording a voice note…" text line, and
+            index-based assertions silently started reading that instead."""
+            out = [l.split(" ", 1)[1] for l in self.order(wait)
+                   if l.startswith("VOICE ")]
+            return out[0] if out else ""
+
+        def texts(self, wait=8.0):
+            return [json.loads(l.split(" ", 1)[1]) for l in self.order(wait)
+                    if l.startswith("TEXT ")]
+
+        def delivered(self, wait=8.0):
+            """The real message, i.e. the last text — not the announcement."""
+            t = self.texts(wait)
+            return t[-1] if t else None
 
         def set(self, **kw):
             data = json.loads(self.rc.read_text())
@@ -159,9 +184,8 @@ def test_the_blocked_reply_tells_the_model_not_to_resend(box):
 
 def test_the_words_spoken_and_the_words_sent_are_the_same_message(box):
     _hook(box, _reply())
-    lines = box.order()
-    spoken = lines[0].split(" ", 1)[1]
-    sent = json.loads(lines[1].split(" ", 1)[1])
+    spoken = box.spoken()
+    sent = box.delivered()
     assert "suite is green" in spoken
     assert sent["text"] == SAYABLE
     assert str(sent["chat_id"]) == "42"
@@ -386,24 +410,25 @@ def test_a_long_report_is_led_by_voice_rather_than_falling_back(box):
     assert len(LONG) > 1200
     run = _hook(box, _reply(text=LONG))
     assert run.returncode == 2, run.stderr
-    assert box.tags() == ["VOICE", "TEXT"]
+    tags = box.tags()
+    assert "VOICE" in tags, tags
+    assert tags.index("VOICE") < len(tags) - 1, tags   # the note precedes the message
+    assert box.delivered()["text"] == LONG
 
 
 def test_the_spoken_lead_is_short_and_the_text_is_whole(box):
     _hook(box, _reply(text=LONG))
-    lines = box.order()
-    spoken = lines[0].split(" ", 1)[1]
-    sent = json.loads(lines[1].split(" ", 1)[1])
-    assert len(spoken) < 900, spoken            # a summary, not the whole wall
-    assert spoken.endswith("The rest is in the text.")
+    spoken = box.spoken()
+    sent = box.delivered()
+    assert len(spoken) < 4200, spoken           # bounded, but generously
+    assert "rest is in the text" not in spoken   # never defer to the text
     assert sent["text"] == LONG                 # nothing is lost from the record
 
 
 def test_the_lead_stops_at_a_sentence_end(box):
     _hook(box, _reply(text=LONG))
-    spoken = box.order()[0].split(" ", 1)[1]
-    body = spoken[: -len(" The rest is in the text.")]
-    assert body.endswith("."), body
+    spoken = box.spoken()
+    assert spoken.rstrip().endswith("."), spoken
 
 
 def test_a_long_message_with_a_link_still_goes_text_first(box):
@@ -444,7 +469,7 @@ TWO_HALVES = SUMMARY + "\n\n" + DETAIL
 
 def test_the_spoken_half_is_the_first_paragraph(box):
     _hook(box, _reply(text=TWO_HALVES))
-    spoken = box.order()[0].split(" ", 1)[1]
+    spoken = box.spoken()
     assert "PyPI" in spoken, spoken          # the questions are IN the audio
     assert "853 tests" not in spoken         # the detail half is not
     assert "| channel |" not in spoken       # and neither is the table
@@ -452,16 +477,19 @@ def test_the_spoken_half_is_the_first_paragraph(box):
 
 def test_the_text_still_carries_both_halves(box):
     _hook(box, _reply(text=TWO_HALVES))
-    sent = json.loads(box.order()[1].split(" ", 1)[1])
-    assert sent["text"] == TWO_HALVES
+    assert box.delivered()["text"] == TWO_HALVES
 
 
 def test_a_summary_longer_than_the_budget_is_cut_at_a_sentence(box):
-    long_summary = ("This sentence is here to fill the spoken budget. " * 20)
+    """The rail exists so a runaway paragraph cannot hold the text behind minutes of
+    synthesis. It is deliberately generous — 4000 characters, about 90 seconds — and
+    what it appends states a fact rather than sending him off to read."""
+    long_summary = ("This sentence is here to fill the spoken budget. " * 100)
     _hook(box, _reply(text=long_summary + "\n\ndetail here"))
-    spoken = box.order()[0].split(" ", 1)[1]
-    assert len(spoken) < 900, len(spoken)
-    assert spoken.endswith("The rest is in the text.")
+    spoken = box.spoken()
+    assert 3800 < len(spoken) < 4200, len(spoken)
+    assert spoken.count("one note can carry") == 1, spoken  # markers not stacked
+    assert "rest is in the text" not in spoken   # never defer to the text
 
 
 def test_a_one_line_preamble_does_not_become_the_whole_report(box):
@@ -469,11 +497,54 @@ def test_a_one_line_preamble_does_not_become_the_whole_report(box):
     would be the same half-a-message failure in a new shape, so a very short first
     paragraph falls back to cutting the whole message instead."""
     _hook(box, _reply(text="Done.\n\n" + SUMMARY))
-    spoken = box.order()[0].split(" ", 1)[1]
+    spoken = box.spoken()
     assert "half a message" in spoken, spoken
 
 
 def test_a_single_paragraph_message_is_unaffected(box):
     _hook(box, _reply(text=SAYABLE))
-    spoken = box.order()[0].split(" ", 1)[1]
-    assert spoken.strip() == SAYABLE
+    assert box.spoken().strip() == SAYABLE
+
+def test_the_note_never_defers_to_the_text(box):
+    """"You shouldn't say 'rest' in the text. I don't want to read the text."
+
+    The note is the answer, so a phrase that sends him to the written half defeats
+    the point of speaking at all. Only a genuinely over-long paragraph gets a closing
+    marker, and even that states a fact rather than asking him to go and read.
+    """
+    _hook(box, _reply(text=SUMMARY + "\n\n" + DETAIL))
+    spoken = box.spoken()
+    for phrase in ("rest is in the text", "see below", "details follow", "in the text below"):
+        assert phrase not in spoken.lower(), spoken
+
+
+def test_a_long_answer_is_spoken_in_full_rather_than_trimmed(box):
+    """A minute of audio is fine when the answer needs it — the cap is a safety rail
+    against runaway synthesis, not a length policy. At 700 characters this test
+    failed, which is what the operator was reacting to."""
+    answer = ("The release is ready and here is why. " * 40)   # ~1500 chars
+    _hook(box, _reply(text=answer + "\n\ndetail half"))
+    spoken = box.spoken()
+    assert len(spoken) > 1400, len(spoken)
+    assert "one note can carry" not in spoken
+
+
+def test_a_long_note_is_announced_before_the_silence(box):
+    """Voice-first holds the text until the audio has gone, so a long note means a
+    long silence — indistinguishable from a crash. One line up front turns the wait
+    into progress, and quotes the opening words to prove it is the answer coming."""
+    answer = ("The release is ready and here is why. " * 40)
+    _hook(box, _reply(text=answer))
+    lines = box.order()
+    tags = [l.split(" ", 1)[0] for l in lines]
+    assert tags[0] == "TEXT", tags        # the announcement goes first
+    first = box.texts()[0]["text"]
+    assert "Recording a voice note" in first
+    assert "The release is ready" in first     # a preview of what is coming
+    assert tags[1:] == ["VOICE", "TEXT"], tags
+
+
+def test_a_short_reply_is_not_announced(box):
+    """Announcing a five-second note is noise."""
+    _hook(box, _reply(text=SAYABLE))
+    assert box.tags() == ["VOICE", "TEXT"]

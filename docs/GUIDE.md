@@ -181,11 +181,23 @@ the rule every branch in it follows — if synthesis fails, if the engine is bus
 if the sentence was already spoken five minutes ago, the text still goes out. A
 voice note is a nicety; the message is not.
 
-**Long messages get an opening, not a fallback.** Above ~1200 characters a note is
-too long to listen to, but a finished-task report is long precisely because it is
-what you wanted to hear — so voice-first speaks the first ~400 characters, cut at a
-sentence end and closing with "the rest is in the text", and the full message
-follows as text. `ABS_VOICE_LEAD_CHARS` changes the budget.
+**The note is the answer, not a preview.** What gets spoken is the reply's first
+paragraph, and the injected prompt asks for that paragraph to carry the whole thing —
+the outcome, what it means, and the decision as a real question — so you never have
+to open the text to know what happened. The text repeats the substance and adds what
+audio cannot carry: commands, paths, tables, links.
+
+Length is not capped by taste. The rail is 4000 characters (~90 seconds), which
+exists only because synthesis costs about a second per twenty characters and the text
+waits behind the note; `ABS_VOICE_LEAD_CHARS` moves it. Nothing in the spoken half
+defers to the written half — no "the rest is in the text", no "see below" — because a
+note that sends you off to read is a note that failed.
+
+**A long note announces itself.** Past ~400 characters, ABS sends a one-line
+"🔊 Recording a voice note (~Ns)…" first, quoting the opening words. Voice-first holds
+the text until the audio has gone, so without that line a 40-second note is 40 seconds
+of silence, which is indistinguishable from a crash. `ABS_VOICE_ANNOUNCE_CHARS` moves
+the threshold.
 
 The gate declines, leaving the old order intact, for anything it should not own: an
 attachment (the plugin does the upload), MarkdownV2 (the plugin does the escaping),

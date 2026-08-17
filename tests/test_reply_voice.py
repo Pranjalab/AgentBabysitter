@@ -334,12 +334,23 @@ def test_the_same_sentence_is_not_spoken_twice(abs_home, spoken):
     assert spoken.settled() == ["the tests pass"]
 
 
-def test_a_reply_far_too_long_to_speak_is_cut_and_points_at_the_text(abs_home, spoken):
+def test_a_reply_far_too_long_to_speak_is_cut_without_deferring_to_the_text(
+    abs_home, spoken
+):
+    """Still bounded, but it no longer ends by sending him off to read.
+
+    "You shouldn't say 'rest' in the text. I don't want to read the text." The note
+    is the answer, so a closing line that points at the written half turned every
+    long reply into a trailer. What it says now is a fact about the note's length.
+    The PostToolUse mirror this drives keeps the tighter 1200 ceiling; voice-first
+    passes its own, larger one.
+    """
     abs_run(abs_home, "config", "reply", "both")
     abs_run(abs_home, "__silent-hook", spoken=spoken, stdin=hook_payload("sentence. " * 400))
     said = spoken.lines()[0]
     assert len(said) < 1400
-    assert said.endswith("the rest is in the text.")
+    assert "rest is in the text" not in said
+    assert said.endswith("that is as much as one note can carry.")
 
 
 # --- not breaking what was already there -------------------------------------

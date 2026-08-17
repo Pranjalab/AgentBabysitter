@@ -167,6 +167,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   It also does the auto-silent bookkeeping the blocked `PostToolUse` would have
   done, so a session replying perfectly well no longer drifts toward muting
   itself for being too quiet.
+  **The note is the answer, not a preview.** What is spoken is the reply's first
+  paragraph, and the prompt asks that paragraph to carry the whole thing — outcome,
+  meaning, and the decision as a real question — so the listener never has to open the
+  text. Nothing in it defers: "the rest is in the text" and "see below" are out, in
+  both the places that used to say it. The second one was `_voice_mirror`'s own
+  ceiling, which re-trimmed an already-trimmed note at 1200 characters; that ceiling
+  is a parameter now, so `voice`-only mode keeps its tighter bound (there the note
+  replaces the text) while voice-first passes its own.
+  **Length is a mechanical rail, not a style.** 4000 characters, about 90 seconds,
+  because synthesis costs roughly a second per twenty characters and the text waits
+  behind the audio. It was 400, then 700 — both of them a guess about how much the
+  operator wants to hear, which is not a thing to guess.
+  **A long note announces itself.** Past ~400 characters a one-line "🔊 Recording a
+  voice note (~Ns)…" goes first, quoting the opening words: otherwise a 40-second note
+  is 40 seconds of silence, and silence is indistinguishable from a crash.
   **A long message is led, not skipped.** The first real report after this shipped
   was 1854 characters against a 1200-character ceiling, so the gate declined and the
   operator got text first with a truncated note behind it — the exact order the
