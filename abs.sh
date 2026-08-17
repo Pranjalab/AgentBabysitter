@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.2.1"
+readonly ABS_VERSION="3.2.2"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -4237,12 +4237,27 @@ voice_status() {
   _voice_row "transcribe.py   speech → text"  "$r/transcribe.py"        file "abs voice setup"
   _voice_row "speak.py        text → speech"  "$r/speak.py"             file "abs voice setup"
   _voice_row "STT engine      .venv"          "$r/.venv/bin/python"     x    "abs voice setup"
-  _voice_row "TTS engine      .venv-tts"      "$r/.venv-tts/bin/python" x    "abs voice setup"
+  _voice_row "TTS chatterbox  .venv-tts"      "$r/.venv-tts/bin/python" x    "abs voice setup"
+  # Listed on its own line since 3.2.2. It was invisible before, and its absence
+  # is the difference between a note that takes seconds and one that takes
+  # minutes: chatterbox wants a GPU, kokoro is an 82M model that runs on CPU. On
+  # the operator's MacBook Air only chatterbox was installed, and every note was
+  # a multi-minute CPU inference — which is what turned a burst of replies into
+  # three wedged processes. You cannot fix what the status page does not show.
+  _voice_row "TTS kokoro      .venv-kokoro"   "$r/.venv-kokoro/bin/python" x "abs voice setup --force  (CPU-fast; recommended without a GPU)"
   _voice_row "ffmpeg          packages Opus"  ffmpeg                    cmd  "sudo apt install ffmpeg  (or brew install ffmpeg)"
   _voice_row "uv              env manager"    uv                        cmd  "abs voice setup installs it for you"
   info ""
   if voice_have; then
     ok "Voice is ready.  Try: ${c_bold}abs say \"hello from your laptop\"${c_reset}"
+    # Say which engine will actually run, because "ready" hides a 10x difference
+    # in how long a note takes and the operator had no way to see which he had.
+    if [ -x "$r/.venv-kokoro/bin/python" ]; then
+      info "  ${c_dim}Engine: kokoro (CPU, fast).${c_reset}"
+    else
+      info "  ${c_dim}Engine: chatterbox only — it wants a GPU, and on CPU a long"
+      info "  report can take minutes. Add the fast CPU engine with:${c_reset} ${c_bold}abs voice setup --force${c_reset}"
+    fi
   else
     info "Not set up yet.  Build it with: ${c_bold}abs voice setup${c_reset}"
   fi
@@ -5337,18 +5352,36 @@ cmd_run() {
 # Nothing here is silent or automatic: it downloads tens of megabytes and builds
 # a virtualenv, which is not something to do behind someone's back on a launch.
 
-# The newest python that will do. absd is asyncio-heavy and uses 3.11 syntax, so
-# 3.11 is a floor rather than a preference — an older interpreter fails at import
-# time with a SyntaxError, which is a terrible way to find out.
-_src_python() {
-  local c v
-  for c in python3.14 python3.13 python3.12 python3.11 python3 python; do
+# Every interpreter on this machine that could host absd, best candidate first.
+#
+# 3.11 is a floor, not a preference: absd is asyncio-heavy and uses 3.11 syntax,
+# so an older interpreter fails at import with a SyntaxError — a terrible way to
+# find out.
+#
+# The order is NOT newest-first, which is what it was and what broke on the
+# operator's Mac. It had Python 3.14, that was the only one tried, `venv` failed,
+# and the whole install gave up while three perfectly good interpreters sat
+# beside it. A brand-new Python is the WORST first choice here: the release it
+# needs wheels from (aiohttp) may not have published any yet, so it fails at pip
+# rather than at venv and looks like a different bug. So: the well-supported
+# middle first, then the floor, then whatever else qualifies.
+#
+# Prints one candidate per line. The caller tries them in order and keeps the
+# first that survives all the way to a working import.
+_src_pythons() {
+  local c v seen=""
+  for c in python3.13 python3.12 python3.11 python3 python python3.14 python3.15; do
     command -v "$c" >/dev/null 2>&1 || continue
+    # Resolve to the real path so `python3` being a symlink to python3.13 does
+    # not get tried twice, and so the same binary under two names is one entry.
+    local real; real="$(command -v "$c")"
+    case " $seen " in *" $real "*) continue ;; esac
     v="$("$c" -c 'import sys; print(sys.version_info[0]*100+sys.version_info[1])' 2>/dev/null || echo 0)"
     case "$v" in ''|*[!0-9]*) continue ;; esac
-    [ "$v" -ge 311 ] && { printf '%s' "$c"; return 0; }
+    [ "$v" -ge 311 ] || continue
+    seen="$seen $real"
+    printf '%s\n' "$c"
   done
-  return 1
 }
 
 # Where a given ref's tarball lives. The tag first, because a release should
@@ -5416,12 +5449,13 @@ cmd_src() {
 
   command -v curl >/dev/null 2>&1 || die "abs src install needs curl."
   command -v tar  >/dev/null 2>&1 || die "abs src install needs tar."
-  local py3
-  py3="$(_src_python)" || die "abs src install needs Python 3.11 or newer on PATH.
+  local candidates
+  candidates="$(_src_pythons)"
+  [ -n "$candidates" ] || die "abs src install needs Python 3.11 or newer on PATH.
   The daemon is asyncio and uses 3.11 syntax; an older one fails at import."
 
   info "${c_bold}Installing the v3 source${c_reset} — the daemon, sandboxes and the start menu."
-  info "${c_dim}Target: $root   Python: $py3 ($("$py3" -V 2>&1))${c_reset}"
+  info "${c_dim}Target: $root${c_reset}"
 
   # Staged beside the destination and swapped at the end, so an interrupted
   # download or a failed venv build leaves the working copy alone rather than
@@ -5444,26 +5478,67 @@ cmd_src() {
   rm -f "$tarball"
   [ -d "$stage/absd" ] || { rm -rf "$stage"; die "No absd/ in the downloaded source. Wrong ref?"; }
 
-  info "${c_dim}Building the venv…${c_reset}"
-  "$py3" -m venv "$stage/.venv" >/dev/null 2>&1 \
-    || { rm -rf "$stage"; die "Could not create a virtualenv with $py3. (On Debian/Ubuntu: sudo apt install python3-venv)"; }
-  # aiohttp is absd's only third-party import. Kept explicit rather than
-  # installing the project, because the project's own metadata targets the
-  # published wheel and does not list the daemon's deps.
-  "$stage/.venv/bin/python" -m pip install --quiet --disable-pip-version-check aiohttp >/dev/null 2>&1 \
-    || { rm -rf "$stage"; die "Could not install aiohttp into the venv."; }
+  # Try each interpreter all the way through to a working import, and keep the
+  # first that survives. One candidate is not enough: on the operator's Mac the
+  # newest Python was the only one tried, `venv` failed on it, and the install
+  # gave up with three usable interpreters sitting right beside it.
+  #
+  # Every step's real error is kept and shown if nothing works. The first version
+  # of this swallowed all of them and printed a Debian package hint — on a Mac.
+  # An error message that names the wrong operating system is worse than none,
+  # because it sends you looking in a place that cannot be the answer.
+  local py3 log="$stage/build.log" built=""
+  for py3 in $candidates; do
+    info "${c_dim}Building the venv with $py3 ($("$py3" -V 2>&1))…${c_reset}"
+    : > "$log"
+    if ! "$py3" -m venv "$stage/.venv" >>"$log" 2>&1; then
+      warn "$py3 could not create a virtualenv — trying the next interpreter."
+      rm -rf "$stage/.venv" 2>/dev/null || true
+      continue
+    fi
+    # aiohttp is absd's only third-party import. Kept explicit rather than
+    # installing the project, because the project's own metadata targets the
+    # published wheel and does not list the daemon's deps.
+    #
+    # This is where a very new Python usually fails: no wheel published yet, so
+    # pip tries to build from source and there is no compiler. Falling through to
+    # an older interpreter is exactly the right response.
+    if ! "$stage/.venv/bin/python" -m pip install --disable-pip-version-check aiohttp >>"$log" 2>&1; then
+      warn "$py3 could not install aiohttp — trying the next interpreter."
+      rm -rf "$stage/.venv" 2>/dev/null || true
+      continue
+    fi
+    # Import it before claiming success. A venv that exists but cannot import
+    # absd is exactly the failure this command exists to stop happening later, at
+    # launch, in a pane nobody is watching.
+    if ! env PYTHONPATH="$stage" "$stage/.venv/bin/python" -c 'import absd, aiohttp' >>"$log" 2>&1; then
+      warn "$py3 built a venv that cannot import absd — trying the next interpreter."
+      rm -rf "$stage/.venv" 2>/dev/null || true
+      continue
+    fi
+    built="$py3"
+    break
+  done
 
-  # Import it before claiming success. A venv that exists but cannot import absd
-  # is exactly the failure this whole command is meant to stop happening later,
-  # at launch, in a pane nobody is watching.
-  env PYTHONPATH="$stage" "$stage/.venv/bin/python" -c 'import absd' >/dev/null 2>&1 \
-    || { rm -rf "$stage"; die "The downloaded source does not import. Nothing was changed."; }
+  if [ -z "$built" ]; then
+    warn "None of the Python interpreters here could build the v3 environment."
+    info "  Tried: $(printf '%s' "$candidates" | tr '\n' ' ')"
+    info "  The last attempt said:"
+    tail -n 15 "$log" 2>/dev/null | sed 's/^/    /' >&2 || true
+    case "$(uname -s)" in
+      Darwin) info "  On macOS the usual fix is a stable Python: ${c_bold}brew install python@3.12${c_reset}" ;;
+      *)      info "  On Debian/Ubuntu the usual fix is: ${c_bold}sudo apt install python3-venv${c_reset}" ;;
+    esac
+    rm -rf "$stage"
+    die "Could not build the v3 environment. Nothing was changed."
+  fi
+  rm -f "$log" 2>/dev/null || true
 
   if [ -d "$root" ]; then mv "$root" "$old"; fi
   mv "$stage" "$root"
   rm -rf "$old"
 
-  ok "v3 source installed at $root ($ref)."
+  ok "v3 source installed at $root ($ref, $built)."
   info "  Next:  ${c_bold}abs daemon install${c_reset}   then   ${c_bold}abs daemon start${c_reset}"
   return 0
 }

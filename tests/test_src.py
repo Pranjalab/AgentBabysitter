@@ -25,6 +25,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -228,6 +229,170 @@ def test_a_failed_download_leaves_the_existing_source_alone(lone, abs_home, tmp_
     assert out.returncode != 0
     assert "Could not download" in out.stderr
     assert keep.exists(), "the working source was destroyed by a failed update"
+
+
+# ---- choosing a Python -------------------------------------------------------
+#
+# The operator's Mac had Python 3.14. It was the only interpreter tried, `venv`
+# failed on it, and the whole install gave up with three usable interpreters
+# sitting beside it. These pin both halves of the fix: the order, and the
+# fall-through.
+
+
+REAL_PYTHON = sys.executable   # absolute, so a shadowing stub cannot recurse
+
+
+def _fake_python(path: Path, version: str, *, venv_fails=False, pip_fails=False):
+    """A stub interpreter that answers -V and the version probe, and can be told
+    to fail the way a real one does.
+
+    `venv_fails` is the operator's Mac: `-m venv` returns non-zero.
+
+    `pip_fails` is what a brand-new Python actually does — the venv builds and
+    then there is no wheel to install. It cannot be faked on this stub, because
+    abs runs pip with the VENV's python, not with the interpreter that made it.
+    So the stub builds a venv whose `bin/python` is itself a failing stub, which
+    reaches the same branch by the same route.
+
+    Delegation is by ABSOLUTE path: these stubs go first on PATH precisely to
+    shadow the real interpreters, so `env python3` here would find the stub again
+    and spin.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    major, minor = version.split(".")
+    if venv_fails:
+        venv_branch = "exit 1"
+    elif pip_fails:
+        venv_branch = (
+            'for a in "$@"; do target="$a"; done; '
+            'mkdir -p "$target/bin" && '
+            "printf '#!/bin/sh\\nexit 1\\n' > \"$target/bin/python\" && "
+            'chmod 755 "$target/bin/python"'
+        )
+    else:
+        venv_branch = f'exec {REAL_PYTHON} "$@"'
+    path.write_text(f"""#!/bin/sh
+case "$*" in
+  *"version_info"*) echo "{int(major) * 100 + int(minor)}" ;;
+  -V|--version)     echo "Python {version}" ;;
+  *"-m venv"*)      {venv_branch} ;;
+  *)                exec {REAL_PYTHON} "$@" ;;
+esac
+""")
+    path.chmod(0o755)
+
+
+# Every name `_src_pythons` looks for. Shadowing all of them is how a test says
+# "this machine has nothing but what I put here" without emptying PATH, which
+# would also take away bash, curl and tar.
+PY_NAMES = ["python3.15", "python3.14", "python3.13", "python3.12",
+            "python3.11", "python3", "python"]
+
+
+def _pythons_seen(lone, abs_home, bindir):
+    out = run(lone, abs_home, "src", "path", PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    assert out.returncode == 0
+    body = "".join(l for l in open(ABS_SH) if l.strip() != 'main "$@"')
+    script = abs_home.parent / "pys.sh"
+    script.write_text(f"{body}\n_src_pythons\n")
+    env = dict(os.environ, ABS_HOME=str(abs_home),
+               PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    env.pop("ABS_SRC_ROOT", None)
+    return subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                          env=env).stdout.split()
+
+
+def test_a_brand_new_python_is_not_tried_first(lone, abs_home, tmp_path):
+    """3.14 last, not first. The newest release is the WORST first choice: the
+    wheels it needs may not exist yet, so it fails at pip rather than at venv and
+    looks like an unrelated bug."""
+    bindir = tmp_path / "pybin"
+    _fake_python(bindir / "python3.14", "3.14")
+    _fake_python(bindir / "python3.12", "3.12")
+    seen = _pythons_seen(lone, abs_home, bindir)
+    assert seen, seen
+    assert seen.index("python3.12") < seen.index("python3.14"), seen
+
+
+def test_an_interpreter_too_old_for_absd_is_not_offered(lone, abs_home, tmp_path):
+    """3.11 is a floor, not a preference — absd uses 3.11 syntax and an older one
+    dies at import with a SyntaxError, which is a terrible way to find out."""
+    bindir = tmp_path / "pybin"
+    _fake_python(bindir / "python3.11", "3.11")
+    _fake_python(bindir / "python3", "3.9")
+    seen = _pythons_seen(lone, abs_home, bindir)
+    assert "python3.11" in seen
+    assert "python3" not in seen, seen
+
+
+def _only_these_pythons(tmp_path, broken_first=None, good=None, **kw):
+    """A bin dir that shadows every interpreter name abs looks for.
+
+    `broken_first` is the highest-preference name and is made to fail; `good` is
+    the one that should be reached by falling through. Any name not named is
+    removed from the machine's view entirely.
+    """
+    bindir = tmp_path / "pybin"
+    bindir.mkdir(exist_ok=True)
+    for name in PY_NAMES:
+        p = bindir / name
+        if name == broken_first:
+            _fake_python(p, "3.13", **kw)
+        elif name == good:
+            _fake_python(p, "3.12")
+        else:
+            # Present but disqualified: reports a version absd cannot run on, so
+            # `_src_pythons` skips it rather than it being missing by luck.
+            _fake_python(p, "3.9")
+    return bindir
+
+
+@needs_network
+def test_a_python_whose_venv_fails_falls_through_to_the_next(lone, abs_home, local_tarball, tmp_path):
+    """The Mac failure exactly. It must not end the install."""
+    bindir = _only_these_pythons(tmp_path, broken_first="python3.13",
+                                 good="python3.12", venv_fails=True)
+    out = run(lone, abs_home, "src", "install",
+              ABS_TARBALL_BASE=f"file://{local_tarball}",
+              PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    assert out.returncode == 0, out.stderr
+    assert (abs_home / "src" / ".venv" / "bin" / "python").exists()
+    assert "trying the next interpreter" in out.stderr
+
+
+@needs_network
+def test_a_python_with_no_wheel_for_it_falls_through_too(lone, abs_home, local_tarball, tmp_path):
+    """The failure a brand-new Python actually produces: the venv builds fine and
+    then pip cannot find a wheel for it."""
+    bindir = _only_these_pythons(tmp_path, broken_first="python3.13",
+                                 good="python3.12", pip_fails=True)
+    out = run(lone, abs_home, "src", "install",
+              ABS_TARBALL_BASE=f"file://{local_tarball}",
+              PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    assert out.returncode == 0, out.stderr
+    assert (abs_home / "src" / "absd" / "__init__.py").exists()
+    assert "trying the next interpreter" in out.stderr
+
+
+def test_when_nothing_works_it_shows_the_real_error(lone, abs_home, local_tarball, tmp_path):
+    """The first version swallowed every error and printed a Debian package hint
+    — on a Mac. An error naming the wrong operating system is worse than none,
+    because it sends you looking somewhere that cannot be the answer."""
+    bindir = _only_these_pythons(tmp_path, broken_first="python3.13",
+                                 good=None, venv_fails=True)
+    out = run(lone, abs_home, "src", "install",
+              ABS_TARBALL_BASE=f"file://{local_tarball}",
+              PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    assert out.returncode != 0
+    assert "The last attempt said" in out.stderr
+    assert "Nothing was changed" in out.stderr
+    assert not (abs_home / "src").exists(), "a failed build left a source tree behind"
+    # The hint has to match the machine it is printed on.
+    import platform
+    if platform.system() == "Darwin":
+        assert "brew install" in out.stderr
+    else:
+        assert "apt install" in out.stderr
 
 
 # ---- what the v3 commands say now --------------------------------------------
