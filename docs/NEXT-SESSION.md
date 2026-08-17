@@ -46,6 +46,18 @@ so a `curl … | bash` install gets the daemon, sandboxes and the start menu wit
 git and no question. `abs_src_root()` is the single place that decides where the
 source is.
 
+**3.2.1 — voice notes wedged on macOS.** Found within minutes of the operator
+testing 3.1.0 on the Mac: text arrived, audio never did, three TTS processes sat
+on the box unfinished. The synthesis lock was `flock`, which is Linux-only, so on
+macOS there was no lock at all and every reply loaded its own copy of the model.
+Nothing was time-bounded either — which mattered more, because it made
+`_voice_fallback_text` (the "voice failed, send the words instead" path)
+**unreachable on the only platform that needed it**: a run that never returns
+never sets a failure status.
+
+The Mac session reached the same root cause independently and sent a patch; its
+pid-based lock reaping and its TERM→KILL escalation are in the shipped fix.
+
 ## Traps worth knowing before you touch any of this
 
 **A default that is "whatever the machine can do" makes deleting a key dangerous.**
@@ -92,9 +104,18 @@ tests; neither is obvious from reading the call site.
 
 ## State
 
-- `main` and `v3-daemon` both at 3.2.0. `agentbabysitter.com` serves the matching
-  installer.
-- 979 tests pass on Linux, including the bash 3.2 container tests. Working tree
+- `main` and `v3-daemon` both at 3.2.1. `agentbabysitter.com` serves the matching
+  installer, verified by running it from the live site in a clean container.
+- 990 tests pass on Linux, including the bash 3.2 container tests. Working tree
   clean.
 - The installer needs Python 3.11+ for the v3 source step, and says so without
   failing when it is absent.
+
+## The lesson from tonight, in one line
+
+Three of the four bugs in this file were things that could not happen on the
+machine the tests run on. The bash 3.2 suite closes that for shell parsing; the
+voice wedge was the same shape wearing different clothes — `flock` present here,
+absent there — and nothing catches that class automatically yet. When a code path
+branches on what the OS provides, the branch that this machine never takes is the
+one to write a test for.
