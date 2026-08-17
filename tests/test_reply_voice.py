@@ -244,11 +244,29 @@ def test_in_both_mode_every_reply_is_spoken_without_anyone_asking(abs_home, spok
     assert spoken.lines() == ["the tests pass"]
 
 
-def test_in_both_mode_the_text_still_goes_out(abs_home, spoken):
-    """`both` means both — the PreToolUse gate must not fire and block it."""
+def test_in_both_mode_with_voice_first_off_the_text_goes_straight_out(abs_home, spoken):
+    """`both` means both, and with voice-first off the text goes first, untouched:
+    the PreToolUse gate must not fire, and the PostToolUse mirror speaks after."""
     abs_run(abs_home, "config", "reply", "both")
+    abs_run(abs_home, "config", "voice-first", "off")
     proc = abs_run(abs_home, "__guard-hook", spoken=spoken, stdin=hook_payload("the tests pass"))
     assert proc.returncode == 0
+
+
+@needs_tts
+def test_in_both_mode_voice_first_takes_over_the_delivery(abs_home, spoken):
+    """Voice-first is on by default, so in mode `both` the gate DOES fire now.
+
+    It blocks the tool's own send and hands both halves to one worker, which
+    speaks and then sends the text — the order is pinned in
+    ``test_voice_first.py``. What matters here is that blocking is deliberate and
+    says so, because the old contract for this mode was "never block".
+    """
+    abs_run(abs_home, "config", "reply", "both")
+    proc = abs_run(abs_home, "__guard-hook", spoken=spoken, stdin=hook_payload("the tests pass"))
+    assert proc.returncode == 2
+    assert "voice note first" in proc.stderr
+    assert "do NOT resend" in proc.stderr
 
 
 @needs_tts

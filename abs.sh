@@ -1437,6 +1437,21 @@ reply_mode() {
 reply_text_on()  { [ "$(reply_mode)" != "voice" ]; }
 reply_voice_on() { [ "$(reply_mode)" != "text" ]; }
 
+# In mode `both`, which channel arrives first?
+#
+# The mirror used to be the only option: the reply tool sends the text, then a
+# PostToolUse hook speaks it. That order is backwards for the person holding the
+# phone — by the time the note arrives they have already read the message, so the
+# audio is a duplicate of something they know. Voice first makes the note the way
+# they receive the answer and the text the record of it.
+#
+# Nothing can be reordered after the fact, so this costs the wait: the words only
+# exist once the reply is written, synthesis takes ~5s for a sentence and ~13s for
+# a long report on this machine, and the text is held until the note has gone.
+# `abs config voice-first off` restores the old order for anyone who would rather
+# read immediately.
+voice_first_on() { [ "$(state_get '.no_voice_first')" != "true" ]; }
+
 # --- the two channels as independent on/off switches -------------------------
 #
 # `abs config reply-text on|off` and `abs config reply-voice on|off`. Three of the
@@ -1640,6 +1655,55 @@ cmd_voice_mirror() {
   _voice_mirror "$text"
 }
 
+# Same idea, but this one owns BOTH halves of the delivery and their order: speak
+# first, then send the words as text. Spawned detached by the voice-first gate,
+# which has already blocked the reply tool's own send — so from here on, this
+# process is the only thing that will ever deliver this message.
+#
+# That is the whole risk of voice-first, and it decides the shape of what follows:
+# every failure has to end with the text going out anyway. A voice note is a
+# nicety; the message is not.
+#
+# The payload is JSON on stdin (text + chat), because a reply can contain anything
+# and argv is world-readable through /proc while synthesis runs.
+cmd_voice_then_text() {
+  local payload text chat
+  payload="$(cat)"
+  text="$(printf '%s' "$payload" | jq -r '.text // ""' 2>/dev/null || true)"
+  chat="$(printf '%s' "$payload" | jq -r '.chat // ""' 2>/dev/null || true)"
+  [ -n "$text" ] || return 0
+  case "$chat" in ''|null) chat="$(state_get '.chat_id')" ;; esac
+
+  # Speak it. _voice_mirror is silent about failure by design and, in mode
+  # `both`, deliberately does not fall back to text — that is this function's job
+  # below, and doing it in both places would send the message twice.
+  _voice_mirror "$text" || true
+
+  { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
+  load_token 2>/dev/null || return 0
+  # One retry: a single dropped packet must not cost the operator the message.
+  tg_send "$chat" "$text" >/dev/null 2>&1 && return 0
+  sleep 2
+  tg_send "$chat" "$text" >/dev/null 2>&1 && return 0
+  # Both attempts failed. The words are gone, so at minimum leave a trace that
+  # says so — a silently lost reply is the worst outcome this feature can have.
+  log_event "abs" "→ telegram FAILED" "" "$text" 2>/dev/null || true
+  return 0
+}
+
+# Hand a voice-then-text delivery to a detached process, exactly as _voice_spawn
+# does for the mirror and for the same reason: the hook has a 5s budget and this
+# work takes tens of seconds.
+_voice_then_text_spawn() {
+  local text="$1" chat="$2" cmdline payload
+  [ -n "$text" ] || return 1
+  payload="$(jq -n --arg t "$text" --arg c "$chat" '{text:$t, chat:$c}' 2>/dev/null)" || return 1
+  cmdline="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") __voice-then-text"
+  if command -v setsid >/dev/null 2>&1; then cmdline="setsid $cmdline"; fi
+  ( printf '%s' "$payload" | eval "$cmdline" >/dev/null 2>&1 & ) 2>/dev/null || return 1
+  return 0
+}
+
 # PreToolUse on the Telegram reply tool, wired only in reply mode `voice`. Speaks
 # the message and blocks the text send, so the voice note IS the reply.
 #
@@ -1658,6 +1722,57 @@ _reply_voice_gate() {
   _voice_speakable "$text" || return 0           # code, a link, or too long → text wins
   _voice_spawn "$text"
   printf '%s\n' "🔊 Sent as a voice note instead — reply mode is 'voice' (abs config reply). The operator has it; do NOT resend this as text." >&2
+  exit 2
+}
+
+# PreToolUse on the Telegram reply tool, wired in mode `both` when voice-first is
+# on. Blocks the tool's own send and hands the message to a worker that speaks it
+# and then sends the text, so the note arrives first.
+#
+# Every bail-out below returns 0, which lets the reply go out as text immediately
+# and leaves the PostToolUse mirror to speak it afterwards — i.e. the old
+# behaviour. That is the safe direction: the worst case of declining is that a
+# message arrives in the less useful order, and the worst case of accepting
+# wrongly is a message that never arrives at all.
+_reply_voice_first_gate() {
+  local input="$1" text chat files fmt
+  [ "$(reply_mode)" = "both" ] || return 0
+  voice_first_on || return 0
+  voice_can_speak || return 0
+
+  # An attachment has to travel with its message, and the plugin is what knows how
+  # to upload it. Photos and documents keep the old order on purpose.
+  files="$(printf '%s' "$input" | jq -r '(.tool_input.files // []) | length' 2>/dev/null)"
+  case "$files" in ''|*[!0-9]*) files=0 ;; esac
+  [ "$files" -eq 0 ] || return 0
+
+  # Formatted text is the plugin's business: it does the MarkdownV2 escaping, and
+  # tg_send here sends plain. Reordering would silently drop the formatting.
+  fmt="$(printf '%s' "$input" | jq -r '.tool_input.format // "text"' 2>/dev/null)"
+  case "$fmt" in ''|null|text) : ;; *) return 0 ;; esac
+
+  text="$(printf '%s' "$input" | jq -r '.tool_input.text // ""' 2>/dev/null)"
+  [ -n "$text" ] || return 0
+  # Code, a link, or a wall of text: not worth listening to, so there is nothing
+  # to put first. Same test the voice-only gate uses, so both agree on what is
+  # sayable.
+  _voice_speakable "$text" || return 0
+
+  chat="$(printf '%s' "$input" | jq -r '.tool_input.chat_id // ""' 2>/dev/null)"
+  case "$chat" in ''|null) chat="$(state_get '.chat_id')" ;; esac
+  { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
+
+  # If the worker cannot even be spawned, do not block: let the text go.
+  _voice_then_text_spawn "$text" "$chat" || return 0
+
+  # PostToolUse never runs for a blocked call, so the bookkeeping it would have
+  # done happens here instead — otherwise a session in voice-first mode would
+  # drift toward auto-silence while replying perfectly well.
+  _silent_reset "$(date +%s)"
+  log_event "abs" "→ telegram" \
+    "$(printf '%s' "$input" | jq -r '.session_id // ""' 2>/dev/null || true)" "$text" 2>/dev/null || true
+
+  printf '%s\n' "🔊 Delivered as a voice note first, with this same text right behind it (reply mode 'both', voice-first). The operator is getting both; do NOT resend." >&2
   exit 2
 }
 
@@ -1979,7 +2094,10 @@ cmd_guard_hook() {
   [ "$(state_get '.session_away')" = "true" ] && away=1
   case "$tool" in
     Bash) if [ "$away" = 0 ] && [ "$(state_get '.no_guard')" = "true" ]; then return 0; fi ;;
-    *telegram*reply*) _reply_voice_gate "$input"; return 0 ;;
+    # Two gates, mutually exclusive by mode: `voice` replaces the text with a note,
+    # `both` puts the note in front of it. Each returns without acting when the
+    # mode isn't theirs.
+    *telegram*reply*) _reply_voice_gate "$input"; _reply_voice_first_gate "$input"; return 0 ;;
     *) return 0 ;;
   esac
   if [ "$away" = 0 ]; then
@@ -2252,6 +2370,25 @@ cmd_config() {
       _reply_channel_set text "$val" ;;
     reply-voice)
       _reply_channel_set voice "$val" ;;
+    voice-first)
+      # Which of the two channels arrives first in mode `both`. Only meaningful
+      # there: mode `text` has no note to put first, and mode `voice` sends no
+      # text to put second.
+      case "$val" in
+        on|true)
+          state_set 'del(.no_voice_first)'
+          ok "Voice first — the note goes out, then the same words as text. Takes effect in a NEW session."
+          [ "$(reply_mode)" = both ] \
+            || info "Reply mode is '$(reply_mode)'; this only changes anything in mode 'both'."
+          voice_can_speak \
+            || warn "This machine can't speak yet (abs voice setup), so replies stay text-only for now." ;;
+        off|false)
+          state_set '.no_voice_first = true'
+          ok "Text first — the reply arrives immediately and the voice note follows it. Takes effect in a NEW session." ;;
+        "")
+          info "Voice first: $(voice_first_on && echo on || echo off)" ;;
+        *) die "Usage: abs config voice-first on|off" ;;
+      esac ;;
     kokoro-voice)
       # Which built-in kokoro voice to speak with. Ignored by chatterbox, which
       # takes its voice from the sample instead.
@@ -2295,13 +2432,14 @@ cmd_config() {
       info "  start menu     $([ "$(state_get '.no_start_menu')" = "true" ] && echo off || echo on)"
       info "  reply text     $(reply_text_on && echo on || echo off)"
       info "  reply voice    $(reply_voice_on && echo on || echo off)"
+      info "  voice first    $(voice_first_on && echo on || echo off)$([ "$(reply_mode)" = both ] || echo " (mode '$(reply_mode)' — no effect)")"
       info "  auto-silent    $([ "$(state_get '.no_auto_silent')" = "true" ] && echo off || echo on)"
       info "  voice engine   $(state_get '.tts_engine' | sed 's/^null$/auto/')"
       info "  kokoro voice   $(state_get '.kokoro_voice' | sed 's/^null$/af_heart (default)/')"
       info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
       info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice  |  voice-first on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 
@@ -3950,7 +4088,12 @@ cmd_run() {
     [ "$(state_get '.no_guard')" = "true" ] && [ "${ABS_AWAY:-0}" = "1" ] \
       && warn "Command guard is off, but Away mode needs it — enabled for this session."
   fi
-  if [ "$(reply_mode)" = "voice" ]; then
+  # The reply gate. In mode `voice` it turns the message into a note instead of
+  # text; in mode `both` with voice-first on it puts the note ahead of the text.
+  # Mode `text` never needs it, and neither does a machine that cannot speak — in
+  # both cases the hook would decline on every call and cost a process per reply.
+  if [ "$(reply_mode)" = "voice" ] \
+     || { [ "$(reply_mode)" = "both" ] && voice_first_on && voice_can_speak; }; then
     pretool="$(jq -n --argjson p "$pretool" --arg g "$guard_cmd" \
       '$p + [{matcher:"mcp__plugin_telegram_telegram__reply", hooks:[{type:"command", command:$g, timeout:5}]}]')"
   fi
@@ -4356,6 +4499,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
   ${c_bold}abs${c_reset} config reply-text on|off   Send replies as text (default on)
   ${c_bold}abs${c_reset} config reply-voice on|off  Send replies as a voice note (default off)
+  ${c_bold}abs${c_reset} config voice-first on|off  In mode 'both': note first, then text (default on)
   ${c_bold}abs${c_reset} config auto-silent on|off  Pause reports while you drive the terminal (default on)
   ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot + usage (default on)
   ${c_bold}abs${c_reset} config label <name>  Name before the colon in the bar ('auto' = your Claude name)
@@ -4479,6 +4623,14 @@ main() {
   if [ "$cmd" = "__voice-mirror" ]; then
     use_profile "${want_profile:-default}"
     cmd_voice_mirror || true
+    return 0
+  fi
+  # Voice-first delivery: speak, then send the text. Same rules as the mirror —
+  # detached, never run by a person — with the added property that it is the only
+  # thing that will deliver this message, so `|| true` here is load-bearing.
+  if [ "$cmd" = "__voice-then-text" ]; then
+    use_profile "${want_profile:-default}"
+    cmd_voice_then_text || true
     return 0
   fi
 

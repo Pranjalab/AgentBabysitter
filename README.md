@@ -137,9 +137,14 @@ abs config reply-text on|off     # send replies as text  (default on)
 abs config reply-voice on|off    # send replies as a voice note (default off)
 ```
 
-Both on and **every finished result goes out as text *and* as a voice note**. Turn
-text off and the voice note *is* the reply. (`abs config reply text|both|voice`
-still works as the one-line shorthand.)
+Both on and **every finished result goes out as a voice note first, then the same
+words as text**. Turn text off and the voice note *is* the reply.
+(`abs config reply text|both|voice` still works as the one-line shorthand.)
+
+The note leads because reading the message first makes the audio a duplicate of
+something you already know. The cost is the wait: the words only exist once the
+reply is written, so the text is held for the few seconds synthesis takes.
+`abs config voice-first off` puts the text back in front.
 
 Turning both off is refused — that isn't a delivery mode, it's silence, and it's
 the one state where a message you were waiting for never arrives with nothing
@@ -273,6 +278,7 @@ abs --model opus        # any claude flag is passed straight through
 | ⚙️ `abs config voice-sample <file>` | Clone a voice for spoken replies (both models) |
 | ⚙️ `abs config reply-text on` / `off` | Send replies as text (default on) |
 | ⚙️ `abs config reply-voice on` / `off` | Send replies as a voice note (default off) |
+| ⚙️ `abs config voice-first on` / `off` | In mode `both`: note first, then text (default on) |
 | ⚙️ `abs config auto-silent on` / `off` | Pause reports while you're driving the terminal (default on) |
 | 🔕 `abs quiet on` / `off` | Mute / unmute reports (inbound still works) |
 | 🛑 `abs off` / `on` | Drop / re-enable all inbound + outbound Telegram |

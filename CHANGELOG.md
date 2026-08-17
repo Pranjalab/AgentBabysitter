@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.0.0] — 2026-08-10 — v3: the always-on daemon
 
+- **In reply mode `both`, the voice note now arrives before the text.** The old
+  order came from where the work happened: the reply tool sent the text and a
+  `PostToolUse` hook spoke it afterwards. On a phone that is backwards — by the
+  time the note plays you have read the message, so the audio is a duplicate of
+  something you already know.
+  It is one `PreToolUse` gate and one detached worker now: the gate blocks the
+  reply tool's own send, the worker speaks and then sends the same words as text.
+  Because that worker becomes the *only* thing that will deliver the message,
+  every branch in it ends with the text going out — failed synthesis, a busy
+  engine, a sentence already spoken five minutes ago. A voice note is a nicety;
+  the message is not. Delivery gets one retry, and a total failure is written to
+  the conversation log rather than vanishing.
+  The gate declines, leaving the old order untouched, for anything it should not
+  own: an attachment (the plugin does the upload), MarkdownV2 (the plugin does the
+  escaping), and everything `voice` mode also declines — code, links, a wall of
+  text, too little to be worth saying. Declining costs a message in the less
+  useful order; wrongly accepting costs the message.
+  It also does the auto-silent bookkeeping the blocked `PostToolUse` would have
+  done, so a session replying perfectly well no longer drifts toward muting
+  itself for being too quiet.
+  The cost is stated rather than hidden: the words only exist once the reply is
+  written, synthesis is ~5s for a sentence and ~13s for a long report on this
+  machine, and the text waits for the note. `abs config voice-first off` restores
+  the old order.
+
 - **The daemon says when a session is stuck.** A remotely-started session that
   stops to ask a question is invisible from the phone: the daemon has handed the
   bot to the session, the session is waiting for a human, and nothing says so.

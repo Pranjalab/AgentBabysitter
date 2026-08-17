@@ -126,10 +126,45 @@ does. Asking for a voice note on every result and then having a heuristic decide
 you didn't want to be told is the exact contradiction this feature exists to end.
 It's a one-time action, not a lock — `abs config auto-silent on` puts it back.
 
-`both` mirrors from a `PostToolUse` hook; `voice` intercepts at `PreToolUse`,
-speaks the message, and blocks the text. The model is *told* which mode is on —
-but only so it doesn't also call `abs say` and send the same sentence twice.
-Enforcement never depends on it.
+`voice` intercepts at `PreToolUse`, speaks the message, and blocks the text. The
+model is *told* which mode is on — but only so it doesn't also call `abs say` and
+send the same sentence twice. Enforcement never depends on it.
+
+### Which one arrives first
+
+In mode `both`, the voice note goes out **before** the text:
+
+```sh
+abs config voice-first on|off     # default on; only means anything in mode `both`
+```
+
+`both` used to mirror from a `PostToolUse` hook — text first, note afterwards —
+and on a phone that is backwards. By the time the note plays you have read the
+message, so the audio is a duplicate of something you already know. Voice-first
+makes the note how you *receive* the answer and the text the record of it.
+
+Nothing can be reordered after the fact, so this costs a wait. The words only
+exist once the reply is written; synthesis takes about 5 seconds for a sentence
+and 13 for a long report on a mid-range CPU, and the text is held until the note
+has gone. If you would rather read immediately, `abs config voice-first off`
+restores the old order.
+
+Mechanically it is one `PreToolUse` gate and one detached worker: the gate blocks
+the reply tool's own send, and the worker speaks, then sends the same words as
+text. **That worker is the only thing that will deliver the message**, which sets
+the rule every branch in it follows — if synthesis fails, if the engine is busy,
+if the sentence was already spoken five minutes ago, the text still goes out. A
+voice note is a nicety; the message is not.
+
+The gate declines, leaving the old order intact, for anything it should not own: an
+attachment (the plugin does the upload), MarkdownV2 (the plugin does the escaping),
+and everything `voice` mode also declines — code, links, a wall of text, or too
+little to be worth saying. Declining is the safe direction: the cost is a message
+in the less useful order, where the cost of wrongly accepting is a message that
+never arrives.
+
+The switch takes effect in a **new** session, because hooks are written into the
+settings file at launch.
 
 What `voice` deliberately does **not** suppress: a message carrying a code block,
 a link, or an attachment. A voice note can't carry any of those, and a blocked
