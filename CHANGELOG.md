@@ -25,6 +25,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.2.1] — 2026-08-18 — voice notes that wedged on macOS and never arrived
+
+Reported from the Mac within minutes of 3.1.0 going out: text arrived, audio
+never did, and three TTS processes sat on the box, one per reply, none of them
+finishing. Two defects, and Linux only looked healthy because one hid the other.
+
+- **The synthesis lock was `flock`, which is Linux-only.** The old code knew, and
+  called the macOS case "a weaker ordering guarantee, not a failure". It was a
+  failure: with no lock at all, every reply started its own synthesis, so three
+  replies meant three copies of a multi-gigabyte speech model loading at once on
+  an 8 GB machine. They thrashed and none returned. Serialisation is an atomic
+  `mkdir` mutex now — one code path on every OS — with the holder's pid and the
+  lock's age as two independent staleness signals, so neither a crashed holder
+  nor a recycled pid can silence voice permanently.
+
+- **Nothing was ever bounded, on any platform.** This is the worse half. `flock`
+  kept Linux to one process at a time, so a hang there read as slowness rather
+  than a wedge — but a single hung engine wedges Linux just as hard, and in
+  voice-first mode it takes the TEXT with it, because the words are held until
+  the note has gone. Synthesis runs under `with_timeout` now, which also learned
+  to escalate TERM to KILL: the tree under a speech engine is `abs` → `abs say`
+  → python → ffmpeg, and a timeout that only asks politely is not a timeout.
+  Verified on bash 3.2 and 5.2 that a wedged engine is abandoned in seconds and
+  the whole process tree is reaped, with no orphans.
+
+  The consequence of that bound is the point: `_voice_fallback_text` — the "voice
+  failed, send the words instead" path — existed all along and was **unreachable
+  on the only platform that needed it**, because a run that never returns never
+  sets a failure status.
+
+Found in parallel on the Mac and on Linux, from opposite ends. The pid-based
+reaping and the TERM→KILL escalation come from the Mac session's patch; the
+mutex, the timeout and the tests are this side's.
+
 ## [3.2.0] — 2026-08-18 — the daemon, without a clone
 
 The last of the four items queued behind the macOS crash, and the one that made a

@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.2.0"
+readonly ABS_VERSION="3.2.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -2174,6 +2174,96 @@ _voice_speakable() {
 # The lock stops them overlapping — it does NOT promise an order, since flock is
 # not FIFO. If a queued note waits out the timeout it counts as a failure, which
 # in `voice` mode means the words go out as text rather than being dropped.
+# --- one note at a time, and never forever ------------------------------------
+#
+# Both of these are the fix for a bug the operator hit on a Mac: three replies
+# produced three TTS processes, all wedged, none ever finishing. He got the text
+# and never the audio.
+#
+# The serialisation used to be `flock`, which is Linux-only. The old comment said
+# so and called the macOS case "a weaker ordering guarantee, not a failure" —
+# that was wrong. On a Mac every reply started its own synthesis, so three
+# replies meant three copies of a multi-gigabyte speech model loading at once.
+# They thrashed and none of them finished.
+#
+# There was also no timeout ANYWHERE, on any platform. Linux only looked healthy
+# because flock kept the concurrency to one; a single hung engine wedges Linux
+# just as hard, and takes the TEXT with it in voice-first mode, where the words
+# are held until the note has gone.
+#
+# How long one note may take before it is abandoned. Kokoro does a long report in
+# well under a minute on CPU; chatterbox on a machine with no GPU is the slow
+# case this has to accommodate without ever being unbounded.
+readonly VOICE_SYNTH_TIMEOUT="${ABS_VOICE_TIMEOUT:-300}"
+# How long to wait for someone else's note before giving up on ours. Longer than
+# one synthesis, so a queue of two is served rather than dropped.
+readonly VOICE_LOCK_WAIT="${ABS_VOICE_LOCK_WAIT:-420}"
+# Grace on top of the timeout before a held lock is declared abandoned. The
+# holder should already have given up by then; this only covers the gap between
+# with_timeout killing it and the release running.
+readonly VOICE_LOCK_STALE_MARGIN="${ABS_VOICE_LOCK_STALE_MARGIN:-60}"
+
+_voice_lock_dir() { printf '%s' "$ABS_DIR/voice.lock.d"; }
+
+# mkdir is the portable atomic test-and-set: it either creates the directory or
+# fails, with no window in between, on every POSIX filesystem. A DIRECTORY, and a
+# new name, because older versions used `$ABS_DIR/voice.lock` as a flock file —
+# and a leftover regular file of that name would make mkdir fail forever.
+#
+# The timestamp goes in a file inside the lock rather than being read off the
+# directory's mtime: `stat` is spelled differently on GNU and BSD, and this is
+# code that has to work on the Mac by definition.
+_voice_lock_acquire() {
+  local lock waited=0 ts age now holder
+  lock="$(_voice_lock_dir)"
+  while :; do
+    if mkdir "$lock" 2>/dev/null; then
+      date +%s > "$lock/ts" 2>/dev/null || true
+      printf '%s\n' "$$" > "$lock/pid" 2>/dev/null || true
+      return 0
+    fi
+
+    # Two independent staleness signals, because each covers the other's blind
+    # spot. The holder's pid is the fast one: a process killed by the OOM killer,
+    # or lost to a reboot, is gone the moment we look, and queueing behind a
+    # corpse for six minutes would be its own outage.
+    holder="$(cat "$lock/pid" 2>/dev/null || true)"
+    case "$holder" in
+      ''|*[!0-9]*) : ;;
+      *) if ! kill -0 "$holder" 2>/dev/null; then
+           rm -rf "$lock" 2>/dev/null || true
+           continue
+         fi ;;
+    esac
+
+    # And age, because a pid can be REUSED — on a busy box the number in that
+    # file may belong to something entirely unrelated by now, and `kill -0` would
+    # cheerfully report a live holder forever. A lock older than one synthesis
+    # plus its grace is abandoned whatever the pid says.
+    #
+    # A lock with no readable stamp gets one now rather than being deleted on
+    # sight: there is no way to distinguish a process killed between the mkdir
+    # and the write from one that took the lock a millisecond ago, and deleting
+    # would race the live case. Stamping means it ages out like any other.
+    now="$(date +%s)"
+    ts="$(cat "$lock/ts" 2>/dev/null || true)"
+    case "$ts" in
+      ''|*[!0-9]*) date +%s > "$lock/ts" 2>/dev/null || true; age=0 ;;
+      *) age="$((now - ts))" ;;
+    esac
+    if [ "$age" -gt "$((VOICE_SYNTH_TIMEOUT + VOICE_LOCK_STALE_MARGIN))" ]; then
+      rm -rf "$lock" 2>/dev/null || true
+      continue
+    fi
+
+    [ "$waited" -ge "$VOICE_LOCK_WAIT" ] && return 1
+    sleep 2
+    waited="$((waited + 2))"
+  done
+}
+
+_voice_lock_release() { rm -rf "$(_voice_lock_dir)" 2>/dev/null || true; }
+
 _voice_mirror() {
   local original="$1" ceiling="${2:-$VOICE_MIRROR_MAX}" prepped hash last_hash last_ts now rc=0
   prepped="$(_voice_prep "$original")"
@@ -2202,18 +2292,22 @@ _voice_mirror() {
     if [ "$hash" = "$last_hash" ] && [ "$((now - last_ts))" -lt 300 ]; then return 0; fi
   fi
 
-  local lock="$ABS_DIR/voice.lock"
   mkdir -p "$ABS_DIR" 2>/dev/null || true
   # The text goes over stdin, never in argv: a reply can quote anything the
   # operator pasted, and argv is world-readable through /proc for as long as
   # synthesis runs. `-` is how both TTS scripts (and cmd_say) ask for stdin.
   #
-  # flock is Linux-only; on macOS the notes just aren't serialised, which is a
-  # weaker ordering guarantee, not a failure.
-  if command -v flock >/dev/null 2>&1; then
-    printf '%s' "$prepped" | flock -w 180 "$lock" -c "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+  # One note at a time, and never forever. See _voice_lock_acquire for why the
+  # lock is not flock any more, and with_timeout for why synthesis is bounded.
+  if _voice_lock_acquire; then
+    printf '%s' "$prepped" \
+      | with_timeout "$VOICE_SYNTH_TIMEOUT" bash -c "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+    _voice_lock_release
   else
-    printf '%s' "$prepped" | eval "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+    # Another note has been synthesising for longer than anyone should wait.
+    # Treated as a failure so `voice` mode falls back to text rather than
+    # swallowing the message.
+    rc=1
   fi
 
   if [ "$rc" -eq 0 ]; then
@@ -3385,6 +3479,13 @@ with_timeout() {
     exec >/dev/null 2>&1
     sleep "$secs"
     kill -TERM "-$cmd_pid" 2>/dev/null || kill -TERM "$cmd_pid" 2>/dev/null || true
+    # Then insist. TERM is a request, and the tree under a speech engine — abs,
+    # `abs say`, python, ffmpeg — is deep enough that something in it can be
+    # busy in a way that does not service signals promptly. Without the
+    # escalation the `wait` below never returns and this "timeout" times nothing
+    # out, which is exactly the failure it was added to prevent.
+    sleep 5
+    kill -KILL "-$cmd_pid" 2>/dev/null || kill -KILL "$cmd_pid" 2>/dev/null || true
   ) &
   killer_pid=$!
   wait "$cmd_pid" 2>/dev/null || rc=$?
