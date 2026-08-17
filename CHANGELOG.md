@@ -25,6 +25,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.2.2] — 2026-08-18 — the v3 install gave up on the first Python it tried
+
+Both of these came straight out of the operator's macOS install log.
+
+- **`abs src install` tried exactly one interpreter and quit.** His Mac has
+  Python 3.14; `venv` failed on it; the install gave up — with Python 3.12 and
+  3.11 sitting on the same PATH. It now tries each candidate all the way through
+  venv, pip and an `import absd`, and keeps the first that survives.
+
+  The order changed too, and not to newest-first. A brand-new Python is the
+  *worst* first choice here: the wheels it needs may not be published yet, so it
+  fails at pip rather than at venv and looks like an unrelated bug. Well-supported
+  middle first, then the floor, then the rest.
+
+- **The failure hid the real error and named the wrong operating system.** Every
+  step's output went to `/dev/null`, and what surfaced was "On Debian/Ubuntu:
+  sudo apt install python3-venv" — printed on a Mac. An error message that names
+  an OS you are not running is worse than no message, because it sends you
+  looking somewhere that cannot be the answer. The last attempt's output is shown
+  now, and the hint matches `uname`.
+
+- **`abs voice status` shows the kokoro engine as its own row.** It was invisible,
+  and its absence is a 10x difference in how long a note takes: chatterbox wants
+  a GPU, kokoro is an 82M model that runs on CPU. The operator's MacBook Air had
+  only chatterbox, so every note was a multi-minute CPU inference — which is what
+  turned a burst of replies into the three wedged processes fixed in 3.2.1. The
+  status page also says which engine will actually run, and how to add the fast
+  one. You cannot fix what the status page does not show.
+
 ## [3.2.1] — 2026-08-18 — voice notes that wedged on macOS and never arrived
 
 Reported from the Mac within minutes of 3.1.0 going out: text arrived, audio
