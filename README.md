@@ -39,7 +39,7 @@ Telegram plugin. No daemon, no webhook, no second copy of your session.
 - 🎤 **Voice both ways** — send a voice note, or ask for the answer spoken back.
 - 📊 **Check usage remotely** — your Claude limits, one tap away, no browser.
 - 🔒 **Your own private bot** — PIN-paired, so only you can reach it.
-- 🟢 **See the state at a glance** — a dot in Claude's status bar shows whether reports are flowing or muted, plus your 5-hour and weekly usage.
+- 🟢 **See the state at a glance** — dots in Claude's status bar answer one question per channel: if a reply happened right now, would it go out this way? Plus your 5-hour and weekly usage.
 - 🖥 **Runs anywhere** — laptop, SSH, `tmux`, a headless Linux server.
 - 🗂 **Multiple projects** — one bot per project, babysat side by side.
 
@@ -52,23 +52,30 @@ curl -fsSL https://agentbabysitter.com/install.sh | bash
 abs
 ```
 
-It installs a single script to `~/.local/bin/abs` and touches nothing else. Piping
-to `bash` is your call to make — [read it first](https://agentbabysitter.com/install.sh)
-if you'd rather.
+It asks one question — whether to clone the repository — and the answer decides what
+you get:
 
-Prefer Python packaging?
+| | `abs` on your PATH | Daemon, `ABS START` from the phone, sandboxes | Updates by |
+| --- | --- | --- | --- |
+| **Yes** (default) | ✅ | ✅ | `git pull` |
+| No | ✅ | ❌ | re-running the installer |
 
-```sh
-pipx install agent-babysitter     # or: pip install agent-babysitter
-```
+The daemon is Python that lives in the repository with its own venv, and sandboxes
+need the Dockerfile, so they genuinely cannot ship as one file. Say yes unless you
+only want the 2.x feature set.
 
-From source, or to contribute:
+Piping to `bash` is your call to make — [read it first](https://agentbabysitter.com/install.sh)
+if you'd rather. Or clone it yourself and run the same script:
 
 ```sh
 git clone https://github.com/Pranjalab/AgentBabysitter
 cd AgentBabysitter
 ./install.sh
 ```
+
+**Already have it?** `abs` tells you when a new version is out and offers to update
+itself on the spot — that is the whole upgrade path, and it works for both kinds of
+install.
 
 **About two minutes, once per bot:**
 
@@ -125,6 +132,37 @@ turbo generates ~1.8× faster), and **clone a voice** from any short reference c
 so replies speak in the voice you choose (`abs config voice-sample <clip>`, or
 `--audio-prompt` per call).
 
+**"Always answer me in voice" — as a setting, not a request.** Asking the
+assistant to always reply with a voice note works until the session gets long and
+the instruction drifts out of the model's attention. `abs config reply` stores it
+instead, and the session hooks enforce it whether the model remembers or not:
+
+Two switches, one per channel:
+
+```sh
+abs config reply-text on|off     # send replies as text  (default on)
+abs config reply-voice on|off    # send replies as a voice note (default off)
+```
+
+Both on and **every finished result goes out as a voice note first, then the same
+words as text**. Turn text off and the voice note *is* the reply.
+(`abs config reply text|both|voice` still works as the one-line shorthand.)
+
+The note leads because reading the message first makes the audio a duplicate of
+something you already know. The cost is the wait: the words only exist once the
+reply is written, so the text is held for the few seconds synthesis takes.
+`abs config voice-first off` puts the text back in front.
+
+Turning both off is refused — that isn't a delivery mode, it's silence, and it's
+the one state where a message you were waiting for never arrives with nothing
+saying why. `abs quiet on` already means "mute the reports", says so, and can be
+undone from either side.
+
+`voice` still lets a message through as text when it carries a code block, a link,
+or an attachment: a voice note can't carry any of those, and a blocked message is
+one you simply never get. Same reason it refuses to turn on at all where nothing
+can speak — the failure mode is always "text as usual", never silence.
+
 <div align="center">
 <img src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/voice-and-report.jpg" alt="A Telegram chat showing voice notes in both directions and a written task-done report from Claude." width="440">
 </div>
@@ -142,6 +180,18 @@ browser, no app, no breaking focus before a big task.
 
 Each project gets its own bot, so you can run more than one session in parallel
 without them fighting over messages — `abs --profile work`.
+
+### ⌨️ A terminal that behaves like one
+
+Every list `abs` offers — which bot, which session to resume, which project, which
+sandbox — is an arrow-key menu: ↑/↓ (or `k`/`j`) move the highlight, Enter takes
+it, `q` backs out. **Typing the number still works**, so nothing you already do
+stops working, and the row you pick collapses to a single line so your scrollback
+keeps the decision without the whole menu.
+
+It degrades rather than breaks: no terminal, `TERM=dumb`, or `ABS_NO_TUI=1` all
+fall back to the old numbered prompt — which is what keeps these usable under
+`docker exec` without `-t`, over a pipe, and in CI.
 
 ### 🛑 Remote controls — a kill ladder that doesn't trust the model
 
@@ -227,14 +277,20 @@ abs --model opus        # any claude flag is passed straight through
 | 🗂 `abs profiles` | List your bots and which are in use |
 | ⚙️ `abs config model <name>` | Default model for new sessions (`--clear` to unset) |
 | ⚙️ `abs config silent on` / `off` | Whether new sessions start muted |
-| ⚙️ `abs config statusline on` / `off` | Bottom-bar mute/active dot + usage (default on) |
+| ⚙️ `abs config statusline on` / `off` | Bottom-bar dots, usage, context and version (default on) |
+| ⚙️ `abs config label <name>` | Name before the colon in the bar — `auto` takes your Claude one |
 | ⚙️ `abs config usage-refresh <min>` | How often the usage glance refreshes (default 5) |
 | ⚙️ `abs config guard on` / `off` | Block destructive commands on Telegram turns (default on) |
 | ⚙️ `abs config voice standard` / `turbo` | Default TTS model — expressive vs. ~1.8× faster |
 | ⚙️ `abs config voice-sample <file>` | Clone a voice for spoken replies (both models) |
+| ⚙️ `abs config reply-text on` / `off` | Send replies as text (default on) |
+| ⚙️ `abs config reply-voice on` / `off` | Send replies as a voice note (default off) |
+| ⚙️ `abs config voice-first on` / `off` | In mode `both`: note first, then text (default on) |
+| ⚙️ `abs config auto-silent on` / `off` | Pause reports while you're driving the terminal (default on) |
 | 🔕 `abs quiet on` / `off` | Mute / unmute reports (inbound still works) |
 | 🛑 `abs off` / `on` | Drop / re-enable all inbound + outbound Telegram |
 | 🚪 `abs exit` | End the running session (restart with `abs`) |
+| 💬 `abs send "text"` | Send plain text to your chat — works even if the Telegram plugin is down (`abs send -` reads stdin) |
 | 🎤 `abs say [--turbo] "text"` | Speak it and send as a voice note (`--audio-prompt` to clone) |
 | ♻️ `abs reset` | Remove this profile's token, allowlist, and state |
 | ❓ `abs help` | The full list |
@@ -246,6 +302,127 @@ From **Telegram**, the hook-enforced kill ladder — sent as a whole message —
 You can also just say it in chat — "mute the reports", "what's my usage" — and it
 runs the same commands. For voice setup, profiles, servers, and troubleshooting,
 see the **[full guide](docs/GUIDE.md)**.
+
+## 🛰 Always-on daemon (v3)
+
+Without the daemon, `abs` is a passenger: when Claude Code isn't running, the bot
+is deaf and nothing can be started remotely. **`absd`** is a small background
+daemon (a systemd user service) that polls every one of your idle bots, so you can
+**start a session from your phone** and pick it up at the desk later.
+
+- **`ABS START`** from Telegram → pick a project (or ▶ **Resume** a recent one) →
+  pick Normal / Away → the daemon launches Claude Code in a persistent, attachable
+  session (herdr if installed, else tmux). It confirms with `abs attach <profile>`.
+- **Messages while nothing runs are pooled**, never dropped; when you start a
+  session they're offered to forward as its opening prompt — tick the ones you
+  want with ☐/☑ buttons, or tap **Send all** for the lot.
+- **It tells you when the session is stuck.** A session that stops to ask a
+  question or wait for an approval would otherwise sit there silently; after ~20s
+  blocked, your phone gets *"⏸ myrepo is waiting for input or approval"*. Needs
+  herdr — tmux can't report agent status, so on tmux the feature is simply absent.
+- **The terminal keeps working unchanged** — plain `abs` still launches at the
+  desk, and now shows the same resume-first picker.
+- **The status bar tells you what will happen next.**
+
+  ```
+  Pran:@yourbot · ● Text · ● Voice · Week 43% (resets on Tue) · 5H 62% (resets in 1h 10m) · ctx 68% · v3.0.0
+  ```
+
+  Both dots read the same way — green means *this is live right now*:
+
+  | Dot | Green when |
+  | --- | --- |
+  | `● Text` | `reply text on`, not quiet, bot not off |
+  | `● Voice` | `reply voice on`, not quiet, bot not off, **and** this machine has TTS installed |
+
+  Voice is dim on a machine with no TTS even with the switch on — the switch is
+  what you asked for, TTS is whether it can happen.
+
+  The percentages come from Claude Code's own render payload, so they cost nothing
+  and are never stale: your weekly and five-hour limits with their resets, then
+  `ctx` — how much of *this conversation's* context window is left — dim and last,
+  because a limit at 90% stops your work while a long conversation merely means a
+  long conversation. The version is there so you can see which `abs` is rendering
+  without running anything.
+
+  The name before the colon is yours to set:
+
+  ```sh
+  abs config label auto      # → Pran:@yourbot   (from your Claude display name)
+  abs config label Pran      # or say it directly
+  abs config label --clear   # back to abs:
+  ```
+
+Setup (a checkout install):
+
+```sh
+abs daemon install                    # render + install the systemd user unit
+systemctl --user enable --now absd    # start it, and on login
+sudo loginctl enable-linger $USER     # survive logout (once)
+abs project add ~/Projects/myrepo     # projects ABS START can offer
+abs config workspace-root ~/Projects  # root for remote "New folder" starts
+abs doctor                            # diagnose the whole stack
+```
+
+| Command | What it does |
+| --- | --- |
+| 🛰 `abs daemon install\|start\|stop\|status\|logs` | Manage the always-on daemon |
+| 🩺 `abs doctor` | Diagnose the v2 deps + v3 daemon stack (read-only) |
+| 📂 `abs project add\|list\|rm <dir>` | Projects the ABS START flow offers |
+| 🌱 `abs config workspace-root <dir>` | Root for remote "New folder" starts |
+| ⚙️ `abs config start-menu on\|off` | Resume-first picker on interactive launch |
+| 🖥 `abs sessions` / `abs attach [profile]` | List / attach engine sessions |
+| ▶️ `abs --resume` / `abs --new` | Skip the terminal start menu (resume top / fresh) |
+| 🏖 `abs sandbox build\|create\|list\|start\|stop\|destroy` | Docker sandboxes ([below](#-sandboxes--let-it-build-without-letting-it-near-your-machine)) |
+| 🤖 `abs restricted create\|login\|list\|start\|stop\|destroy` | The restricted assistant bot — **experimental, not in 3.0.0** |
+
+From **Telegram** (daemon-mode grammar, whole-message):
+`ABS START` · `ABS STATUS` · `ABS POOL` · `ABS CLEAR POOL` · `ABS OFF` · `ABS BLOCK`
+(also the `/abs_start`, `/abs_status`, `/abs_pool`, `/abs_exit` "/" menu aliases).
+`ABS OFF`/`ABS BLOCK` stop the daemon for that bot; recover only at the terminal
+(`abs on` / `abs setup`).
+
+## 🏖 Sandboxes — let it build without letting it near your machine
+
+`abs sandbox` gives a session its own Ubuntu container: the project lives in one
+dedicated host folder (`~/Projects/sandboxes/<name>`, the *only* path the container
+can see), Claude Code runs inside, and ports you ask for are published so you can
+open `localhost:3000` in your own browser.
+
+```sh
+abs sandbox build                          # once — build the image
+abs sandbox create web --ports 3000:3000   # a box with its own workspace
+abs start sandbox web                      # a session INSIDE it
+abs sandbox list | stop | destroy <name>
+```
+
+From Telegram, `ABS START` offers **🏖 Sandbox…** alongside your projects. No
+`--privileged`, no host mounts beyond that one folder, no docker socket; your
+Claude credentials are **copied in at create**, never mounted, so what happens in
+the box stays in the box.
+
+### 🤖 The restricted assistant — coming in a later release
+
+> **Not part of 3.0.0.** The code is here and unit-tested, but nobody has ever
+> provisioned one end to end, so it ships dormant and unadvertised rather than as a
+> feature. Development continues on the `restricted-assistant` branch, with the
+> checklist it needs in `docs/v3/manual-tests/restricted.md`. Running
+> `abs restricted create` works and says the same thing before it starts.
+
+A second kind of bot: everyday questions, web lookups, notes and arithmetic — but
+it will not write or run project code, and it cannot start or stop sessions.
+
+```sh
+abs restricted create assistant   # new bot + a dedicated, credential-free box
+abs restricted login assistant    # log Claude in INSIDE the box (once)
+abs restricted list | start | stop | destroy <name>
+```
+
+One switch turns on four layers: an injected system prompt that refuses code, the
+Haiku model, a dedicated sandbox, and **no host credentials at all** — the box logs
+in separately. Being honest about which of those matter: the prompt is bypassable,
+and the real containment is the last two. The daemon keeps it alive, relaunching
+if it dies and telling you once if it needs logging in again.
 
 ## 🏗 Architecture
 

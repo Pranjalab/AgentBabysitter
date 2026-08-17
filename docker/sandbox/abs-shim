@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# `abs` inside a sandbox box. The real abs.sh is `docker cp`'d to /opt/abs by the
+# host (SandboxManager._install_abs_into_box) at container start and before every
+# session, so this shim just forwards — and says something useful when the sync
+# has not happened yet.
+#
+# Orchestration deliberately stays on the HOST: `abs sandbox …`, `abs daemon …`
+# and `abs restricted …` manage boxes from outside and are meaningless in here,
+# so they are refused with the reason rather than half-working.
+
+set -u
+
+ABS_SH="/opt/abs/abs.sh"
+
+if [ ! -f "$ABS_SH" ]; then
+  echo "abs: not synced into this sandbox yet." >&2
+  echo "  The host copies it in at container start. From the host, run:" >&2
+  echo "    abs sandbox start <name>" >&2
+  exit 1
+fi
+
+case "${1:-}" in
+  sandbox|daemon|restricted)
+    echo "abs $1: host-side only — sandboxes are managed from outside the box." >&2
+    echo "  Run it in a host terminal instead." >&2
+    exit 1
+    ;;
+esac
+
+exec bash "$ABS_SH" "$@"

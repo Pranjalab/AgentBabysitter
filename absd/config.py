@@ -1,0 +1,297 @@
+"""Daemon configuration — the on-disk ``~/.abs/daemon/config.json`` shape.
+
+Per PLAN.md 4.3, the daemon reads ``config.json`` (engine, workspace root, poll
+timings, max concurrent sessions). Per PLAN.md 4.4, the on-disk state formats
+are part of the spec a future port must re-implement, so the serialization here
+is real and stable — but *loading from disk* (path discovery, umask 0600
+enforcement, defaults-on-missing) is left as a stub for Step 1.3, where it can
+be tested against a temp ``~/.abs``.
+
+Design notes:
+  - Plain ``dataclass`` + ``json`` only (stdlib-first, PLAN.md 4.4).
+  - ``from_dict`` is forward-tolerant: unknown keys are ignored so a newer
+    on-disk file never crashes an older daemon (and vice versa).
+  - ``workspace_root`` is stored as written (may contain ``~``); expansion and
+    the D6 path-jail check belong to whoever *uses* it, not to the config type.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
+from typing import Any
+
+# Allowed values for the engine selector (PLAN.md 4.2 / D4). "auto" resolves to
+# herdr-if-available-and-spike-verified, else tmux.
+ENGINE_CHOICES = ("auto", "herdr", "tmux")
+
+_MODE = 0o600
+
+
+class ConfigError(ValueError):
+    """``config.json`` is present but invalid (bad engine, out-of-range number).
+
+    Raised by :func:`load` so the daemon refuses to start on a corrupt config
+    rather than silently polling with surprising timings.
+    """
+
+
+@dataclass
+class DaemonConfig:
+    """In-memory representation of ``~/.abs/daemon/config.json``.
+
+    Fields map 1:1 to the JSON object. Defaults are the intended out-of-box
+    behavior described across PLAN.md 4.1/4.2/4.5.
+    """
+
+    # Session engine selection (D4). One of ENGINE_CHOICES.
+    engine: str = "auto"
+
+    # D6 path jail: the ONLY directory under which Telegram-initiated new folders
+    # may be created, and whose direct children are offered as start targets.
+    # Stored verbatim (may contain "~"); expansion happens at use sites.
+    workspace_root: str = "~/Projects"
+
+    # G5 concurrency cap: max simultaneous live sessions the daemon will launch.
+    max_sessions: int = 3
+
+    # getUpdates long-poll timeout, seconds (PLAN.md 4.5).
+    poll_timeout_s: int = 50
+
+    # Per-profile poller start stagger, seconds — avoids a thundering herd of
+    # simultaneous long-polls at boot (PLAN.md 4.5 / R10).
+    poll_stagger_s: float = 1.5
+
+    # RECLAIM grace delay before the first post-session probe (PLAN.md 4.1).
+    reclaim_grace_s: float = 5.0
+
+    # Upper bound on the exponential 409 backoff during RECLAIM (PLAN.md 4.1).
+    reclaim_backoff_max_s: float = 60.0
+
+    # ABS START flow inactivity timeout (PLAN.md Step 1.5): a half-finished flow
+    # (project/mode not yet chosen) expires after this many seconds.
+    flow_timeout_s: float = 300.0
+
+    # HANDOFF startup grace (PLAN.md Step 1.5 / 4.1): after the daemon launches a
+    # session, how long to wait for it to come alive (engine/pid) before treating
+    # a never-alive launch as a failed start and reclaiming. Guards the launch
+    # window so a session that is still booting is not mistaken for a dead one.
+    session_start_grace_s: float = 30.0
+
+    # Same window, but for a SANDBOX launch, which has far more to do before its
+    # channel can come up: `docker cp` abs.sh + absd/ into the box, run abs.sh,
+    # boot claude, start the Telegram plugin. The 30s above was set when an
+    # in-box session was bare `claude`; against a v4 box it declared healthy
+    # launches dead, and reclaiming a launch that then kept running inside the
+    # container left an orphan poller stealing the operator's messages.
+    sandbox_start_grace_s: float = 120.0
+
+    # Blocked-session notifications (Step 2.1, G8). A remotely-started session that
+    # stops to ask something is invisible from the phone; when the engine can report
+    # agent status (herdr only — tmux silently has no such feature, D4), a block
+    # sustained for `blocked_debounce_s` pings the chat that started the session,
+    # once per episode. The debounce exists because herdr's blocked detection needs
+    # a beat to match an approval UI, and a block answered at the desk in five
+    # seconds never needed a phone ping.
+    blocked_notify: bool = True
+    blocked_debounce_s: float = 20.0
+    # The matching "✅ finished" ping. OFF by default: a finished turn is normally
+    # followed by the session's own Telegram reply, which says it better.
+    done_notify: bool = False
+
+    # Stale-handoff sweep (Step 2.3). A handoff marker with no live session behind
+    # it is a session that ended without the daemon seeing it (a hard kill, an OOM,
+    # a machine that slept). Boot recovery catches it at startup; this catches it
+    # while the daemon runs. A marker must be older than this before it counts as
+    # stale, so the launch window (session_start_grace_s) is never swept.
+    stale_handoff_after_s: float = 600.0
+    stale_handoff_check_s: float = 60.0
+
+    # Log rotation (Step 1.8): daemon.log and events.jsonl rotate at this size,
+    # keeping this many .1/.2/.3 generations.
+    log_max_bytes: int = 5 * 1024 * 1024
+    log_keep: int = 3
+
+    # Sandbox root (Phase 3): each `abs sandbox create <name>` gets a dedicated host
+    # dir <sandbox_root>/<name> (0700) bind-mounted as the container workdir. Stored
+    # verbatim (may contain "~"); expansion happens at use sites.
+    sandbox_root: str = "~/Projects/sandboxes"
+
+    # Profile rescan cadence (new-bot provisioning): the daemon re-runs discovery
+    # this often so a bot added while it runs gets an idle poller. 0 disables it.
+    profile_rescan_s: float = 60.0
+
+    # Restricted assistant keep-alive (Stage 3). A `keep_alive` (restricted) profile
+    # is not idle-polled: the daemon keeps its in-sandbox session alive, relaunching
+    # on death with exponential backoff. After this many CONSECUTIVE fast deaths (a
+    # session that never came alive — almost always a not-logged-in box), it stops
+    # relaunching and tells the operator to run `abs restricted login <name>`.
+    restricted_relaunch_cap: int = 3
+    # Base + cap for the relaunch backoff (seconds); grows 2^attempt from base.
+    restricted_relaunch_backoff_s: float = 5.0
+    restricted_relaunch_backoff_max_s: float = 120.0
+    # How often to re-check while a restricted session is DOWN and waiting (paused,
+    # or login-needed): the daemon polls the bot to refuse control commands and
+    # re-checks whether it may relaunch (e.g. login just completed).
+    keep_alive_check_s: float = 10.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON-serializable mapping for this config."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DaemonConfig":
+        """Build a config from a parsed JSON object, ignoring unknown keys.
+
+        Forward/backward tolerant on purpose (PLAN.md 4.4): an out-of-range or
+        malformed *value* is not validated here — validation is a separate
+        concern for the loader (Step 1.3). This only maps known keys.
+        """
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def validate(cfg: DaemonConfig) -> DaemonConfig:
+    """Validate a config's values; return it unchanged, or raise ``ConfigError``.
+
+    Rules (PLAN.md 4.1/4.2/4.5):
+      - ``engine`` must be one of :data:`ENGINE_CHOICES`.
+      - ``max_sessions`` >= 1.
+      - ``poll_timeout_s`` in [0, 300] (0 = short poll; Telegram caps ~50).
+      - ``poll_stagger_s`` >= 0.
+      - ``reclaim_grace_s`` >= 0.
+      - ``reclaim_backoff_max_s`` >= ``reclaim_grace_s`` (the cap must not sit
+        below the initial grace, or backoff maths is nonsense).
+      - ``flow_timeout_s`` >= 0 and ``session_start_grace_s`` >= 0 (Step 1.5).
+    """
+    if cfg.engine not in ENGINE_CHOICES:
+        raise ConfigError(
+            f"engine must be one of {ENGINE_CHOICES}, got {cfg.engine!r}"
+        )
+    if not isinstance(cfg.max_sessions, int) or cfg.max_sessions < 1:
+        raise ConfigError(f"max_sessions must be an int >= 1, got {cfg.max_sessions!r}")
+    if not (0 <= cfg.poll_timeout_s <= 300):
+        raise ConfigError(f"poll_timeout_s must be in [0, 300], got {cfg.poll_timeout_s!r}")
+    if cfg.poll_stagger_s < 0:
+        raise ConfigError(f"poll_stagger_s must be >= 0, got {cfg.poll_stagger_s!r}")
+    if cfg.reclaim_grace_s < 0:
+        raise ConfigError(f"reclaim_grace_s must be >= 0, got {cfg.reclaim_grace_s!r}")
+    if cfg.reclaim_backoff_max_s < cfg.reclaim_grace_s:
+        raise ConfigError(
+            "reclaim_backoff_max_s must be >= reclaim_grace_s "
+            f"({cfg.reclaim_backoff_max_s!r} < {cfg.reclaim_grace_s!r})"
+        )
+    if cfg.flow_timeout_s < 0:
+        raise ConfigError(f"flow_timeout_s must be >= 0, got {cfg.flow_timeout_s!r}")
+    if cfg.session_start_grace_s < 0:
+        raise ConfigError(
+            f"session_start_grace_s must be >= 0, got {cfg.session_start_grace_s!r}"
+        )
+    if cfg.sandbox_start_grace_s < 0:
+        raise ConfigError(
+            f"sandbox_start_grace_s must be >= 0, got {cfg.sandbox_start_grace_s!r}"
+        )
+    if not isinstance(cfg.log_max_bytes, int) or cfg.log_max_bytes < 1024:
+        raise ConfigError(f"log_max_bytes must be an int >= 1024, got {cfg.log_max_bytes!r}")
+    if not isinstance(cfg.log_keep, int) or cfg.log_keep < 1:
+        raise ConfigError(f"log_keep must be an int >= 1, got {cfg.log_keep!r}")
+    if cfg.blocked_debounce_s < 0:
+        raise ConfigError(
+            f"blocked_debounce_s must be >= 0, got {cfg.blocked_debounce_s!r}"
+        )
+    if cfg.stale_handoff_after_s < 0:
+        raise ConfigError(
+            f"stale_handoff_after_s must be >= 0, got {cfg.stale_handoff_after_s!r}"
+        )
+    if cfg.stale_handoff_check_s <= 0:
+        raise ConfigError(
+            f"stale_handoff_check_s must be > 0, got {cfg.stale_handoff_check_s!r}"
+        )
+    # A sweep window shorter than the launch grace would reclaim sessions that are
+    # still legitimately starting up — the one way this feature could destroy work.
+    if cfg.stale_handoff_after_s < cfg.session_start_grace_s:
+        raise ConfigError(
+            "stale_handoff_after_s must be >= session_start_grace_s "
+            f"({cfg.stale_handoff_after_s!r} < {cfg.session_start_grace_s!r})"
+        )
+    if cfg.profile_rescan_s < 0:
+        raise ConfigError(
+            f"profile_rescan_s must be >= 0 (0 disables), got {cfg.profile_rescan_s!r}"
+        )
+    if not isinstance(cfg.restricted_relaunch_cap, int) or cfg.restricted_relaunch_cap < 1:
+        raise ConfigError(
+            f"restricted_relaunch_cap must be an int >= 1, got {cfg.restricted_relaunch_cap!r}"
+        )
+    if cfg.restricted_relaunch_backoff_s < 0:
+        raise ConfigError(
+            f"restricted_relaunch_backoff_s must be >= 0, got {cfg.restricted_relaunch_backoff_s!r}"
+        )
+    if cfg.restricted_relaunch_backoff_max_s < cfg.restricted_relaunch_backoff_s:
+        raise ConfigError(
+            "restricted_relaunch_backoff_max_s must be >= restricted_relaunch_backoff_s "
+            f"({cfg.restricted_relaunch_backoff_max_s!r} < {cfg.restricted_relaunch_backoff_s!r})"
+        )
+    if cfg.keep_alive_check_s <= 0:
+        raise ConfigError(f"keep_alive_check_s must be > 0, got {cfg.keep_alive_check_s!r}")
+    return cfg
+
+
+def restricted_backoff(attempt: int, base: float, cap: float) -> float:
+    """Relaunch backoff for a restricted keep-alive session: ``base * 2**attempt``,
+    capped at ``cap`` (pure — the daemon's relaunch loop and its tests share it).
+
+    ``attempt`` is 0-based (0 → ``base``, 1 → ``2*base``, …). A non-positive
+    ``attempt`` or ``base`` yields ``max(0, base)`` clamped to ``cap``."""
+    if base <= 0:
+        return 0.0
+    if attempt < 0:
+        attempt = 0
+    # Guard the shift from exploding for absurd attempt counts before the min().
+    exp = min(attempt, 30)
+    return float(min(base * (2 ** exp), cap))
+
+
+def load(path: Path) -> DaemonConfig:
+    """Load and validate ``config.json`` from ``path``.
+
+    - **Missing file** → defaults (a fresh install with no config yet is valid).
+    - **Present** → parse JSON, coerce via :meth:`DaemonConfig.from_dict`
+      (unknown keys ignored, PLAN.md 4.4), validate values (:func:`validate`),
+      and enforce 0600 perms on the file (pool/config are local user data,
+      PLAN.md 5.5). A file that is not a JSON object, or whose values are
+      out of range, raises :class:`ConfigError`.
+    """
+    path = Path(path)
+    if not path.exists():
+        return DaemonConfig()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise ConfigError(f"{path}: unreadable/invalid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: top-level JSON must be an object, got {type(raw).__name__}")
+    cfg = validate(DaemonConfig.from_dict(raw))
+    # Config carries no secrets, but the daemon tree is 0600/0700 throughout
+    # (PLAN.md 4.3); tighten a loosely-created file rather than trust its mode.
+    try:
+        os.chmod(path, _MODE)
+    except OSError:
+        pass
+    return cfg
+
+
+def save(path: Path, cfg: DaemonConfig) -> None:
+    """Write ``cfg`` to ``path`` as pretty JSON, 0600 (used by ``abs`` tooling)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _MODE)
+    try:
+        os.write(fd, (json.dumps(cfg.to_dict(), indent=2) + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+    os.chmod(path, _MODE)

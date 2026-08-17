@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# tests/harness/stub-launcher — stands in for `abs.sh --profile P --daemon-start`
+# in engine-through-daemon tests. The daemon's HANDOFF has the engine run
+# `bash <SCRIPT_PATH> --profile P --daemon-start [--away]`; this stub mimics only
+# the process shape abs.sh presents to the engine + the daemon's liveness checks:
+# it writes `$ABS_HOME/profiles/<profile>/session.pid` (as cmd_run does before
+# exec) and then stays alive until signalled. No claude, no network, no Telegram.
+#
+# It intentionally does NOT reuse abs.sh — the ONE test that exercises the real
+# abs.sh --daemon-start flag lives in test_daemon_real_launcher.py; here we only
+# need a long-lived, pid-writing process the engine can create/watch/kill.
+
+set -u
+
+profile=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) profile="${2:-}"; shift 2 ;;
+    --daemon-start) shift ;;
+    --away) shift ;;
+    *) shift ;;
+  esac
+done
+
+abs_home="${ABS_HOME:-$HOME/.abs}"
+pid_file="$abs_home/profiles/$profile/session.pid"
+sleep_pid=""
+
+cleanup() {
+  [ -n "${sleep_pid:-}" ] && kill "$sleep_pid" 2>/dev/null
+  [ -n "$pid_file" ] && rm -f "$pid_file" 2>/dev/null
+  return 0
+}
+trap 'cleanup; exit 0' TERM INT
+
+mkdir -p "$(dirname "$pid_file")" 2>/dev/null
+printf '%s\n' "$$" > "$pid_file"
+
+while :; do
+  sleep 3600 &
+  sleep_pid=$!
+  wait "$sleep_pid"
+done

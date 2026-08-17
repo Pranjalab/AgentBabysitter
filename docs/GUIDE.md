@@ -1,8 +1,34 @@
 # Agent Babysitter — full guide
 
 The [README](../README.md) covers what it is and how to start. This is the deeper
-reference: profiles, voice setup, running it while you're away, where state
-lives, limits, and troubleshooting.
+reference: profiles, voice setup, running it while you're away, the daemon,
+sandboxes, the restricted assistant, where state lives, limits, and
+troubleshooting.
+
+## When a bot says it is already in use
+
+Telegram allows **one poller per bot token**, so `abs` refuses to start a second
+session on a profile that is already being polled. What it does about it depends on
+what is actually holding the bot:
+
+| What is holding it | What `abs` does |
+| --- | --- |
+| A live Claude Code session | Refuses, naming the pid, how long it has been up, and its folder — plus `abs attach <profile>` when there is a session to attach to |
+| A poller whose session has died | **Reclaims it** and carries on. There is nothing to quit, so it does not ask you to |
+| A pid file describing a process that no longer exists | Ignores it and carries on. Pids get recycled, so a pid being alive proves nothing about *what* is alive |
+| Something it cannot attribute | Refuses, and tells you about `--reclaim` |
+
+```sh
+abs --reclaim --profile default     # take the bot back, then start
+```
+
+`--reclaim` ends the **poller**, never the session that owns it. If a live session
+really was using that bot, its Telegram bridge drops and the plugin reconnects; you
+lose a moment of relay, not your work. It says so before doing it.
+
+The process tree is what decides this, not `session.pid` — a `claude` you started
+by hand never writes one, and that is exactly the case where the old message
+("quit that session first") was least useful.
 
 ## Profiles — more than one session at once
 
@@ -30,6 +56,32 @@ with in-use profiles marked. `abs` refuses to start a session on a profile that'
 already being polled, and tells you which one — reusing a single bot across two
 *simultaneous* sessions isn't supported because Telegram won't allow it, but
 sequential reuse is fine.
+
+### The pickers
+
+Every list `abs` offers — bots, sessions to resume, projects, sandboxes, where a
+new bot should run — is one arrow-key menu:
+
+```
+❯ default — @yourbot
+  work — @yourwork_bot (in use)
+  + Add a new bot
+  ↑↓ move · enter select · 1-9 jump · q cancel
+```
+
+↑/↓ or `k`/`j` move, Enter takes it, `q` or Esc backs out — and **typing the
+number still works**, so existing muscle memory is untouched. The chosen row
+collapses to one line once you pick, so scrollback keeps the decision without the
+menu around it.
+
+Long rows are truncated to the terminal width rather than wrapped, because a
+wrapped row desyncs the cursor arithmetic and would draw the highlight somewhere
+other than the row it selects. Row widths are counted in printed *columns*, not
+characters, since an emoji or a CJK glyph costs two.
+
+Set `ABS_NO_TUI=1` to force the old numbered prompt. It also falls back on its
+own with no terminal on stderr, with `TERM=dumb`, or with no `/dev/tty` — which is
+what keeps these usable under `docker exec` without `-t`, over a pipe, and in CI.
 
 ## Voice notes
 
@@ -60,6 +112,114 @@ abs say - < story.txt             # read stdin
 
 `speak.py --exag` is an emotion dial: `0.3` flat, `0.5` natural, `0.8+` animated.
 Lower `--cfg` slows delivery, which pairs well with a high `--exag`.
+
+### Reply mode — "always answer me in voice", enforced
+
+Telling the assistant to always answer with a voice note works until the session
+gets long and the instruction drifts out of the model's attention — the failure
+mode of every standing preference kept in a prompt. `abs config reply` stores it,
+and the session hooks act on it whether the model remembers or not.
+
+It's two switches, one per channel:
+
+```sh
+abs config reply-text on|off      # text replies (default on)
+abs config reply-voice on|off     # voice-note replies (default off)
+abs config                        # shows both, and the mode they add up to
+```
+
+| text | voice | What arrives |
+| --- | --- | --- |
+| on | off | text only — the default |
+| on | on | **both**, on every finished result |
+| off | on | the voice note *is* the reply |
+| off | off | refused — see below |
+
+The three-way shorthand still works if you prefer it:
+
+```sh
+abs config reply text | both | voice
+```
+
+**Why both-off is refused.** It isn't a delivery mode, it's silence — and it's the
+one state where something you were waiting for never arrives and nothing says why.
+`abs quiet on` already means "mute the reports", it says so when you set it, and it
+lifts from either the terminal or the phone. You get pointed there instead.
+
+**Setting a voice mode also turns auto-silent off** (below), and says so when it
+does. Asking for a voice note on every result and then having a heuristic decide
+you didn't want to be told is the exact contradiction this feature exists to end.
+It's a one-time action, not a lock — `abs config auto-silent on` puts it back.
+
+`voice` intercepts at `PreToolUse`, speaks the message, and blocks the text. The
+model is *told* which mode is on — but only so it doesn't also call `abs say` and
+send the same sentence twice. Enforcement never depends on it.
+
+### Which one arrives first
+
+In mode `both`, the voice note goes out **before** the text:
+
+```sh
+abs config voice-first on|off     # default on; only means anything in mode `both`
+```
+
+`both` used to mirror from a `PostToolUse` hook — text first, note afterwards —
+and on a phone that is backwards. By the time the note plays you have read the
+message, so the audio is a duplicate of something you already know. Voice-first
+makes the note how you *receive* the answer and the text the record of it.
+
+Nothing can be reordered after the fact, so this costs a wait. The words only
+exist once the reply is written; synthesis takes about 5 seconds for a sentence
+and 13 for a long report on a mid-range CPU, and the text is held until the note
+has gone. If you would rather read immediately, `abs config voice-first off`
+restores the old order.
+
+Mechanically it is one `PreToolUse` gate and one detached worker: the gate blocks
+the reply tool's own send, and the worker speaks, then sends the same words as
+text. **That worker is the only thing that will deliver the message**, which sets
+the rule every branch in it follows — if synthesis fails, if the engine is busy,
+if the sentence was already spoken five minutes ago, the text still goes out. A
+voice note is a nicety; the message is not.
+
+**The note is the answer, not a preview.** What gets spoken is the reply's first
+paragraph, and the injected prompt asks for that paragraph to carry the whole thing —
+the outcome, what it means, and the decision as a real question — so you never have
+to open the text to know what happened. The text repeats the substance and adds what
+audio cannot carry: commands, paths, tables, links.
+
+Length is not capped by taste. The rail is 4000 characters (~90 seconds), which
+exists only because synthesis costs about a second per twenty characters and the text
+waits behind the note; `ABS_VOICE_LEAD_CHARS` moves it. Nothing in the spoken half
+defers to the written half — no "the rest is in the text", no "see below" — because a
+note that sends you off to read is a note that failed.
+
+**A long note announces itself.** Past ~400 characters, ABS sends a one-line
+"🔊 Recording a voice note (~Ns)…" first, quoting the opening words. Voice-first holds
+the text until the audio has gone, so without that line a 40-second note is 40 seconds
+of silence, which is indistinguishable from a crash. `ABS_VOICE_ANNOUNCE_CHARS` moves
+the threshold.
+
+The gate declines, leaving the old order intact, for anything it should not own: an
+attachment (the plugin does the upload), MarkdownV2 (the plugin does the escaping),
+and the two things `voice` mode also refuses to swallow — code and links, which have
+to be read rather than heard — or a message too short to be worth a note. Declining is the safe direction: the cost is a message
+in the less useful order, where the cost of wrongly accepting is a message that
+never arrives.
+
+The switch takes effect in a **new** session, because hooks are written into the
+settings file at launch.
+
+What `voice` deliberately does **not** suppress: a message carrying a code block,
+a link, or an attachment. A voice note can't carry any of those, and a blocked
+message is one you never receive. For the same reason it refuses to turn on where
+nothing can speak (`abs voice setup` first). The failure mode is always "text as
+usual", never silence.
+
+Under the hood: markdown is stripped before speaking (a URL read aloud is a minute
+of alphabet), the same sentence is never spoken twice within five minutes,
+synthesis is serialised behind a lock and detached from the hook (which has a 5s
+budget against TTS's ~30s), and the message body reaches the engine on **stdin**,
+never argv — `/proc/<pid>/cmdline` is world-readable.
 
 ### Setting up voice
 
@@ -109,15 +269,86 @@ The most likely way this disappoints you: Claude hits a permission prompt
 mid-task while you're out, and blocks. You get silence, not a report.
 
 The injected prompt tells Claude to message you when it's blocked, which covers
-most of it. If you want fewer stops:
+most of it. If you want no stops at all:
 
 ```sh
-ABS_AWAY=1 abs
+ABS_AWAY=1 abs          # or pick "Away" on the ABS START keyboard
 ```
 
-That runs with `--permission-mode acceptEdits` — file edits no longer prompt.
-Bash and other tools still ask. It's a real trade: you give up the review step on
-edits in exchange for not being blocked. Use it when you trust the task.
+That runs with `--permission-mode bypassPermissions`: **nothing prompts**. Not
+file edits, not Bash, not anything.
+
+Until 3.0.0 this was `acceptEdits`, which only auto-approved file edits — and
+since the thing that actually halts a session is a Bash approval, Away didn't
+deliver what its name promised. You'd come back to a session that had been
+waiting on a prompt for an hour.
+
+**The disclaimer, and why abs answers it for you.** Claude Code will not enter
+bypass mode on trust alone: in a terminal it shows a "1. No, exit / 2. Yes, I
+accept" dialog and waits, and non-interactively it downgrades the mode to the
+default instead. Both break Away — one hangs the session before it starts, the
+other silently takes the feature away.
+
+So an Away launch writes `skipDangerousModePermissionPrompt` into the settings
+file it already passes with `--settings`, and says so at launch. That is scoped to
+the one session: nothing is written to `~/.claude.json`, so every ordinary
+`claude` you run still asks. Choosing Away *is* the acceptance — and unlike the
+dialog, it comes with the guard below, which the dialog does not.
+
+**What stands in for the prompts.** The command guard, which in an Away session
+is not optional:
+
+- `abs config guard off` **cannot** disable it. An Away launch turns it on
+  regardless and says so.
+- It bites on **every** turn, not just Telegram-driven ones. Unattended is a
+  property of the session — attaching at the desk to type one command must not
+  disarm the remaining hours.
+- It blocks the irreversible set: `sudo`, `rm -rf`, force-push, `reset --hard`,
+  service stops, container/volume removal, machine-wide package installs,
+  publishing, writes to block devices, `shutdown`, reading `.env`. Ordinary work
+  — `npm install`, `docker stop`, a scoped `DELETE ... WHERE`, `rm` of one file —
+  runs untouched.
+
+**Be clear-eyed about it.** A blocklist is never complete. This stops the small
+set of things that cannot be undone from happening quietly while nobody is
+watching; it is not proof against a determined adversary, and it does not make
+Away safe for a task you wouldn't leave alone. Use Away when you trust the task,
+not because the guard is there.
+
+## Auto-silent — why the pings sometimes stop on their own
+
+There are two ways reports go quiet, and they behave differently.
+
+**`abs quiet on`** is the explicit one. Absolute, obvious, lifts with
+`abs quiet off` from the terminal or "unmute the reports" from the phone.
+
+**Auto-silent** is a heuristic. After three consecutive prompts typed *at the
+terminal*, ABS assumes you're at the desk watching output and holds proactive
+pings. It lifts only when you reach for your phone — a Telegram message clears it —
+deliberately **not** on idle, because reading Claude's output for a minute
+shouldn't start your phone buzzing. `abs quiet off` is the escape hatch that
+doesn't need the phone.
+
+That's a sensible default and a bad fit for one specific case: you've said *"report
+every result, as text and as voice"*, and a guess about whether you wanted to know
+overrules you. So:
+
+```sh
+abs config auto-silent off    # every finished result reports, however long you've been at the desk
+abs config auto-silent on     # back to the heuristic (the default)
+abs config auto-silent        # which is it right now
+```
+
+Setting `reply-voice on` (or `reply both`/`reply voice`) turns it off for you and
+prints that it did. `abs config` always shows the effective state, so it's never a
+hidden coupling.
+
+One honest caveat: quiet and auto-silent are **advisory**, not enforced. The prompt
+tells the session to check `abs is-quiet` before a proactive send, and the model
+complies — but nothing in a hook blocks the message the way reply mode blocks it.
+That's also why muting can feel slightly inconsistent, and it's why "always send me
+both" belongs in `reply-text`/`reply-voice`, which *are* hook-enforced, rather than
+in how you phrase a request.
 
 ## Staying alive while you're out
 
@@ -142,6 +373,168 @@ the laptop. Two things change when nobody's at that terminal:
 - **Voice output wants a GPU.** On a CPU-only VPS, `speak.py --cpu` works but is
   slow. Transcription is CPU-only by design and is fine anywhere.
 
+## The always-on daemon (v3)
+
+The `tmux` trick above keeps a session alive, but you still have to *start* it at
+the terminal. The v3 daemon removes that last tie: **`absd`** runs in the
+background and polls your idle bots, so you can start, resume, and manage sessions
+entirely from your phone.
+
+### Setup
+
+From a repo checkout (the daemon is Python and lives in the tree with its `.venv`):
+
+```sh
+abs daemon install                    # render + install the systemd user unit
+systemctl --user enable --now absd    # start now, and on every login
+sudo loginctl enable-linger $USER     # keep it running after you log out (once)
+abs daemon status                     # unit health + a per-profile dashboard
+abs doctor                            # diagnose deps, engine, config, perms
+```
+
+`install.sh` on a checkout offers all of this (and an optional pinned herdr) for
+you. The daemon needs nothing open to the network — like the rest of ABS it only
+makes outbound Telegram calls.
+
+### Starting a session from Telegram
+
+1. Register the projects you want to be able to start in (terminal-only — a
+   compromised phone can never name a path):
+
+   ```sh
+   abs project add ~/Projects/myrepo
+   abs config workspace-root ~/Projects   # root for remote "New folder" starts
+   ```
+
+2. From the phone, with no session running, send **`ABS START`** → pick a project
+   (or **▶ Resume** a recent one) → **Normal** or **Away**. The daemon launches
+   Claude Code in a persistent session and replies with `abs attach <profile>`.
+3. Walk to the desk and `abs attach <profile>` to take over; detach (tmux
+   `Ctrl-b d` / herdr `Ctrl-b q`) and it keeps running. `ABS EXIT` (or `/abs_exit`)
+   ends it, and the bot goes back to listening.
+
+Messages you send while nothing is running are **pooled** (never lost); when you
+start a session they're offered to forward as its first prompt. Each waiting
+message gets a ☐/☑ button — tick the ones you want and tap **📤 Send 2**, or tap
+**📤 Send all** without ticking anything. Typing still works too (`send 1,3`,
+`send all`, `skip`), and past eight pooled messages the buttons step aside for the
+typed form rather than turning the screen into a wall.
+
+### When the session gets stuck
+
+A remotely-started session that stops to ask a question is invisible from the
+phone: the daemon has handed the bot over, the session is waiting for a human, and
+nothing says so. When the engine can report agent status, a block that lasts more
+than `blocked_debounce_s` (default 20s) pings the chat that started it:
+
+> ⏸ myrepo is waiting for input or approval (24s).
+> Answer here, or attach at the terminal: `abs attach default`
+
+Once per block, not once per check. The debounce is there because a block you
+answer at the desk in five seconds never needed a phone ping, and because herdr
+takes a beat to recognise an approval prompt.
+
+**herdr only.** tmux has no way to tell what the program in a pane is doing, so on
+tmux this feature is silently absent rather than half-working. Configure it in
+`~/.abs/daemon/config.json`:
+
+| Key | Default | What |
+| --- | --- | --- |
+| `blocked_notify` | `true` | Ping when a session sits blocked |
+| `blocked_debounce_s` | `20` | How long it must stay blocked first |
+| `done_notify` | `false` | Also ping when a turn finishes (off — the session's own reply usually says it better) |
+
+### The engine (herdr vs tmux)
+
+Sessions run inside a session engine so they survive detach/reattach. **herdr** is
+preferred (nicer attach UI); **tmux** is the always-available fallback — everything
+works on tmux alone. Which one is used is `~/.abs/daemon/config.json`'s `engine`
+(`auto` → herdr if present, else tmux). `abs sessions` lists across both.
+
+### Kill ladder, still terminal-recoverable
+
+`ABS OFF` and `ABS BLOCK` now stop the *daemon* for that bot too — "off means off".
+Both are recoverable only at the terminal (`abs on` / `abs setup`), so a stolen
+phone can silence a bot but never quietly re-enable it.
+
+## Sandboxes
+
+A sandbox is a session with its own Ubuntu container. The project lives in one
+dedicated host folder — `~/Projects/sandboxes/<name>` (`0700`, configurable via
+`sandbox_root`) — bind-mounted at `/home/dev/workspace`. That folder is the only
+host path the container can see, so work syncs live to somewhere you can open in
+an editor while the container reaches nothing else.
+
+```sh
+abs sandbox build                          # once (again with --rebuild to update)
+abs sandbox create web --ports 3000:3000   # named box + workspace + published port
+abs start sandbox web                      # a session running INSIDE the box
+abs sandbox list
+abs sandbox stop web
+abs sandbox destroy web                    # keeps the workspace; --purge removes it
+```
+
+From Telegram, `ABS START` grows a **🏖 Sandbox…** entry that lists your boxes.
+Attach, detach, and the kill ladder all behave identically.
+
+What the container does *not* get: `--privileged`, a docker socket, or any host
+mount besides that one workspace folder — verifiable with `docker inspect`. Your
+Claude credentials are **copied in** at create time (`docker cp`), never mounted,
+so the box's login diverges from yours the moment either changes.
+
+Two honest caveats. A normal sandbox is created with your credentials inside it,
+so treat it as isolating your *filesystem*, not your Claude account — for genuinely
+untrusted work, use a restricted assistant (below), which gets no host credentials
+at all. And a sandbox session's process lives in the container's PID namespace,
+which the host can't see; the daemon therefore tracks its liveness through the
+engine pane alone.
+
+## The restricted assistant — a later release
+
+> **Not part of 3.0.0.** Complete in code and covered by unit tests, but never
+> provisioned by hand — it needs a third bot token, and that has kept it untested
+> since July. It ships dormant: nothing runs it unless you type
+> `abs restricted create`, which warns you of exactly this first. The work
+> continues on the `restricted-assistant` branch and the manual checklist is ready
+> at `docs/v3/manual-tests/restricted.md`.
+>
+> What *is* verified is the part that would matter if it broke: a `--no-creds` box
+> holds no credentials, has no `~/.claude` at all, and cannot see the host home or
+> projects — checked on 17 Aug against a throwaway box, with a control check on a
+> normal sandbox returning creds-present so the test can fail.
+
+A different kind of bot: everyday questions, web lookups, notes, arithmetic — but
+it refuses to write or run project code, and it cannot start or stop sessions.
+
+```sh
+abs restricted create assistant   # provisions a bot + a credential-free sandbox
+abs restricted login assistant    # log Claude in INSIDE the box (one time)
+abs restricted list
+abs restricted stop assistant     # pause the keep-alive and stop the box
+abs restricted destroy assistant
+```
+
+Ask it to build something and it answers, verbatim:
+
+> This is a restricted assistant — ask the operator to upgrade your profile to
+> build projects.
+
+One switch (`restricted: true`) implies four layers: **(1)** an injected system
+prompt carrying that refusal, **(2)** the Haiku model, **(3)** a dedicated sandbox,
+**(4)** `--no-creds` — no host credentials copied, so the box logs in separately.
+
+Worth being blunt about which of those are real. Layer 1 is a prompt, and prompts
+are bypassable; layer 2 is a cost choice. The actual containment is 3 and 4: a
+throwaway container holding none of your files and none of your credentials. Judge
+it on those.
+
+Unlike a normal profile, a restricted one isn't idle-polled — the daemon *keeps it
+alive*, relaunching on death with exponential backoff. After a few consecutive
+fast deaths (almost always a box that isn't logged in) it stops and DMs you once:
+"run `abs restricted login <name>`". Once you do, it comes back on its own. While
+it's down the daemon refuses `ABS START`/`ABS EXIT` from that bot — session control
+is operator-only, so a restricted bot can never launch a normal host session.
+
 ## Where things live
 
 Nothing in the repo holds state or secrets — it's all safe to fork. State lives
@@ -152,7 +545,12 @@ in `$HOME`:
 | `~/.claude/channels/telegram/.env` | Bot token (`600`) |
 | `~/.claude/channels/telegram/access.json` | Allowlist + policy (`600`) |
 | `~/.claude/channels/telegram/bot.pid` | Which process holds the poller |
-| `~/.abs/profiles/<name>/rc.json` | Chat ID, mute state, which bot dir (`600`) |
+| `~/.abs/profiles/<name>/rc.json` | Chat ID, mute state, reply mode, which bot dir (`600`) |
+| `~/.abs/profiles/<name>/pool.jsonl` | Messages received while nothing was running (`600`) |
+| `~/.abs/daemon/config.json` | Daemon settings — engine, timings, notifications (`600`) |
+| `~/.abs/daemon/status-<name>.json` | Per-profile snapshot, rewritten each poll (`600`) |
+| `~/.abs/daemon/events.jsonl` | Structured daemon event trail — **metadata only** (`600`) |
+| `~/Projects/sandboxes/<name>/` | A sandbox's workspace — the only host path its box sees (`700`) |
 
 `ABS_HOME` overrides where profiles live. Non-default profiles get their own
 plugin directory (`~/.claude/channels/telegram-<name>/`); the `default` profile

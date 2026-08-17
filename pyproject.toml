@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-babysitter"
 # Keep in sync with ABS_VERSION in abs.sh and the repo-root VERSION file.
-version = "2.6.0"
+version = "3.0.1"
 description = "Leave your desk — Claude Code keeps working and reports to your phone over Telegram."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -40,3 +40,28 @@ packages = ["agent_babysitter"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "abs.sh" = "agent_babysitter/abs.sh"
+
+# absd is the v3 always-on daemon (Python 3.11+, asyncio). It is developed in
+# this repo but is NOT yet shipped in the wheel — it has no runnable behavior
+# until Phase 1, and packaging/installer wiring lands in Step 1.8. Listing it as
+# a wheel package now would ship a dead import. Kept out of the build on purpose;
+# revisit at 1.8. Dev + tests run it straight from the source tree.
+
+# Test toolchain. Deps (pytest, pytest-asyncio, aiohttp) are installed into the
+# project-local .venv, not declared as runtime dependencies of agent-babysitter —
+# the shipped product is bash + the voice scripts, and absd is unreleased.
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "aiohttp>=3.9",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# pytest-asyncio: let async test/fixtures run without a per-test decorator.
+asyncio_mode = "auto"
+# Quiet, deterministic output; -ra summarizes skips (integration tests skip
+# cleanly when tmux/herdr/docker are absent — PLAN.md section 10).
+addopts = "-ra"

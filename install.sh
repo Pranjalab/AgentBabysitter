@@ -45,8 +45,15 @@ claude_fresh=0
 # `[ -e /dev/tty ]` is not the test: the node exists under nohup/CI/cron and
 # still fails to open for want of a controlling terminal. Try the open, and do
 # it before printing — a prompt nobody can answer is worse than no prompt.
+# ask_yes "<prompt>" [default]
+#
+# `default` is "y" when Enter should mean yes; anything else (or omitted) keeps the
+# historic behaviour where only an explicit y counts. It exists because the clone
+# prompt is written "[Y/n]" — the full install is the recommended path — and a
+# prompt that shows a capital Y while treating Enter as "no" is a lie that would
+# quietly hand people the cut-down install they did not choose.
 ask_yes() {
-  local reply=""
+  local reply="" default="${2:-n}"
   # Braces matter: `exec 3<>/dev/tty 2>/dev/null` applies redirections left to
   # right, so the failed open still prints before 2>/dev/null exists. Grouping
   # redirects the group's stderr first, which swallows it.
@@ -58,7 +65,38 @@ ask_yes() {
   # would run to completion in total silence.
   if ! read -r reply <&3; then { exec 3<&-; } 2>/dev/null; return 1; fi
   { exec 3<&-; } 2>/dev/null
-  case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+  case "$reply" in
+    [yY]|[yY][eE][sS]) return 0 ;;
+    "") case "$default" in [yY]) return 0 ;; *) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+}
+
+# Optional pinned herdr install (v3 session engine — nicer UI than tmux, but never
+# required: tmux is the always-available fallback). Pinned to the exact 0.7.5 asset
+# from docs/v3/herdr-recipes.md — a direct, checksum-verified download, NEVER a
+# `curl | sh`. Linux/x86_64 only (the pinned asset's platform); other platforms
+# fall back to tmux. Returns non-zero on any failure (caller warns, keeps going).
+install_herdr() {
+  local url="https://github.com/ogulcancelik/herdr/releases/download/v0.7.5/herdr-linux-x86_64"
+  local sha="3dc83288073e4c2d3c679a30e7be97bcca9141c6fd17dbbb9219142e95c59253"
+  local dst="$HOME/.local/bin/herdr" tmp
+  mkdir -p "$(dirname "$dst")"
+  tmp="$dst.download"
+  info "  ${c_dim}Downloading herdr 0.7.5…${c_reset}"
+  curl -fL -o "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s  %s\n' "$sha" "$tmp" | sha256sum -c - >/dev/null 2>&1 \
+      || { warn "herdr checksum mismatch — refusing to install."; rm -f "$tmp"; return 1; }
+  elif command -v shasum >/dev/null 2>&1; then
+    [ "$(shasum -a 256 "$tmp" | awk '{print $1}')" = "$sha" ] \
+      || { warn "herdr checksum mismatch — refusing to install."; rm -f "$tmp"; return 1; }
+  else
+    warn "No sha256 tool found — installing herdr without checksum verification."
+  fi
+  chmod +x "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dst" || { rm -f "$tmp"; return 1; }
+  return 0
 }
 
 if ! command -v bun >/dev/null 2>&1; then
@@ -135,13 +173,53 @@ if [ -n "$here" ] && [ -f "$here/abs.sh" ]; then
   src="$here/abs.sh"
   info "${c_dim}Installing from this checkout.${c_reset}"
 else
-  src="$(mktemp -t abs.XXXXXX.sh)"
-  trap 'rm -f "$src"' EXIT
-  info "${c_dim}Downloading abs.sh…${c_reset}"
-  curl -fsSL "$REPO/abs.sh" -o "$src" || die "Could not download $REPO/abs.sh"
-  # A truncated download that still starts with a shebang would install cleanly
-  # and then fail at the worst moment. Parse it before trusting it.
-  bash -n "$src" 2>/dev/null || die "Downloaded file isn't valid bash — aborting rather than installing it."
+  # Piped in, so there is no checkout — and a lone abs.sh cannot run v3 at all. The
+  # daemon is Python in this repo with its own venv, `abs sandbox` needs the
+  # Dockerfile, and both are gated on being a checkout further down, so the
+  # one-liner used to install a script that then had to explain what it could not
+  # do. The headline feature of 3.0.0 was unreachable by the headline install.
+  #
+  # So offer the clone. Accepting gets the daemon, the sandboxes and `git pull`
+  # updates; declining still gets exactly what it always got, which is why this is
+  # a question rather than a decision made for them.
+  clone_dir="${ABS_CLONE_DIR:-$HOME/AgentBabysitter}"
+  want_clone=0
+  if command -v git >/dev/null 2>&1; then
+    info ""
+    info "${c_bold}Full install, or just the script?${c_reset}"
+    info "${c_dim}The always-on daemon (start sessions from Telegram with nothing running),"
+    info "sandboxes, and updates by \`git pull\` all need the repository. Cloning into"
+    info "$clone_dir gets them. Declining installs the single script, which"
+    info "does everything 2.x did.${c_reset}"
+    if ask_yes "Clone the repository for the full v3 install? [Y/n]" y; then want_clone=1; fi
+  fi
+
+  if [ "$want_clone" = 1 ]; then
+    if [ -d "$clone_dir/.git" ]; then
+      info "${c_dim}Updating the existing checkout at $clone_dir…${c_reset}"
+      git -C "$clone_dir" pull --ff-only >/dev/null 2>&1 \
+        || warn "Could not fast-forward $clone_dir — installing from it as it stands."
+    else
+      [ -e "$clone_dir" ] && die "$clone_dir exists and is not a git checkout. Move it, or set ABS_CLONE_DIR."
+      info "${c_dim}Cloning into $clone_dir…${c_reset}"
+      git clone --depth 1 "${ABS_GIT_URL:-https://github.com/Pranjalab/AgentBabysitter}" "$clone_dir" >/dev/null 2>&1 \
+        || die "Clone failed. Re-run and answer 'n' for the single-script install."
+    fi
+    [ -f "$clone_dir/abs.sh" ] || die "Clone produced no abs.sh at $clone_dir — refusing to continue."
+    # From here the rest of this script cannot tell the difference between this and
+    # someone who cloned by hand, which is the point: one path, already tested.
+    here="$clone_dir"
+    src="$clone_dir/abs.sh"
+    info "${c_dim}Installing from $clone_dir.${c_reset}"
+  else
+    src="$(mktemp -t abs.XXXXXX.sh)"
+    trap 'rm -f "$src"' EXIT
+    info "${c_dim}Downloading abs.sh…${c_reset}"
+    curl -fsSL "$REPO/abs.sh" -o "$src" || die "Could not download $REPO/abs.sh"
+    # A truncated download that still starts with a shebang would install cleanly
+    # and then fail at the worst moment. Parse it before trusting it.
+    bash -n "$src" 2>/dev/null || die "Downloaded file isn't valid bash — aborting rather than installing it."
+  fi
 fi
 
 # --- install -----------------------------------------------------------------
@@ -250,6 +328,35 @@ if [ "$claude_fresh" = "1" ]; then
   info "    ${c_bold}export PATH=\"\$HOME/.local/bin:\$PATH\"${c_reset}"
   info ""
 fi
+# --- v3 always-on daemon (optional; needs the repo checkout + .venv) ---------
+# The daemon (absd) is Python and lives in the repo tree with its own .venv, so it
+# is only offered for a checkout install (not a bare `curl abs.sh`). Refreshing
+# the unit here is how existing users pick up daemon changes across releases.
+if [ -n "$here" ] && [ -d "$here/absd" ] && [ -x "$here/.venv/bin/python" ]; then
+  info ""
+  info "${c_bold}Optional — the always-on daemon (v3).${c_reset} It polls your idle bots so you"
+  info "${c_dim}can start sessions from Telegram (ABS START) even with nothing running.${c_reset}"
+  if ask_yes "Install/refresh the absd systemd unit now? [y/N]"; then
+    "$TARGET" daemon install || warn "Daemon install didn't finish — run: abs daemon install"
+    if [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ] \
+       && ! command -v herdr >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/herdr" ]; then
+      info ""
+      info "${c_dim}Optional session engine: herdr gives a nicer attach UI than tmux (tmux is${c_reset}"
+      info "${c_dim}always used if herdr is absent). Pinned 0.7.5, checksum-verified download.${c_reset}"
+      if ask_yes "Install the pinned herdr 0.7.5 session engine? [y/N]"; then
+        if install_herdr; then ok "herdr 0.7.5 installed at ~/.local/bin/herdr"; else warn "herdr not installed — tmux will be used."; fi
+      fi
+    fi
+    info ""
+    info "  ${c_bold}Daemon quickstart:${c_reset}"
+    info "    ${c_bold}systemctl --user enable --now absd${c_reset}   # start now + on login"
+    info "    ${c_bold}abs daemon status${c_reset}                    # check it"
+    info "    ${c_bold}abs doctor${c_reset}                           # full diagnosis"
+  else
+    info "  Skipped. Set it up any time with: ${c_bold}abs daemon install${c_reset}"
+  fi
+fi
+
 # --- voice (optional add-on) -------------------------------------------------
 # Local, but big (Whisper + Chatterbox, a few GB), so it's never forced — offered
 # once, here, and the actual build is handed to the abs we just installed so

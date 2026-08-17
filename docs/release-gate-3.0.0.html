@@ -1,0 +1,545 @@
+<title>ABS 3.0.0 Release Gate</title>
+<style>
+  :root {
+    --ground:      #faf9fc;
+    --surface:     #ffffff;
+    --surface-alt: #f2f0f7;
+    --ink:         #1c1a24;
+    --ink-soft:    #4a4657;
+    --dim:         #6c6878;
+    --rule:        #e2dfeb;
+    --accent:      #6d4fd0;
+    --accent-soft: #efeafc;
+    --tg:          #2b7cb0;
+    --pass:        #3f8a4a;
+    --pass-soft:   #e8f3e9;
+    --block:       #a83c39;
+    --block-soft:  #fbeceb;
+
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+
+    --step: 0.5rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #131218;
+      --surface:     #1b1a22;
+      --surface-alt: #23212c;
+      --ink:         #eae7f2;
+      --ink-soft:    #b8b3c6;
+      --dim:         #837e93;
+      --rule:        #302d3b;
+      --accent:      #af87ff;
+      --accent-soft: #262036;
+      --tg:          #5fafd7;
+      --pass:        #6fc073;
+      --pass-soft:   #1c2a1e;
+      --block:       #e0716d;
+      --block-soft:  #2e1c1c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #131218;
+    --surface:     #1b1a22;
+    --surface-alt: #23212c;
+    --ink:         #eae7f2;
+    --ink-soft:    #b8b3c6;
+    --dim:         #837e93;
+    --rule:        #302d3b;
+    --accent:      #af87ff;
+    --accent-soft: #262036;
+    --tg:          #5fafd7;
+    --pass:        #6fc073;
+    --pass-soft:   #1c2a1e;
+    --block:       #e0716d;
+    --block-soft:  #2e1c1c;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  .wrap {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: calc(var(--step) * 5) calc(var(--step) * 2.5) calc(var(--step) * 12);
+  }
+
+  /* ---- masthead ---- */
+
+  header { display: flex; flex-direction: column; gap: calc(var(--step) * 1.5); }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+
+  h1 {
+    font-family: var(--mono);
+    font-size: clamp(1.5rem, 5vw, 2rem);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .lede { color: var(--ink-soft); margin: 0; max-width: 34rem; }
+
+  /* ---- state strip ---- */
+
+  .state {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    overflow: hidden;
+    margin: calc(var(--step) * 4) 0 calc(var(--step) * 6);
+  }
+  .state div { background: var(--surface); padding: calc(var(--step) * 1.75); }
+  .state dt {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin: 0 0 0.35rem;
+  }
+  .state dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 1.15rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .state .ok  dd { color: var(--pass); }
+  .state .todo dd { color: var(--accent); }
+
+  /* ---- blocks ---- */
+
+  section { margin-bottom: calc(var(--step) * 7); }
+
+  .block-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+    padding-bottom: calc(var(--step) * 1.5);
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: calc(var(--step) * 3);
+  }
+  .block-n {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: var(--ground);
+    background: var(--ink);
+    padding: 0.15rem 0.5rem;
+    border-radius: 2px;
+    white-space: nowrap;
+  }
+  h2 {
+    font-family: var(--mono);
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0;
+    flex: 1 1 12rem;
+  }
+  .mins {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .why {
+    color: var(--ink-soft);
+    font-size: 0.94rem;
+    margin: 0 0 calc(var(--step) * 3);
+    padding-left: calc(var(--step) * 1.75);
+    border-left: 2px solid var(--rule);
+  }
+
+  /* ---- steps ---- */
+
+  ol.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+
+  li.step {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: calc(var(--step) * 1.75) calc(var(--step) * 2);
+    display: grid;
+    grid-template-columns: 1.4rem 1fr;
+    gap: 0 calc(var(--step) * 1.5);
+    align-items: start;
+  }
+  li.step.gate { border-color: var(--block); background: var(--block-soft); }
+
+  input[type="checkbox"] {
+    appearance: none;
+    width: 1.05rem; height: 1.05rem;
+    margin: 0.28rem 0 0;
+    border: 1.5px solid var(--dim);
+    border-radius: 2px;
+    background: transparent;
+    cursor: pointer;
+    display: grid;
+    place-content: center;
+    flex: none;
+  }
+  input[type="checkbox"]::after {
+    content: "";
+    width: 0.55rem; height: 0.3rem;
+    border-left: 2px solid var(--surface);
+    border-bottom: 2px solid var(--surface);
+    transform: rotate(-45deg) translate(0.5px, -1px);
+    opacity: 0;
+  }
+  input[type="checkbox"]:checked { background: var(--pass); border-color: var(--pass); }
+  input[type="checkbox"]:checked::after { opacity: 1; }
+  input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .step-body { min-width: 0; }
+  li.step:has(input:checked) .step-body { opacity: 0.45; }
+
+  .ids { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
+  .id {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    padding: 0.1rem 0.38rem;
+    border-radius: 2px;
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .id.must { background: var(--block-soft); color: var(--block); }
+
+  .do { margin: 0; font-weight: 500; }
+  .do .where {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-right: 0.4rem;
+  }
+  .where.phone { color: var(--tg); }
+  .where.desk  { color: var(--accent); }
+
+  .expect {
+    margin: 0.45rem 0 0;
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    display: flex;
+    gap: 0.45rem;
+  }
+  .expect::before {
+    content: "→";
+    color: var(--pass);
+    font-family: var(--mono);
+    flex: none;
+  }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.85em;
+    background: var(--surface-alt);
+    padding: 0.1rem 0.32rem;
+    border-radius: 2px;
+    word-break: break-word;
+  }
+  pre {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    background: var(--surface-alt);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: calc(var(--step) * 1.5);
+    margin: 0.5rem 0 0;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; }
+
+  .dot { font-size: 1.1em; line-height: 1; }
+  .dot.green { color: var(--pass); }
+  .dot.grey  { color: var(--dim); }
+
+  /* ---- notes ---- */
+
+  .note {
+    background: var(--surface-alt);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: 3px;
+    padding: calc(var(--step) * 2);
+    font-size: 0.92rem;
+    color: var(--ink-soft);
+  }
+  .note strong { color: var(--ink); }
+  .note.warn { border-left-color: var(--block); }
+
+  .done-list {
+    list-style: none; margin: 0; padding: 0;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: 0.4rem 1.25rem;
+    font-size: 0.9rem;
+  }
+  .done-list li { display: flex; gap: 0.5rem; color: var(--ink-soft); }
+  .done-list .tick { color: var(--pass); font-family: var(--mono); flex: none; }
+  .done-list .cross { color: var(--dim); font-family: var(--mono); flex: none; }
+
+  footer {
+    margin-top: calc(var(--step) * 8);
+    padding-top: calc(var(--step) * 3);
+    border-top: 1px solid var(--rule);
+    font-size: 0.86rem;
+    color: var(--dim);
+  }
+  footer p { margin: 0 0 0.6rem; }
+
+  .reset {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    background: none;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    color: var(--dim);
+    padding: 0.4rem 0.7rem;
+    cursor: pointer;
+  }
+  .reset:hover { color: var(--ink); border-color: var(--dim); }
+  .reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  /* ---- added 17 Aug: machine-verified chips, optional steps ---- */
+
+  .id.auto { background: var(--pass-soft); color: var(--pass); }
+
+  li.step.opt {
+    border-style: dashed;
+    background: transparent;
+  }
+
+  .verified {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .verified li {
+    display: grid;
+    grid-template-columns: 1.2rem 1fr;
+    gap: 0 0.6rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
+    font-size: 0.92rem;
+  }
+  .verified .tick { color: var(--pass); font-family: var(--mono); }
+  .verified b { font-family: var(--mono); font-size: 0.85em; font-weight: 600; }
+  .verified span.how { display: block; color: var(--dim); font-size: 0.86rem; }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Agent Babysitter · v3-daemon · 17 Aug 2026</p>
+    <h1>ABS 3.0.0 Release Gate</h1>
+    <p class="lede">Down to one check on the main bot. Away passed end to end, the restricted assistant is
+      deferred to its own branch, and everything else is either run by hand or held down by a test.</p>
+  </header>
+
+  <dl class="state">
+    <div class="ok"><dt>Tests green</dt><dd>833</dd></div>
+    <div class="ok"><dt>Passed by hand</dt><dd>A B C D E F</dd></div>
+    <div class="todo"><dt>Steps left</dt><dd>2</dd></div>
+    <div class="todo"><dt>Minutes</dt><dd>~2</dd></div>
+  </dl>
+
+  <p class="note"><strong>Where this stands.</strong> Away launches, answers, and runs under
+    <code>bypassPermissions</code> — you confirmed that at 11:55, and the session's own settings file on
+    your box shows the disclaimer cleared and <code>session_away</code> set, so the guard is armed for every
+    turn. <strong>E2 passed in the aborted run</strong>: that "⏸ waiting for input or approval (21s)" was
+    the blocked-ping feature firing on a genuinely unanswered prompt, which also retires Session 2. What
+    is left is the pair of refusals, the attach/detach that rides along with them, and one look at
+    voice-first, which shipped today and nothing has run.</p>
+
+
+
+  <section style="margin-top: calc(var(--step) * 6);">
+    <div class="block-head">
+      <span class="block-n">DONE</span>
+      <h2>Away is true auto-approve, confirmed by hand</h2>
+      <span class="mins">17 Aug</span>
+    </div>
+    <p class="why">All five steps passed. It launches under <code>bypassPermissions</code> and answers; a
+      real command ran with nothing prompting; <code>sudo apt install cowsay</code> was refused from the
+      phone and refused again from the terminal after attaching; <code>ABS EXIT</code> closed cleanly.
+      Attach and detach (D5/D6) rode along with the refusal step.</p>
+    <p class="note"><strong>It cost three bugs to get there</strong>, none of them findable without
+      launching or probing. Claude Code's bypass disclaimer — a modal that hung the launch, and a silent
+      downgrade to normal mode where there is no terminal to ask. A sandbox Away session that had been
+      getting the permission mode with the guard <em>not</em> forced on. And the guard itself: piping a
+      download into a shell was allowed, and only <code>id_rsa</code>/<code>id_dsa</code> were protected
+      while ed25519 has been the ssh default since 2019.</p>
+  </section>
+
+  <section>
+    <div class="block-head">
+      <span class="block-n">SESSION 2</span>
+      <h2>Voice before text</h2>
+      <span class="mins">2 min</span>
+    </div>
+    <p class="why">Shipped today, and nothing has run it. In mode <code>both</code> a hook now blocks the
+      reply tool's own send and one worker speaks the message and then sends the words — so that worker is
+      the only thing that will deliver the reply. Every failure path in it still sends the text, which is
+      the property worth checking by hand.</p>
+
+    <ol class="steps">
+      <li class="step gate">
+        <input type="checkbox" id="s2v" aria-labelledby="s2v-l">
+        <div class="step-body">
+          <div class="ids"><span class="id must">VOICE-1</span></div>
+          <p class="do" id="s2v-l"><span class="where desk">Desk</span> End this session and start a fresh
+            one on your <strong>main</strong> bot, then ask for something small from the phone</p>
+          <p class="expect">The <strong>voice note arrives first</strong>, the same words follow as text a
+            moment later. It has to be the main bot — the test profile is text-only — and it has to be a new
+            session, because hooks are written at launch.</p>
+        </div>
+      </li>
+      <li class="step">
+        <input type="checkbox" id="s2w" aria-labelledby="s2w-l">
+        <div class="step-body">
+          <div class="ids"><span class="id">VOICE-2</span></div>
+          <p class="do" id="s2w-l"><span class="where phone">Phone</span> Ask for something with a link or
+            a code block in the answer</p>
+          <p class="expect">That one arrives as text, as it always did. A voice note can't carry either, so
+            the gate declines and leaves the old order alone.</p>
+        </div>
+      </li>
+    </ol>
+
+    <p class="note" style="margin-top: 1.25rem;"><strong>The old Session 2 is retired.</strong> D4 and E1
+      passed when you started the Away session, <strong>E2 fired for real</strong> in the run that hung on
+      the disclaimer, D5/D6 now ride along with AWAY-4, and D7 is <code>ABS EXIT</code> above. E3, E5, E6
+      and E7 are covered by tests through the real poller. Nothing in it needed its own session any more.</p>
+  </section>
+
+  <section>
+    <div class="block-head">
+      <span class="block-n">DEFERRED</span>
+      <h2>The restricted assistant ships another day</h2>
+      <span class="mins">out of scope</span>
+    </div>
+    <p class="why">Your call on 17 Aug, and the right one: it needs a third @BotFather token and 25 minutes,
+      and nothing else in the release depends on it. Shipping it as a feature nobody has ever seen work
+      would be a claim we cannot make.</p>
+    <ul class="verified">
+      <li><span class="tick">&#10003;</span><div><b>Where it lives now</b>
+        <span class="how">Branch <code>restricted-assistant</code>, with the checklist ready at
+          <code>docs/v3/manual-tests/restricted.md</code> — reordered so the containment check comes
+          <em>before</em> the login, which is the only point at which it proves anything.</span></div></li>
+      <li><span class="tick">&#10003;</span><div><b>Dormant, not removed</b>
+        <span class="how">Nothing runs unless you type <code>abs restricted create</code>, which warns that
+          it is experimental first; the help entry says so too. Cutting it out means unpicking ~220
+          references across seven files to delete code that currently passes its tests — a much larger risk
+          than leaving it in place and honest about its status.</span></div></li>
+      <li><span class="tick">&#10003;</span><div><b>Containment already verified</b>
+        <span class="how">The part that would matter if it broke: no credentials, no <code>~/.claude</code>
+          at all, host home and projects invisible. Checked on a throwaway box, with a control check on a
+          normal sandbox returning creds-present so the test can fail.</span></div></li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="block-head">
+      <span class="block-n">CLOSED</span>
+      <h2>Verified here today, no operator time</h2>
+      <span class="mins">17 Aug</span>
+    </div>
+    <ul class="verified">
+      <li><span class="tick">✓</span><div><b>C1–C6</b> · the arrow-key menus, driven in a real pty
+        <span class="how">11 tests against <code>bash abs.sh</code> itself: arrows, wrap, <code>q</code>,
+          digit jump, out-of-range digit, the collapse, the <code>ABS_NO_TUI</code> fallback, no escape
+          bytes through a pipe. C4 had no coverage at all before this, and my first attempt at it was
+          vacuous — it passed with the screen-clearing removed.</span></div></li>
+      <li><span class="tick">✓</span><div><b>D8</b> · the daemon dot is green in this session
+        <span class="how">Read off the bar's actual SGR bytes (<code>38;5;71</code>), not by eye.</span></div></li>
+      <li><span class="tick">✓</span><div><b>E3 · E5 · E6 · E7</b> · the ping cases you were going to time
+        <span class="how">Three new tests through the real poller: silence while you answer at the desk, a
+          second block pinging again, and the event carrying no message text — not even the project
+          label.</span></div></li>
+      <li><span class="tick">✓</span><div><b>Containment</b> · a <code>--no-creds</code> box holds nothing of yours
+        <span class="how">No credentials file, no <code>~/.claude</code>, host home and projects invisible,
+          only <code>workspace</code> mounted. Box destroyed afterwards; the empty folder at
+          <code>~/Projects/sandboxes/credcheck</code> is mine to clean up.</span></div></li>
+      <li><span class="tick">✓</span><div><b>D9</b> · dim-versus-green logic
+        <span class="how">Unit-tested at both ends of the freshness window. Stopping your daemon to watch it
+          happen is yours if you want it; I did not stop a service I didn't start.</span></div></li>
+      <li><span class="tick">✓</span><div><b>AWAY-1 · E2 · D4 · E1</b> · the Away launch, live
+        <span class="how">Confirmed by you at 11:55 after two fixes: Claude Code's bypass disclaimer (a
+          modal that hung the launch, and a silent downgrade to normal mode where there is no terminal to
+          ask), and a sandbox Away session that had been getting the permission mode with the guard not
+          forced on. Six tests, three mutations.</span></div></li>
+      <li><span class="tick">✓</span><div><b>A · B · D1–D4 · D7 · F1–F7</b> · yesterday's run
+        <span class="how">Still standing. B6/B7 remain skipped by your decision and are recorded as
+          UNTESTED, not quietly ticked.</span></div></li>
+    </ul>
+  </section>
+
+  <footer>
+    <p><strong>Release when</strong> voice-first delivers in the right order. That is the last thing on
+      this page that has never been run by a human; everything else is either passed by hand or held down
+      by a test.</p>
+    <p>Ten bugs found during testing, three of them in code the full suite reported green — and the last
+      two only because a human finally launched the thing. Tests went 693 → 831. Nothing is pushed: <code>origin/v3-daemon</code> doesn't exist yet, and merging
+      to <code>main</code> is yours to authorise.</p>
+    <p style="margin-top:1.25rem;"><button class="reset" type="button" id="reset">Clear ticks</button></p>
+  </footer>
+
+</div>
+
+<script>
+  (function () {
+    var KEY = "abs-release-gate-3.0.0";
+    var boxes = Array.prototype.slice.call(document.querySelectorAll('input[type="checkbox"]'));
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { saved = {}; }
+
+    boxes.forEach(function (b) {
+      if (saved[b.id]) { b.checked = true; }
+      b.addEventListener("change", function () {
+        saved[b.id] = b.checked;
+        try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {}
+      });
+    });
+
+    document.getElementById("reset").addEventListener("click", function () {
+      boxes.forEach(function (b) { b.checked = false; });
+      saved = {};
+      try { localStorage.removeItem(KEY); } catch (e) {}
+    });
+  })();
+</script>

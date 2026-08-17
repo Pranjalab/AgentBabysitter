@@ -92,11 +92,27 @@ else
   info "${c_dim}No command at $TARGET (already gone).${c_reset}"
 fi
 
-# --- 2. abs state / profiles / logs ------------------------------------------
+# --- 1b. the v3 daemon unit --------------------------------------------------
+# Stop + disable + remove the systemd user unit (it points at the abs/.venv we're
+# removing). Not user data — always torn down when the command goes.
+unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/absd.service"
+if [ -f "$unit" ]; then
+  systemctl --user stop absd.service 2>/dev/null || true
+  systemctl --user disable absd.service 2>/dev/null || true
+  rm -f "$unit"
+  systemctl --user daemon-reload 2>/dev/null || true
+  ok "Removed the absd daemon unit ${c_dim}(stopped + disabled)${c_reset}"
+else
+  info "${c_dim}No absd daemon unit installed.${c_reset}"
+fi
+
+# --- 2. abs state / profiles / pools / recents / logs ------------------------
+# ~/.abs holds USER DATA (profiles, pooled messages, recents, event log) — never
+# silent-deleted; the prompt below is the only path that removes it.
 if [ "$keep_state" = 1 ]; then
   info "${c_dim}Keeping state at $ABS_HOME (--keep-state).${c_reset}"
 elif [ -d "$ABS_HOME" ]; then
-  if ask_yes "Remove abs state, profiles, local logs, and voice engines at ${c_bold}$ABS_HOME${c_reset}? [y/N]"; then
+  if ask_yes "Remove abs state — profiles, pooled messages, recents, daemon logs, voice engines — at ${c_bold}$ABS_HOME${c_reset}? [y/N]"; then
     rm -rf "$ABS_HOME"
     ok "Removed state: $ABS_HOME"
   else
