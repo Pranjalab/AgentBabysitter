@@ -25,6 +25,37 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.2.3] — 2026-08-18 — Kokoro is the voice engine everyone gets
+
+`abs voice setup` built chatterbox and never built kokoro at all — which is how
+the operator's MacBook Air came to be doing multi-minute CPU inference for every
+voice note, and why a burst of three replies wedged it.
+
+- **Setup builds Kokoro.** 82M parameters, designed for the CPU, a note in
+  seconds on a laptop. Chatterbox is torch on a GPU, and on a machine without one
+  it is not merely slow — it is slow enough for overlapping notes to pile up on
+  each other, which was the whole 3.2.1 failure.
+
+- **Chatterbox is kept, as `abs voice setup --chatterbox`.** It is not deleted,
+  because it does one thing kokoro cannot: clone a voice from a sample. Making it
+  opt-in makes it the exception it always was, instead of the thing everybody got
+  by default. A configured voice sample still selects it automatically.
+
+- **`voice_have` no longer demands `.venv-tts`.** This is the part that would have
+  broken quietly: left alone, every install built by this release would report
+  itself broken, and `build_prompt` would tell the model voice was unavailable on
+  a machine that speaks perfectly well. It is "transcription in, and EITHER engine
+  out" now. An existing chatterbox-only install still counts, so nobody's working
+  setup is invalidated by upgrading.
+
+- **`abs voice status` says which engine will actually run**, and shows chatterbox
+  as optional rather than missing. A bare ✗ next to "TTS" on a good kokoro install
+  reads as a broken install.
+
+Verified by running the real `abs voice setup` into a scratch root: Whisper and
+Kokoro built, no chatterbox, status correct, and `from kokoro import KPipeline`
+succeeds in the venv it produced.
+
 ## [3.2.2] — 2026-08-18 — the v3 install gave up on the first Python it tried
 
 Both of these came straight out of the operator's macOS install log.
