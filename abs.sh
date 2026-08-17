@@ -2014,7 +2014,35 @@ _is_destructive() {
   printf '%s' "$c" | grep -qE '(^|[;&|[:space:]])(dd|mkfs(\.[a-z0-9]+)?)[[:space:]]' && return 0
   printf '%s' "$c" | grep -qE '(chmod|chown)[[:space:]]+(-[a-zA-Z]*R|--recursive)' && return 0
   # reading a secret file out (exfil), or piping it somewhere.
-  printf '%s' "$c" | grep -qE '(cat|less|more|head|tail|cp|mv|scp|rsync|curl|wget|base64)[[:space:]][^|]*(\.env([[:space:]./]|$)|credentials\.json|\.pem([[:space:]./]|$)|id_[dr]sa([[:space:]./]|$))' && return 0
+  #
+  # The key names are spelled out because `id_[dr]sa` missed every key generated
+  # this decade: ed25519 has been ssh-keygen's default since 2019, so the pattern
+  # covered the format nobody uses and not the one everybody does. `.ssh` itself is
+  # here so `tar czf - ~/.ssh | curl` is caught too, and tar/zip/gpg are in the
+  # command list for the same reason — the cost is that reading `~/.ssh/config`
+  # unattended is refused, which is a fair trade for the archive case.
+  # A `.pub` is the half of a keypair that exists to be handed out, and
+  # `id_ed25519.pub` matches every private-key pattern below. Dropping those tokens
+  # first is clearer than trying to express "not followed by .pub" in an ERE, and it
+  # keeps `cat ~/.ssh/id_ed25519` blocked while `cat ~/.ssh/id_ed25519.pub` is not.
+  local scrubbed
+  scrubbed="$(printf '%s' "$c" | sed -E 's#[^[:space:]]*\.pub([[:space:]]|$)# #g')"
+  printf '%s' "$scrubbed" | grep -qE '(cat|less|more|head|tail|cp|mv|scp|rsync|curl|wget|base64|tar|zip|gpg)[[:space:]][^|]*(\.env([[:space:]./]|$)|credentials\.json|\.pem([[:space:]./]|$)|id_(rsa|dsa|ecdsa|ed25519)([[:space:]./]|$)|\.ssh([[:space:]/]|$)|\.aws/credentials)' && return 0
+
+  # Fetching code off the network and running it. This is the shape a prompt
+  # injection takes when it wants arbitrary execution: nothing in the blocklist
+  # describes what the downloaded script does, so the download-and-run itself is
+  # the thing to refuse.
+  #
+  # It is also, awkwardly, how ABS installs itself — `curl … | bash` is a normal
+  # idiom, and blocking it means an unattended session cannot install anything the
+  # official way. That is the right side to err on: at the desk, in a normal
+  # session, Claude would have asked first anyway, and here nobody is watching.
+  #
+  # `wget … -O x && bash x` in two steps is NOT caught, and cannot be by pattern
+  # matching — a blocklist stops the obvious shape, not a determined author.
+  printf '%s' "$c" | grep -qE '(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(bash|sh|zsh|ksh|dash|python3?|perl|ruby|node)([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE '(^|[;&|`(][[:space:]]*)(bash|sh|zsh|python3?|perl|ruby|node)[[:space:]]+<\(' && return 0
 
   # ---- added when Away became true auto-approve --------------------------
   # Everything below was previously left to Claude's permission prompt. With
