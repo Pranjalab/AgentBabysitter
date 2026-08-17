@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.0.2"
+readonly ABS_VERSION="3.0.3"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1161,20 +1161,15 @@ Send \"abs quiet\" to mute reports, \"abs status\" to check state." \
 
 # --- system prompt -----------------------------------------------------------
 
-build_prompt() {
-  local cid="$1"
-  local VROOT; VROOT="$(voice_root)"
-
-  # The VOICE section is only truthful when the venvs actually exist. On a fresh
-  # install they don't (voice is an opt-in add-on), and asserting a working
-  # pipeline there is what made the agent walk into dead paths and refuse to work
-  # around them. So swap in an honest "not set up" block when it isn't built.
-  # Reply mode is enforced by the hooks whatever the model believes, so this
-  # paragraph exists for one reason only: to stop the model ALSO calling `abs say`
-  # and sending the same sentence twice.
-  local reply_mode_section=""
-  case "$(reply_mode)" in
-    both) reply_mode_section="$(cat <<'REPLYBOTH'
+# The three prompt blocks below live in their own functions instead of being
+# inlined as `$(cat <<TAG ... TAG)`. bash 3.2 — still /bin/bash on macOS — finds
+# the closing paren of `$( )` with a scanner that has no idea here-documents
+# exist, so it lexes the prose body as if it were shell code. One apostrophe, a
+# stray `)`, an odd quote or a backtick in the text silently moves where the
+# substitution ends. Holding the here-doc at function level removes the hazard
+# outright: the substitution then contains nothing but a function name.
+_prompt_reply_both() {
+  cat <<'REPLYBOTH'
 Reply mode is 'both' (abs config reply). Every `reply` you send is delivered as a
 voice note FIRST and then as the same text, automatically, from a hook. You do not
 have to remember it and you must NOT run `abs say` for a reply as well, or they get
@@ -1214,20 +1209,10 @@ You do not have to announce the voice note. ABS sends a "🔊 Recording a voice
 note…" line itself when synthesis will take a moment, so saying it too would double
 up.
 REPLYBOTH
-)" ;;
-    voice) reply_mode_section="
-Reply mode is 'voice' (abs config reply). ABS speaks every \`reply\` you send and
-suppresses the text. The tool will come back as BLOCKED with a note saying it was
-delivered as audio — that is success, not failure: do not resend, do not fall back
-to another channel, and do not run \`abs say\` yourself. Messages carrying a code
-block, a link, or an attachment are let through as text instead, because a voice
-note cannot carry them; put anything they need to copy or tap in one of those.
-" ;;
-  esac
+}
 
-  local voice_section
-  if voice_have; then
-    voice_section="$(cat <<VOICEON
+_prompt_voice_on() {
+  cat <<VOICEON
 This project has a working voice pipeline in both directions. Use it. The engine
 is installed locally in its own venv — there is no TTS binary on PATH, so don't
 go hunting for one.
@@ -1255,9 +1240,10 @@ You cannot hear what you generated. If it matters, run the output back through
 transcribe.py and confirm the words survived — that catches truncation and
 garbling. On tone you are guessing; say so rather than claiming it sounds good.
 VOICEON
-)"
-  else
-    voice_section="$(cat <<VOICEOFF
+}
+
+_prompt_voice_off() {
+  cat <<VOICEOFF
 Voice is an optional add-on and is NOT set up on this machine. Do not run
 speak.py, transcribe.py, or \`abs say\` — the venvs don't exist yet and every one
 of them will just fail.
@@ -1272,7 +1258,37 @@ command builds it (a few minutes, downloads the models). Do not try to fake a
 voice reply by attaching audio through \`reply\` — it lands as a file, not a
 playable voice note.
 VOICEOFF
-)"
+}
+
+build_prompt() {
+  local cid="$1"
+  local VROOT; VROOT="$(voice_root)"
+
+  # The VOICE section is only truthful when the venvs actually exist. On a fresh
+  # install they don't (voice is an opt-in add-on), and asserting a working
+  # pipeline there is what made the agent walk into dead paths and refuse to work
+  # around them. So swap in an honest "not set up" block when it isn't built.
+  # Reply mode is enforced by the hooks whatever the model believes, so this
+  # paragraph exists for one reason only: to stop the model ALSO calling `abs say`
+  # and sending the same sentence twice.
+  local reply_mode_section=""
+  case "$(reply_mode)" in
+    both) reply_mode_section="$(_prompt_reply_both)" ;;
+    voice) reply_mode_section="
+Reply mode is 'voice' (abs config reply). ABS speaks every \`reply\` you send and
+suppresses the text. The tool will come back as BLOCKED with a note saying it was
+delivered as audio — that is success, not failure: do not resend, do not fall back
+to another channel, and do not run \`abs say\` yourself. Messages carrying a code
+block, a link, or an attachment are let through as text instead, because a voice
+note cannot carry them; put anything they need to copy or tap in one of those.
+" ;;
+  esac
+
+  local voice_section
+  if voice_have; then
+    voice_section="$(_prompt_voice_on)"
+  else
+    voice_section="$(_prompt_voice_off)"
   fi
 
   cat <<EOF
