@@ -25,7 +25,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
-## [3.0.0] — 2026-08-10 — v3: the always-on daemon
+## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
 - **An Away session gets past Claude Code's bypass disclaimer instead of hanging
   on it.** `bypassPermissions` is not granted on trust: in a terminal Claude Code
