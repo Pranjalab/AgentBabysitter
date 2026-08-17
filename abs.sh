@@ -2969,7 +2969,20 @@ update_cache_file() { printf '%s/update.json' "$ABS_DIR"; }
 _fetch_latest() {
   local url v tmp
   url="${ABS_VERSION_URL:-https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/VERSION}"
-  v="$(curl -fsSL --connect-timeout 2 --max-time 3 "$url" 2>/dev/null | tr -d '[:space:]')"
+  # `|| true` is what makes the "always returns 0" above actually true, and the
+  # trailing `return 0` is not enough on its own. Under `set -e`, a failing
+  # command inside `$( … )` kills the substitution subshell THERE — the rest of
+  # this function, `return 0` included, never runs, and the caller's assignment
+  # inherits curl's status. With `pipefail` the pipeline reports curl's exit even
+  # though `tr` succeeded.
+  #
+  # Which is not hypothetical: curl exits 28 on a timeout, so an unreachable or
+  # slow raw.githubusercontent.com — an offline laptop, hotel wifi, a firewall, a
+  # GitHub blip — took the ERR trap through three frames and then killed `abs`
+  # itself. Four "Unexpected failure" lines and no session, for a version check
+  # that is meant to be entirely optional. Same shape as the corrupt-rc.json bug
+  # in `state_get`: the value is read as "$(…)" and nobody checks the status.
+  v="$(curl -fsSL --connect-timeout 2 --max-time 3 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
   case "$v" in ''|*[!0-9.]*) return 0 ;; esac   # nothing valid → caller sees empty
   if [ -d "$ABS_DIR" ] && tmp="$(mktemp "$ABS_DIR/update.XXXXXX" 2>/dev/null)"; then
     jq -n --arg v "$v" --argjson t "$(date +%s)" '{latest:$v, checked_at:$t}' > "$tmp" 2>/dev/null \

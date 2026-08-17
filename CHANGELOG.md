@@ -27,6 +27,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
+- **A slow network no longer stops `abs` from starting.** The launch-time version
+  check exits 28 when `raw.githubusercontent.com` cannot be reached in three
+  seconds. `pipefail` reported that status even though `tr` had succeeded, and
+  `set -e` killed the command substitution *before* `_fetch_latest`'s own
+  `return 0` — so the "always returns 0" contract its comment promised was never
+  actually kept, and curl's exit propagated up three frames into the ERR trap and
+  took `abs` with it. Four "Unexpected failure" lines and no session, because an
+  optional version check could not reach GitHub. An offline laptop, hotel wifi, a
+  corporate firewall or a GitHub blip was enough.
+  Same shape as the corrupt-`rc.json` bug in `state_get`: a value read as `"$(…)"`
+  where no caller checks the status. Fixed the same way, with the reasoning in a
+  comment so the next person does not "simplify" it away.
+  Found by the operator mid-release, on the first launch after the network went
+  slow. There were no tests for the update check at all; there are eight now,
+  including one that drives a real launch — the first version of that test used
+  `--daemon-start`, which skips the update check entirely, and mutation testing is
+  the only reason that was caught rather than shipped as coverage.
+
 - **An Away session gets past Claude Code's bypass disclaimer instead of hanging
   on it.** `bypassPermissions` is not granted on trust: in a terminal Claude Code
   shows a "1. No, exit / 2. Yes, I accept" modal and waits, and non-interactively
