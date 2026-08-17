@@ -1390,17 +1390,27 @@ HOW TO WRITE IT
 - Nothing that must be copied — a command, a path, a URL — belongs only in the
   summary half. Repeat it in the detail, because audio cannot be copied.
 
-USAGE FOOTER
-When you send a proactive task-done report (not on every message, just the
-completion pings), end it with a thin usage line on its own line. Get it by
-running:
+HOW A REPORT ENDS
+Two lines, in this order, on a task-done report — not on replies or mid-task notes.
+
+First, WHAT IS LEFT. Three or four items at most, shortest form that is still
+true, and each one has an owner: yours or theirs. If a decision of theirs is
+blocking something, that is the first line. If nothing is left, say that instead —
+"nothing outstanding" is information, and a missing list reads as forgetting.
+
+    Left: · push to main (yours) · installer clone support (mine, ~1h)
+          · PyPI decision (yours)
+
+Then the numbers, on their own line:
 
     bash "${SCRIPT_PATH}" --profile ${PROFILE} usage-glance
 
-It reads a local cache and returns instantly (no tokens), e.g. "📊 5h 3% · wk 7%"
-— append that verbatim. If it prints nothing (cache not warm yet), just skip the
-footer. Don't run it for replies or mid-task messages, only for the report that
-hands control back.
+It reads a local cache and returns instantly, no tokens, e.g.
+"📊 Ctx 68% left · Week 37% (resets on Wed) · 5H 24% (resets in 3h 46m)". Append it
+verbatim. Ctx is how much of THIS conversation's context window is left, which is
+the one that decides whether a long task can finish in this session — if it is
+getting low, say so in words as well, because that is a fact they can act on.
+Skip the line if it prints nothing (the cache is not warm yet).
 
 COMMAND MENU
 The chat's "/" menu offers exactly one command: /usage. Take that literally —
@@ -1663,9 +1673,68 @@ claude_display_name() {
 # Usage percentages are threshold-coloured (green→amber→coral→brick). Muted 256-
 # colour tones throughout — high-contrast colours read badly in a status bar.
 # Real ESC bytes are emitted (printf '%s'), so the colour survives to Claude Code.
+# Claude Code pipes a JSON payload to the statusline command on every render, and
+# it carries exactly the numbers ABS was paying `claude -p "/usage"` to discover:
+#
+#   context_window: { used_percentage, remaining_percentage, context_window_size, … }
+#   rate_limits:    { five_hour: {used_percentage, resets_at}, seven_day: {…} }
+#
+# So the bar stops being only a consumer of the usage cache and becomes its best
+# source: free, exact, and refreshed on every render, instead of a 90-second
+# subprocess poll every few minutes. Context remaining is not available any other
+# way at all — there is no CLI that reports it.
+#
+# Reading it is guarded three ways, because a status bar that blocks freezes the
+# operator's terminal: skipped entirely when stdin is a terminal (someone typed
+# `abs statusline` by hand), bounded by a one-second timeout, and every field
+# treated as absent unless it parses as a number.
+_statusline_absorb() {
+  local payload="$1" ctx_left five week five_at week_at tmp
+  [ -n "$payload" ] || return 0
+  printf '%s' "$payload" | grep -q 'context_window\|rate_limits' || return 0
+
+  ctx_left="$(printf '%s' "$payload" | jq -r '(.context_window.remaining_percentage // empty) | floor' 2>/dev/null || true)"
+  five="$(printf '%s' "$payload" | jq -r '(.rate_limits.five_hour.used_percentage // empty) | floor' 2>/dev/null || true)"
+  week="$(printf '%s' "$payload" | jq -r '(.rate_limits.seven_day.used_percentage // empty) | floor' 2>/dev/null || true)"
+  five_at="$(printf '%s' "$payload" | jq -r '.rate_limits.five_hour.resets_at // empty' 2>/dev/null || true)"
+  week_at="$(printf '%s' "$payload" | jq -r '.rate_limits.seven_day.resets_at // empty' 2>/dev/null || true)"
+  case "$ctx_left" in ''|*[!0-9]*) ctx_left="" ;; esac
+  case "$five" in ''|*[!0-9]*) five="" ;; esac
+  case "$week" in ''|*[!0-9]*) week="" ;; esac
+  { [ -n "$ctx_left" ] || [ -n "$five" ] || [ -n "$week" ]; } || return 0
+
+  # Merged into the existing cache rather than a new file, so `usage-glance`, the
+  # bar and the Telegram footer all keep reading one place — and the freshness
+  # stamp moving here is what stops the expensive background poll from firing.
+  [ -d "$ABS_DIR" ] || return 0
+  tmp="$(mktemp "$ABS_DIR/usage.XXXXXX" 2>/dev/null)" || return 0
+  jq -n --argjson prev "$(cat "$(usage_cache_file)" 2>/dev/null || printf '{}')" \
+        --arg c "$ctx_left" --arg s "$five" --arg w "$week" \
+        --arg sr "$five_at" --arg wr "$week_at" --argjson t "$(date +%s)" '
+      $prev
+      + (if $c  != "" then {ctx_left_pct: ($c|tonumber)} else {} end)
+      + (if $s  != "" then {session_pct: ($s|tonumber)} else {} end)
+      + (if $w  != "" then {week_pct: ($w|tonumber)} else {} end)
+      + (if $sr != "" then {session_reset: $sr} else {} end)
+      + (if $wr != "" then {week_reset: $wr} else {} end)
+      + {fetched_at: $t, source: "statusline"}' > "$tmp" 2>/dev/null \
+    && chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$(usage_cache_file)" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+  return 0
+}
+
 cmd_statusline() {
   local off=$'\033[0m' dim=$'\033[38;5;244m'
   local c_abs=$'\033[38;5;141m' c_tg=$'\033[38;5;74m' c_on=$'\033[38;5;71m'
+
+  # Absorb the render payload before anything else, so the segments below can use
+  # what it carried. Never fatal: a bar that errors is worse than a bar missing a
+  # number, and this whole block is optional information.
+  if [ ! -t 0 ]; then
+    local _sl_payload=""
+    _sl_payload="$(with_timeout 1 cat 2>/dev/null || true)"
+    _statusline_absorb "$_sl_payload" 2>/dev/null || true
+  fi
   # No state file: nothing to read a label out of, so the built-in name it is.
   [ -f "$ABS_STATE" ] || { printf '%s:%s' "$BAR_LABEL_DEFAULT" "$PROFILE"; return 0; }
   local bot label name; name="$(bar_label)"
@@ -3421,16 +3490,17 @@ _glance_seg() {   # <color?> <label+pct> <pct> <paren-or-empty>
 usage_glance_str() {
   local color=0
   [ "${1:-}" = color ] && color=1
-  local f s="" w="" fb="" sr="" wr="" stamp=0 interval line
+  local f s="" w="" fb="" sr="" wr="" stamp=0 interval line ctx=""
   f="$(usage_cache_file)"
   if [ -f "$f" ]; then
-    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.session_reset//""),(.week_reset//""),(.fetched_at//0)]|@tsv' "$f" 2>/dev/null)"
+    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.session_reset//""),(.week_reset//""),(.fetched_at//0),(.ctx_left_pct//"")]|@tsv' "$f" 2>/dev/null)"
     s="$(printf '%s' "$line" | cut -f1)"
     w="$(printf '%s' "$line" | cut -f2)"
     fb="$(printf '%s' "$line" | cut -f3)"
     sr="$(printf '%s' "$line" | cut -f4)"
     wr="$(printf '%s' "$line" | cut -f5)"
     stamp="$(printf '%s' "$line" | cut -f6)"
+    ctx="$(printf '%s' "$line" | cut -f7)"
   fi
   interval="$(state_get '.usage_refresh')"
   case "$interval" in ''|null|*[!0-9]*) interval="$USAGE_REFRESH_DEFAULT" ;; esac
@@ -3442,6 +3512,7 @@ usage_glance_str() {
   case "$s" in ''|*[!0-9]*) s="" ;; esac
   case "$w" in ''|*[!0-9]*) w="" ;; esac
   case "$fb" in ''|*[!0-9]*) fb="" ;; esac
+  case "$ctx" in ''|*[!0-9]*) ctx="" ;; esac
   # Order: Fable · Week · 5-hour. Each limit carries its own reset in parens — the
   # weekly one as a weekday (resets on Tue), the 5-hour one as a countdown
   # (resets in 2h 23m). Both are best-effort: on macOS without GNU date the note
@@ -3451,7 +3522,13 @@ usage_glance_str() {
   [ -n "$wr" ] && wday="$(reset_weekday "$wr")"
   local off=$'\033[0m' dim=$'\033[38;5;244m' sep=" · "
   [ "$color" = 1 ] && sep="${dim} · ${off}"
-  [ -n "$fb" ] && out="$(_glance_seg "$color" "Fable ${fb}%" "$fb" "")"
+  if [ -n "$ctx" ]; then
+    out="$(_glance_seg "$color" "Ctx ${ctx}% left" "$((100 - ctx))" "")"
+  fi
+  if [ -n "$fb" ]; then
+    local fseg; fseg="$(_glance_seg "$color" "Fable ${fb}%" "$fb" "")"
+    [ -n "$out" ] && out="${out}${sep}${fseg}" || out="$fseg"
+  fi
   if [ -n "$w" ]; then
     local wp=""; [ -n "$wday" ] && wp="(resets on ${wday})"
     local wseg; wseg="$(_glance_seg "$color" "Week ${w}%" "$w" "$wp")"

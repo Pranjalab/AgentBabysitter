@@ -27,6 +27,36 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
+- **The status bar reads Claude Code's render payload, so it can show what is left
+  of the context window.** Claude Code pipes JSON to the statusline command on every
+  render, and it carries `context_window` (used and remaining percentage, window
+  size) plus `rate_limits` (five-hour and seven-day utilisation with reset times).
+  ABS had been paying a 90-second `claude -p "/usage"` subprocess to discover the
+  second of those every few minutes, and had no way at all to get the first.
+  The bar now absorbs the payload into the same usage cache everything else already
+  reads, so `● Ctx 68% left` appears on the bar, the Telegram report footer carries
+  it, and the expensive poll stops firing while a session is rendering. Context
+  remaining is the number that decides whether a long task can finish in this
+  session, which is why it was asked for.
+  Guarded three ways, because a status bar that blocks freezes the terminal: skipped
+  when stdin is a terminal, bounded by a one-second timeout, and every field dropped
+  unless it parses as a plain number.
+
+- **`curl … | bash` can install the whole thing now.** It installed one file, and one
+  file cannot run v3: the daemon is Python in this repository with its own venv and
+  sandboxes need the Dockerfile, both gated on being a checkout. The headline install
+  could not reach the headline feature — it delivered a script that then had to
+  explain what it was unable to do.
+  It now offers to clone (default yes, `ABS_CLONE_DIR` to choose where) and continues
+  down the checkout path that was already tested; declining installs exactly what it
+  always did, which is the fallback for machines without git and for every
+  non-interactive install. Fixing this exposed that `ask_yes` had no notion of a
+  default, so a prompt written `[Y/n]` would have treated Enter as "no" and quietly
+  handed people the cut-down install.
+  The PyPI instructions are gone from the README. The package was two major versions
+  behind, and `abs` already tells you when a new version exists and offers to update
+  itself — one upgrade path, and it works for both kinds of install.
+
 - **`abs send "text"` — an outbound path that does not depend on the plugin.** The
   operator finished a session waiting for a report that never arrived: the Telegram
   plugin's MCP server had dropped, the `reply` tool went with it, and the session

@@ -107,7 +107,11 @@ def bar(tmp_path):
             when = time.time() - age_s
             os.utime(f, (when, when))
 
-        def render(self, **extra):
+        def render(self, stdin=None, **extra):
+            """`stdin` is the render payload Claude Code pipes in; everything else is
+            an environment override. They are separate arguments because the bar now
+            *reads* stdin, and a payload smuggled in as an env var would silently do
+            nothing."""
             env = dict(os.environ, ABS_HOME=str(home))
             for k in ("TELEGRAM_STATE_DIR", "ABS_SESSION_PROFILE"):
                 env.pop(k, None)
@@ -115,6 +119,7 @@ def bar(tmp_path):
             out = subprocess.run(
                 ["bash", str(lone / "abs"), "--profile", PROFILE, "statusline"],
                 capture_output=True, text=True, env=env,
+                input="" if stdin is None else stdin,
             )
             assert out.returncode == 0, out.stderr
             return out.stdout
@@ -334,3 +339,92 @@ def test_a_label_of_only_unusable_characters_falls_back(bar):
 def test_the_label_shows_when_the_profile_has_no_bot_yet(bar):
     bar.rc(bar_label="Pran", bot=None)
     assert "Pran:" + PROFILE in _plain(bar.render())
+
+
+# ---- what the render payload carries -----------------------------------------
+#
+# Claude Code pipes JSON to the statusline command on every render, and it contains
+# the numbers ABS was paying a 90-second `claude -p "/usage"` subprocess to discover
+# — plus one it could not get any other way at all:
+#
+#   context_window: { used_percentage, remaining_percentage, context_window_size }
+#   rate_limits:    { five_hour: {used_percentage, resets_at}, seven_day: {…} }
+#
+# So the bar becomes the source of the usage cache rather than only its consumer.
+# Context remaining is the number the operator asked for: it decides whether a long
+# task can finish in this session, and no CLI reports it.
+
+PAYLOAD = {
+    "context_window": {
+        "used_percentage": 31.7,
+        "remaining_percentage": 68.3,
+        "context_window_size": 200000,
+    },
+    "rate_limits": {
+        "five_hour": {"used_percentage": 24.4, "resets_at": "2026-08-17T21:00:00Z"},
+        "seven_day": {"used_percentage": 37.9, "resets_at": "2026-08-19T12:00:00Z"},
+    },
+}
+
+
+def _render_with(bar, payload):
+    return bar.render(stdin=json.dumps(payload) if payload is not None else "")
+
+
+
+
+
+def test_the_bar_shows_how_much_context_is_left(bar):
+    bar.rc()
+    out = _render_with(bar, PAYLOAD)
+    assert "Ctx 68% left" in out, out
+
+
+def test_the_payload_fills_the_usage_cache(bar):
+    """The point of absorbing it: `usage-glance`, the Telegram footer and the bar all
+    read one cache, so writing it here makes every surface accurate for free."""
+    bar.rc()
+    _render_with(bar, PAYLOAD)
+    cache = json.loads((bar.home / "profiles" / PROFILE / "usage.json").read_text())
+    assert cache["ctx_left_pct"] == 68
+    assert cache["session_pct"] == 24
+    assert cache["week_pct"] == 37
+    assert cache["source"] == "statusline"
+
+
+def test_a_render_with_no_payload_still_draws_the_bar(bar):
+    """Every other caller — `abs statusline` by hand, an older Claude Code, a probe —
+    sends nothing. A bar that needs the payload would be a bar that breaks."""
+    bar.rc()
+    out = _render_with(bar, None)
+    assert "Text" in out and "Voice" in out
+    assert "Ctx" not in out
+
+
+def test_junk_on_stdin_is_ignored_rather_than_rendered(bar):
+    bar.rc()
+    out = bar.render(stdin="not json at all {{{")
+    assert "Text" in out, out
+    assert "Ctx" not in out
+
+
+def test_a_payload_without_context_does_not_invent_one(bar):
+    bar.rc()
+    out = _render_with(bar, {"rate_limits": {"five_hour": {"used_percentage": 12.0}}})
+    assert "Ctx" not in out
+    assert "5H 12%" in out, out
+
+
+def test_a_nonsensical_context_number_is_dropped_not_drawn(bar):
+    """`jq`'s floor guarantees a number, not a *sane* one, and "Ctx -5% left" in the
+    bar reads as a bug in Claude Code rather than in the payload.
+
+    There are two digits-only guards on this path — one where the payload is written
+    to the cache, one where the cache is rendered — and this test fails only when
+    BOTH are removed. That is real defence in depth rather than an untested guard, and
+    worth stating precisely: mutating either one alone leaves the suite green, so
+    nobody should read this test as pinning a particular line."""
+    bar.rc()
+    out = _render_with(bar, {"context_window": {"remaining_percentage": -5}})
+    assert "Ctx" not in out, out
+    assert "Text" in out          # and the rest of the bar is unharmed

@@ -52,23 +52,30 @@ curl -fsSL https://agentbabysitter.com/install.sh | bash
 abs
 ```
 
-It installs a single script to `~/.local/bin/abs` and touches nothing else. Piping
-to `bash` is your call to make — [read it first](https://agentbabysitter.com/install.sh)
-if you'd rather.
+It asks one question — whether to clone the repository — and the answer decides what
+you get:
 
-Prefer Python packaging?
+| | `abs` on your PATH | Daemon, `ABS START` from the phone, sandboxes | Updates by |
+| --- | --- | --- | --- |
+| **Yes** (default) | ✅ | ✅ | `git pull` |
+| No | ✅ | ❌ | re-running the installer |
 
-```sh
-pipx install agent-babysitter     # or: pip install agent-babysitter
-```
+The daemon is Python that lives in the repository with its own venv, and sandboxes
+need the Dockerfile, so they genuinely cannot ship as one file. Say yes unless you
+only want the 2.x feature set.
 
-From source, or to contribute:
+Piping to `bash` is your call to make — [read it first](https://agentbabysitter.com/install.sh)
+if you'd rather. Or clone it yourself and run the same script:
 
 ```sh
 git clone https://github.com/Pranjalab/AgentBabysitter
 cd AgentBabysitter
 ./install.sh
 ```
+
+**Already have it?** `abs` tells you when a new version is out and offers to update
+itself on the spot — that is the whole upgrade path, and it works for both kinds of
+install.
 
 **About two minutes, once per bot:**
 
