@@ -201,3 +201,89 @@ def test_auto_does_not_read_the_rest_of_claude_json(home, tmp_path):
     assert "SECRET" not in json.dumps(
         json.loads((home / "profiles" / PROFILE / "rc.json").read_text())
     )
+
+
+# ---- the default, since 3.0.3 ------------------------------------------------
+#
+# "abs" told you nothing except that abs was running. The bar now says who you
+# are, taken from the Claude account — but resolved ONCE at session launch and
+# stored, never at render time. ~/.claude.json is a large file that also holds
+# account tokens, and bar_label runs on every frame Claude Code draws.
+
+
+def seed(home, fake_home=None):
+    """Run just the seeding step, the way cmd_run does at launch."""
+    body = "".join(l for l in open(ABS_SH) if l.strip() != 'main "$@"')
+    script = home.parent / "seed.sh"
+    script.write_text(f"{body}\nuse_profile {PROFILE}\nbar_label_seed\nbar_label\n")
+    env = dict(os.environ, ABS_HOME=str(home))
+    for k in ("TELEGRAM_STATE_DIR", "ABS_SESSION_PROFILE"):
+        env.pop(k, None)
+    if fake_home is not None:
+        env["HOME"] = str(fake_home)
+    return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+
+
+def test_launching_seeds_the_label_from_the_claude_account(home, tmp_path):
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    out = seed(home, fake_home=fake)
+    assert out.returncode == 0, out.stderr
+    assert stored(home) == "Pran"
+    assert out.stdout == "Pran"
+
+
+def test_seeding_never_overwrites_a_label_you_chose(home, tmp_path):
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    run(home, "config", "label", "boxA")
+    seed(home, fake_home=fake)
+    assert stored(home) == "boxA"
+
+
+def test_seeding_happens_once_so_clearing_stays_cleared(home, tmp_path):
+    """The trap the reply-mode default fell into as well: if `--clear` only
+    removed the value, the next launch would put the account name straight back
+    and clearing would look broken."""
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    seed(home, fake_home=fake)
+    assert stored(home) == "Pran"
+    out = run(home, "config", "label", "--clear")
+    assert out.returncode == 0, out.stderr
+    assert stored(home) is None
+    seed(home, fake_home=fake)
+    assert stored(home) is None, "cleared means cleared"
+    assert seed(home, fake_home=fake).stdout == "abs"
+
+
+def test_an_account_with_no_display_name_falls_back_to_abs(home, tmp_path):
+    fake = tmp_path / "emptyhome"
+    fake.mkdir()
+    out = seed(home, fake_home=fake)
+    assert out.returncode == 0, out.stderr
+    assert stored(home) is None
+    assert out.stdout == "abs"
+
+
+def test_an_unusable_display_name_falls_back_rather_than_storing_nothing(home, tmp_path):
+    """A name that sanitises to nothing — an emoji handle, say — must not be
+    stored as an empty label, which would render as a bare colon."""
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="🎧🎧🎧")
+    out = seed(home, fake_home=fake)
+    assert out.returncode == 0, out.stderr
+    assert stored(home) is None
+    assert out.stdout == "abs"
+
+
+def test_seeding_does_not_leak_the_rest_of_claude_json(home, tmp_path):
+    fake = tmp_path / "fakehome"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / ".claude.json").write_text(json.dumps({
+        "oauthAccount": {"displayName": "Pran", "accessToken": "sk-ant-SECRETVALUE"},
+        "primaryApiKey": "sk-ant-ANOTHERSECRET",
+    }))
+    out = seed(home, fake_home=fake)
+    assert "SECRET" not in out.stdout + out.stderr
+    assert json.dumps(json.loads((home / "profiles" / PROFILE / "rc.json").read_text())).count("SECRET") == 0

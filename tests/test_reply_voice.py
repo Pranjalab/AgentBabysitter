@@ -132,6 +132,47 @@ def sh(abs_home, snippet, spoken=None, **extra):
     )
 
 
+# --- pinning what the machine can do -----------------------------------------
+#
+# The reply-mode default is "voice where the machine can speak", so from 3.0.3 a
+# test that leaves reply_mode unset is asserting something about the box it runs
+# on, not about abs. `ABS_VOICE_ROOT` makes it explicit: point it somewhere with
+# a plausible engine, or somewhere empty, and the answer stops depending on
+# whether the developer happens to have run `abs voice setup`.
+
+
+def mute_machine(tmp_path):
+    """A root with no engine in it. `voice_can_speak` says no."""
+    root = tmp_path / "no-voice"
+    root.mkdir(exist_ok=True)
+    return {"ABS_VOICE_ROOT": str(root)}
+
+
+def speaking_machine(tmp_path):
+    """The shape `voice_can_speak` looks for: a kokoro venv, its script, ffmpeg.
+
+    Nothing here is ever executed — the probe is `[ -x ]` and `[ -f ]` — so a
+    stub costs nothing and keeps the test off the real engine.
+    """
+    root = tmp_path / "has-voice"
+    (root / ".venv-kokoro" / "bin").mkdir(parents=True, exist_ok=True)
+    py = root / ".venv-kokoro" / "bin" / "python"
+    py.write_text("#!/bin/sh\nexit 0\n")
+    py.chmod(0o755)
+    (root / "speak_kokoro.py").write_text("")
+    env = {"ABS_VOICE_ROOT": str(root)}
+    if shutil.which("ffmpeg") is None:
+        # voice_can_speak also insists on ffmpeg, since a note that cannot be
+        # encoded is not a note. Stub it rather than skipping the test.
+        binp = root / "bin"
+        binp.mkdir(exist_ok=True)
+        ff = binp / "ffmpeg"
+        ff.write_text("#!/bin/sh\nexit 0\n")
+        ff.chmod(0o755)
+        env["PATH"] = f"{binp}{os.pathsep}{os.environ['PATH']}"
+    return env
+
+
 def _mark_turn_came_from_telegram(abs_home):
     """The Bash guard only bites on a remote-driven turn."""
     rc = abs_home / "profiles" / PROFILE / "rc.json"
@@ -154,8 +195,23 @@ def hook_payload(text, tool=REPLY_TOOL, files=None):
 # --- the setting -------------------------------------------------------------
 
 
-def test_the_default_is_text_so_nothing_changes_for_anyone_who_never_asks(abs_home):
-    assert sh(abs_home, "reply_mode").stdout == "text"
+def test_a_machine_that_cannot_speak_defaults_to_text(abs_home, tmp_path):
+    """The floor. Voice cannot be the default where nothing can synthesise it —
+    that would queue every reply behind an engine that isn't there."""
+    assert sh(abs_home, "reply_mode", **mute_machine(tmp_path)).stdout == "text"
+
+
+def test_a_machine_that_can_speak_defaults_to_both(abs_home, tmp_path):
+    """3.0.3: voice on by default where the box can do it. The operator asked for
+    it, and asking someone to opt in twice — install the engine, then enable it —
+    is one step too many."""
+    assert sh(abs_home, "reply_mode", **speaking_machine(tmp_path)).stdout == "both"
+
+
+def test_the_default_is_never_voice_only(abs_home, tmp_path):
+    """`voice` SUPPRESSES text. A default that silently drops the written record
+    is not a default anyone consented to; it stays an explicit choice."""
+    assert sh(abs_home, "reply_mode", **speaking_machine(tmp_path)).stdout != "voice"
 
 
 @pytest.mark.parametrize("word,stored", [("both", "both"), ("voice", "voice"), ("text", "text")])
@@ -164,11 +220,32 @@ def test_the_mode_is_stored_and_read_back(abs_home, word, stored):
     assert sh(abs_home, "reply_mode").stdout == stored
 
 
-def test_a_mode_nobody_defined_is_refused_rather_than_half_applied(abs_home):
+def test_a_mode_nobody_defined_is_refused_rather_than_half_applied(abs_home, tmp_path):
     proc = abs_run(abs_home, "config", "reply", "shout")
     assert proc.returncode != 0
     assert "text|both|voice" in proc.stderr
-    assert sh(abs_home, "reply_mode").stdout == "text"
+    assert sh(abs_home, "reply_mode", **mute_machine(tmp_path)).stdout == "text"
+
+
+def test_asking_for_text_on_a_speaking_machine_actually_gets_text(abs_home, tmp_path):
+    """The regression the new default creates if you are careless.
+
+    `text` used to be stored by DELETING the key, because unset meant text. Now
+    unset means "whatever this machine can do" — so deleting on a box with an
+    engine would hand back `both` and make the setting look ignored.
+    """
+    speaks = speaking_machine(tmp_path)
+    abs_run(abs_home, "config", "reply", "text", **speaks)
+    assert sh(abs_home, "reply_mode", **speaks).stdout == "text"
+
+
+def test_auto_hands_the_choice_back_to_the_machine(abs_home, tmp_path):
+    """The way back to the default, now that `text` is a stored value."""
+    speaks = speaking_machine(tmp_path)
+    abs_run(abs_home, "config", "reply", "text", **speaks)
+    abs_run(abs_home, "config", "reply", "auto", **speaks)
+    assert sh(abs_home, "reply_mode", **speaks).stdout == "both"
+    assert sh(abs_home, "reply_mode", **mute_machine(tmp_path)).stdout == "text"
 
 
 def test_garbage_in_the_state_file_reads_as_text_not_as_a_broken_mode(abs_home):
@@ -210,6 +287,61 @@ def test_markdown_syntax_is_not_read_aloud(abs_home, written, spoken_text):
     assert out == spoken_text
 
 
+# --- emoji ---------------------------------------------------------------------
+#
+# The engine reads them aloud as invented words — the usage footer "📊 5h 3%"
+# came back as a nonsense syllable. Stripped as raw UTF-8 byte ranges under
+# LC_ALL=C rather than with a unicode class, because the class needs perl or
+# python and this path must never fail: with pipefail, a machine without perl
+# would lose every voice reply rather than mispronouncing one word.
+
+
+@pytest.mark.parametrize(
+    "written,spoken_text",
+    [
+        ("📊 5h 3% · wk 7%", "5h 3% · wk 7%"),          # the usage footer
+        ("✅ Done", "Done"),                             # dingbats
+        ("✗ Unexpected failure", "Unexpected failure"),
+        ("Deploy ⭐ ready", "Deploy ready"),             # U+2B50
+        ("shipped ❤️ it", "shipped it"),                 # emoji + variation selector
+        ("Flags 🇮🇳 here", "Flags here"),                # regional indicators
+        ("the 👨‍👩‍👧 family", "the family"),                # joined with ZWJ
+        ("🔊 Recording a voice note", "Recording a voice note"),
+    ],
+)
+def test_emoji_are_stripped_before_the_engine_sees_them(abs_home, written, spoken_text):
+    src = abs_home.parent / "emoji.txt"
+    src.write_text(written, encoding="utf-8")
+    out = sh(abs_home, f'_voice_prep "$(cat {src})"').stdout
+    assert out == spoken_text
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        "it's done — and that's that…",   # apostrophe, em dash, ellipsis
+        'he said "no" and left',
+        "cost: €5, £4, ¥3 · 50% done",
+        "naïve café résumé",
+    ],
+)
+def test_the_punctuation_reports_are_written_with_survives(abs_home, written):
+    """The strip is a byte range, so the neighbouring ranges are the risk. Em
+    dash, ellipsis and curly quotes live one byte away from the dingbats."""
+    src = abs_home.parent / "punct.txt"
+    src.write_text(written, encoding="utf-8")
+    assert sh(abs_home, f'_voice_prep "$(cat {src})"').stdout == written
+
+
+def test_a_message_that_is_only_emoji_is_not_worth_a_voice_note(abs_home):
+    """A bare 👍 used to cost thirty seconds of synthesis and arrive as a grunt.
+    Stripped to nothing, it now fails the worth-saying gate on length."""
+    src = abs_home.parent / "thumb.txt"
+    src.write_text("👍👍👍", encoding="utf-8")
+    assert sh(abs_home, f'_voice_prep "$(cat {src})"').stdout == ""
+    assert sh(abs_home, f'_voice_worth_saying "$(_voice_prep "$(cat {src})")"').returncode == 1
+
+
 # --- what may replace text, and what may not ---------------------------------
 
 
@@ -234,6 +366,9 @@ def test_a_message_that_voice_cannot_carry_stays_text(abs_home, text, why):
 
 
 def test_in_text_mode_a_reply_is_never_spoken(abs_home, spoken):
+    # Set explicitly: since 3.0.3 an unset mode on a box with an engine means
+    # `both`, and this test is about `text`.
+    abs_run(abs_home, "config", "reply", "text")
     abs_run(abs_home, "__silent-hook", spoken=spoken, stdin=hook_payload("all done"))
     assert spoken.settled() == []
 
@@ -453,12 +588,20 @@ def test_a_failed_attempt_is_not_recorded_as_something_already_said(abs_home, sp
 
 
 @pytest.mark.parametrize("locale", ["C", "en_US.UTF-8"])
-def test_accents_emoji_and_dashes_survive_the_trip_to_the_engine(abs_home, spoken, locale):
+def test_accents_and_dashes_survive_the_trip_to_the_engine(abs_home, spoken, locale):
+    """Everything non-ASCII EXCEPT emoji has to arrive intact.
+
+    The emoji used to be in this message too. It is gone from the expectation on
+    purpose since 3.0.3 — the strip is the point — but the rest is the assertion
+    that matters here, and it matters more now: the strip runs under LC_ALL=C on
+    byte ranges that sit next to the em dash, the guillemets and the Cyrillic.
+    """
     abs_run(abs_home, "config", "reply", "both")
     message = "Déploiement terminé — café ready 🆕 «готово»"
+    heard = "Déploiement terminé — café ready «готово»"
     abs_run(abs_home, "__silent-hook", spoken=spoken, stdin=hook_payload(message),
             LC_ALL=locale, LANG=locale)
-    assert spoken.lines() == [message]
+    assert spoken.lines() == [heard]
 
 
 def test_a_reply_that_is_only_emoji_is_not_spoken_as_nothing(abs_home, spoken):

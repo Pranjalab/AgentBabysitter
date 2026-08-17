@@ -33,8 +33,10 @@ from tests.test_reply_voice import (  # the harness is already built there
     PROFILE,
     abs_home,  # noqa: F401 - fixture
     abs_run,
+    mute_machine,
     needs_tts,
     sh,
+    speaking_machine,
 )
 
 
@@ -42,18 +44,32 @@ def _rc(abs_home) -> dict:
     return json.loads((abs_home / "profiles" / PROFILE / "rc.json").read_text())
 
 
-def _mode(abs_home) -> str:
-    return sh(abs_home, "reply_mode").stdout.strip()
+def _mode(abs_home, **extra) -> str:
+    return sh(abs_home, "reply_mode", **extra).stdout.strip()
 
 
 # ---- the switches map onto the modes -----------------------------------------
 
 
-def test_text_on_voice_off_is_the_default_mode(abs_home):  # noqa: F811
-    assert _mode(abs_home) == "text"
-    out = abs_run(abs_home, "config", "reply-text", "on")
+def test_text_on_voice_off_is_text_mode(abs_home):  # noqa: F811
+    """The mapping, pinned on a machine that cannot speak so the starting point is
+    known. What the *default* is now depends on the engine and lives in
+    test_reply_voice.py."""
+    mute = mute_machine(abs_home.parent)
+    assert _mode(abs_home, **mute) == "text"
+    out = abs_run(abs_home, "config", "reply-text", "on", **mute)
     assert out.returncode == 0
-    assert _mode(abs_home) == "text"
+    assert _mode(abs_home, **mute) == "text"
+
+
+def test_on_a_speaking_machine_the_switches_start_at_text_on_voice_on(abs_home):  # noqa: F811
+    """The other half of the same mapping — and the reason `reply-voice off` had
+    to start storing `text` rather than deleting the key."""
+    speaks = speaking_machine(abs_home.parent)
+    assert _mode(abs_home, **speaks) == "both"
+    out = abs_run(abs_home, "config", "reply-voice", "off", **speaks)
+    assert out.returncode == 0, out.stderr
+    assert _mode(abs_home, **speaks) == "text", "turning voice off must stick"
 
 
 def test_voice_on_with_text_on_gives_both(abs_home):  # noqa: F811
@@ -120,10 +136,14 @@ def test_text_is_an_alias_for_reply_text(abs_home):  # noqa: F811
 
 
 def test_turning_both_off_is_refused(abs_home):  # noqa: F811
-    out = abs_run(abs_home, "config", "reply-text", "off")
+    # Pinned mute so voice is genuinely already off — on a speaking machine the
+    # default is `both`, and turning text off there is the legitimate move to
+    # voice-only, not the silence this test is about.
+    mute = mute_machine(abs_home.parent)
+    out = abs_run(abs_home, "config", "reply-text", "off", **mute)
     assert out.returncode != 0
     assert "quiet on" in out.stderr  # pointed at the thing that actually means this
-    assert _mode(abs_home) == "text"  # nothing changed
+    assert _mode(abs_home, **mute) == "text"  # nothing changed
 
 
 @needs_tts
