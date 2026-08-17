@@ -27,6 +27,43 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
+- **Security: two ways the Away guard could be walked past, both fixed.** Found by
+  a security pass over this branch before release, and both were introduced by this
+  branch — which matters because Away now means `bypassPermissions`, so this guard is
+  the only thing between an inbound message and the machine.
+  **Leading whitespace defeated four rules.** They anchored on
+  ``(^|[;&|`(][[:space:]]*)``, with the optional-space group inside the second
+  alternative, so `^` demanded column 0. Two spaces was enough, and a tab, and an
+  indented line: privilege escalation, machine state, service stops and
+  process-substitution download-and-run all walked past. The `rm -rf` rule had it
+  right, which is exactly why it went unnoticed — every test used column 0. Nor is
+  indentation an adversarial trick: grep is line-oriented, so any multi-line script
+  the model writes inside a conditional or a loop is indented by habit. The command
+  is now normalised once before any rule runs, so every rule added later inherits the
+  fix.
+  **The guard trusted state the guarded session could rewrite.** `.session_away` and
+  `.no_guard` were read live from `rc.json`, and the hook opened by returning 0 when
+  that file was absent — so from inside an auto-approving session, editing the flag
+  out and then turning the guard off disarmed it, and deleting the file alone failed
+  it open for the rest of the session, taking the ABS MUTE/OFF/BLOCK ladder along
+  with it. Worse, only `Bash` and the reply tool were matched, so one unprompted
+  `Edit` to `abs.sh` — the script the hook re-invokes on every call — needed no shell
+  at all. None of it was in the blocklist, and none of it should have to be: a
+  control the controlled thing can edit is not a control.
+  An Away launch now writes `--session-away` into the hook's own command line, so
+  being unattended is a fact of the ARGV, where the session cannot reach it. That
+  flag outranks `rc.json`, makes a missing state file fail **closed** (a normal
+  session still fails open — a hook that errors on every call is worse than the gap,
+  and there Claude is still asking), and adds `Write`/`Edit`/`MultiEdit`/
+  `NotebookEdit` inspection for Away only, refusing writes to `abs.sh` and the
+  profile directory while leaving ordinary project files alone. Shell writes to those
+  same paths are refused too.
+  The honest limit: this raises the bar rather than proving anything. An
+  auto-approving agent with write access could still work toward subverting its own
+  controls; what it cannot do any more is any of the one-step versions.
+  Five mutations, each caught by the intended test. What the same pass checked and
+  found already correct is recorded in `docs/RELEASE-3.0.0.md`.
+
 - **"Already being polled" now tells you what is holding the bot, and takes it
   back when nothing is.** One flat refusal covered four different situations, and
   gave advice ("quit that session first") that only fitted one of them.

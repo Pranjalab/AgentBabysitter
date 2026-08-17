@@ -260,3 +260,145 @@ def test_the_away_settings_still_carry_the_guard(tmp_path):
     settings, _ = _launch_settings(tmp_path, "--away")
     matchers = [e.get("matcher") for e in settings["hooks"]["PreToolUse"]]
     assert "Bash" in matchers
+
+
+# ---- 5. the guard cannot be edited out from inside the session it guards ------
+#
+# A security pass on this branch found the guarantee two sections up to be false.
+# The guard's whole trust state lived in files the guarded session can write, and
+# under bypassPermissions it can write them without being asked:
+#
+#   * `cmd_guard_hook` began with `[ -f "$ABS_STATE" ] || return 0`, so deleting
+#     rc.json failed the guard OPEN for the rest of the session;
+#   * `.session_away` and `.no_guard` were read live from that same file, so
+#     `jq 'del(.session_away)'` followed by `abs config guard off` restored the old
+#     origin-gated behaviour and then switched the guard off entirely;
+#   * only `Bash` and the reply tool were matched, so a single `Edit` to abs.sh —
+#     the script the hook re-invokes on every call — needed no Bash at all.
+#
+# None of it was in the blocklist, and none of it should have to be: a control that
+# the thing it controls can edit is not a control. The fix moves the fact of being
+# unattended into the hook's ARGV, where the session cannot reach it.
+
+
+def _guard_away_argv(home, command, tool="Bash", file_path=None):
+    """Run the hook the way an AWAY launch wires it: with --session-away in argv."""
+    tool_input = {"command": command} if file_path is None else {"file_path": file_path}
+    payload = json.dumps({
+        "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
+    })
+    env = dict(os.environ, ABS_HOME=str(home))
+    for k in ("TELEGRAM_STATE_DIR", "ABS_SESSION_PROFILE"):
+        env.pop(k, None)
+    out = subprocess.run(
+        ["bash", ABS_SH, "--profile", PROFILE, "--session-away", "__guard-hook"],
+        input=payload, capture_output=True, text=True, env=env,
+    )
+    return out.returncode == 2, out.stderr
+
+
+def test_argv_says_away_even_when_the_state_file_says_otherwise(home):
+    """The disarm one-liner was `jq 'del(.session_away)' rc.json`. Now irrelevant."""
+    _rc(home, session_away=None, last_origin="terminal")
+    blocked, err = _guard_away_argv(home, DESTRUCTIVE)
+    assert blocked, err
+
+
+def test_argv_says_away_so_guard_off_is_ignored(home):
+    _rc(home, session_away=None, no_guard=True, last_origin="terminal")
+    blocked, err = _guard_away_argv(home, DESTRUCTIVE)
+    assert blocked, err
+
+
+def test_an_away_session_with_no_state_file_fails_closed(home):
+    """Deleting rc.json used to disarm the guard for the whole session. An Away
+    session with nothing to check refuses instead — the operator loses a session,
+    not the machine. A NORMAL session still fails open: a hook that errors on every
+    Bash call would be worse than the gap."""
+    (home / "profiles" / PROFILE / "rc.json").unlink()
+    blocked, err = _guard_away_argv(home, "ls -la")
+    assert blocked, err
+    assert "state file is missing" in err
+
+
+def test_a_normal_session_with_no_state_file_still_fails_open(home):
+    (home / "profiles" / PROFILE / "rc.json").unlink()
+    blocked, _ = _guard(home, DESTRUCTIVE)
+    assert not blocked
+
+
+def test_writing_to_the_guards_own_state_is_refused(home):
+    """Neither `rm rc.json` nor `mv` over it is in the blocklist — a bare rm of one
+    file is deliberately allowed — yet either ends the guard for the session."""
+    rc = home / "profiles" / PROFILE / "rc.json"
+    for command in (
+        f"rm {rc}",
+        f"mv /tmp/x {rc}",
+        f"jq 'del(.session_away)' {rc} > /tmp/r",
+        f": > {rc}",
+        f"truncate -s 0 {rc}",
+        f"sed -i 's/true/false/' {rc}",
+    ):
+        blocked, err = _guard_away_argv(home, command)
+        assert blocked, f"{command!r} was allowed: {err}"
+
+
+def test_editing_abs_itself_is_refused_in_an_away_session(home):
+    """No Bash needed for this one: `Edit` was matched by no hook at all, and under
+    bypassPermissions it does not prompt."""
+    blocked, err = _guard_away_argv(home, "", tool="Edit", file_path=ABS_SH)
+    assert blocked, err
+    assert "enforces the guard" in err
+
+
+def test_editing_the_profile_directory_is_refused_in_an_away_session(home):
+    target = str(home / "profiles" / PROFILE / "hooks.json")
+    blocked, err = _guard_away_argv(home, "", tool="Write", file_path=target)
+    assert blocked, err
+
+
+def test_editing_ordinary_project_files_is_untouched(home):
+    """The point is the guard's own files, not the operator's work. An Away session
+    that could not edit code would be useless."""
+    for tool in ("Write", "Edit", "MultiEdit"):
+        blocked, err = _guard_away_argv(
+            home, "", tool=tool, file_path="/home/pranjal/Projects/thing/src/main.py")
+        assert not blocked, f"{tool} on a project file was blocked: {err}"
+
+
+def test_a_normal_session_never_inspects_file_writes(home):
+    """Only Away pays for this check; a normal session has Claude's own prompts."""
+    _rc(home, session_away=None, last_origin="telegram")
+    payload = json.dumps({
+        "hook_event_name": "PreToolUse", "tool_name": "Edit",
+        "tool_input": {"file_path": ABS_SH},
+    })
+    env = dict(os.environ, ABS_HOME=str(home))
+    for k in ("TELEGRAM_STATE_DIR", "ABS_SESSION_PROFILE"):
+        env.pop(k, None)
+    out = subprocess.run(
+        ["bash", ABS_SH, "--profile", PROFILE, "__guard-hook"],
+        input=payload, capture_output=True, text=True, env=env,
+    )
+    assert out.returncode == 0, out.stderr
+
+
+def test_an_away_launch_puts_the_flag_in_the_hook_command(tmp_path):
+    """The wiring: if the flag is not in argv, everything above is theatre."""
+    settings, _ = _launch_settings(tmp_path, "--away")
+    bash_hooks = [
+        h["command"]
+        for e in settings["hooks"]["PreToolUse"] if e.get("matcher") == "Bash"
+        for h in e["hooks"]
+    ]
+    assert bash_hooks and all("--session-away" in c for c in bash_hooks), bash_hooks
+
+
+def test_a_normal_launch_does_not(tmp_path):
+    settings, _ = _launch_settings(tmp_path)
+    bash_hooks = [
+        h["command"]
+        for e in settings["hooks"].get("PreToolUse", []) if e.get("matcher") == "Bash"
+        for h in e["hooks"]
+    ]
+    assert bash_hooks and not any("--session-away" in c for c in bash_hooks), bash_hooks

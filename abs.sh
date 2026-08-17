@@ -2340,7 +2340,33 @@ cmd_silent_hook() {
 # every pattern high-confidence; a guard that cries wolf gets switched off, and
 # `abs config guard off` is exactly the wrong outcome here.
 _is_destructive() {
-  local c="$1"
+  local c
+  # Normalise the leading whitespace of every line, and the whitespace after a
+  # separator, BEFORE any pattern runs.
+  #
+  # This is a fix for a live bypass, not tidying. Four of the rules below anchor on
+  # `(^|[;&|`(][[:space:]]*)` — the optional-space group sits inside the second
+  # alternative, so the `^` branch demanded the keyword at column 0 and two spaces
+  # was enough to walk past it:
+  #
+  #     sudo tee /etc/sudoers.d/x       -> blocked
+  #       sudo tee /etc/sudoers.d/x     -> ALLOWED
+  #       reboot                        -> ALLOWED
+  #     <TAB>doas sh                    -> ALLOWED
+  #
+  # The `rm` rule two lines down had it right (`(^|[;&|`(])[[:space:]]*`), which is
+  # exactly why nobody noticed: the inconsistency was invisible unless you probed
+  # for it, and every test used column 0. It mattered here more than it looks,
+  # because Away means bypassPermissions — this function is the only thing between
+  # an inbound Telegram message and the machine — and indentation is not even an
+  # adversarial trick: any multi-line script the model writes inside an `if` or a
+  # `for` is indented by habit.
+  #
+  # Normalising once is better than repairing four regexes, because it also holds
+  # for every rule added after this one. grep is line-oriented, so `^` and this sed
+  # both apply per line, which is what makes an indented line inside a heredoc or a
+  # block behave the same as a bare command.
+  c="$(printf '%s' "$1" | sed -E 's/^[[:space:]]+//; s/([;&|`(])[[:space:]]+/\1/g' || printf '%s' "$1")"
   printf '%s' "$c" | grep -qE '(^|[;&|`(])[[:space:]]*rm[[:space:]]+(-[a-zA-Z]*[rf][a-zA-Z]*[[:space:]]|-[a-zA-Z]*[rf][a-zA-Z]*$)' && return 0
   printf '%s' "$c" | grep -qE 'git[[:space:]]+push[[:space:]].*(--force([[:space:]]|=|$)|-[a-zA-Z]*f([[:space:]]|$))' && return 0
   printf '%s' "$c" | grep -qE 'git[[:space:]]+reset[[:space:]].*--hard' && return 0
@@ -2443,11 +2469,61 @@ _is_destructive() {
   return 1
 }
 
+
+# Does this Bash command write to the files the guard itself depends on?
+#
+# Under bypassPermissions an Away session can edit its own controls, and none of
+# the blocklist patterns describe that: `rm rc.json` is a bare rm of one file (which
+# the rm rule deliberately allows), `mv` over it is ordinary, and `abs config guard
+# off` is just a command. Yet any of them ends the guard for the rest of an
+# unattended run — rc.json carries the state the hook reads, and abs.sh IS the hook.
+#
+# Deliberately blunt: the path appearing anywhere alongside any write verb or
+# redirect is enough. That over-blocks a read like `cat rc.json > /tmp/x`, and being
+# told to do that at the desk is a fair price for the guard not being editable by
+# the thing it guards. Only consulted for an Away session.
+_touches_guard_state() {
+  local c="$1" p resolved
+  resolved="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || printf '%s' "$SCRIPT_PATH")"
+  for p in "$SCRIPT_PATH" "$resolved" "$ABS_DIR"; do
+    [ -n "$p" ] || continue
+    printf '%s' "$c" | grep -qF -- "$p" || continue
+    printf '%s' "$c" | grep -qE '(^|[;&|`(]|[[:space:]])(rm|mv|cp|truncate|tee|dd|install|ln)([[:space:]]|$)|>>?|sed[[:space:]]+-i|python[0-9.]*[[:space:]]|perl[[:space:]]' \
+      && return 0
+  done
+  return 1
+}
+
 # PreToolUse hook: block destructive Bash on a Telegram-driven turn. Fails OPEN on
 # any hiccup — a guard that broke every Bash on a glitch would be worse than the
 # gap it closes. Opt out with `abs config guard off`.
 cmd_guard_hook() {
-  [ -f "${ABS_STATE:-/nonexistent}" ] || return 0
+  # `--session-away` is written into the hook's own command line at launch, so an
+  # Away session is identified by ARGV rather than by state the session can edit.
+  #
+  # That distinction is the whole point. `.session_away` and `.no_guard` live in
+  # rc.json, which the guarded session can write — and under bypassPermissions it
+  # can write it without being asked. So the previous version could be disarmed from
+  # inside by `jq 'del(.session_away)' rc.json > t && mv t rc.json`, and then
+  # switched off completely with `abs config guard off`. Neither is caught by the
+  # blocklist, and neither should have to be: a control that can be edited by the
+  # thing it controls is not a control.
+  local argv_away="${ABS_GUARD_AWAY:-0}"
+
+  # Fail CLOSED for an Away session with no readable state, fail open otherwise.
+  #
+  # The early return exists because a hook that errors on every Bash call is worse
+  # than the gap it covers — but "no state file" was also all it took to disarm the
+  # guard for the rest of an unattended session: delete rc.json and every later call
+  # returned 0 here. With argv saying Away, a missing state file is now a reason to
+  # refuse rather than to wave through; the operator loses a session, not the machine.
+  if [ ! -f "${ABS_STATE:-/nonexistent}" ]; then
+    if [ "$argv_away" = "1" ]; then
+      printf '%s\n' "⛔ Blocked by Agent Babysitter: this is an Away session and its state file is missing, so the guard cannot check anything. Nothing runs unattended without it. Restart the session from the terminal." >&2
+      exit 2
+    fi
+    return 0
+  fi
   local input tool cmd
   input="$(cat)"
   tool="$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)"
@@ -2459,6 +2535,7 @@ cmd_guard_hook() {
   # not of who spoke last — otherwise attaching to type one command would leave
   # the remaining hours auto-approving with nothing in front of them.
   local away=0
+  [ "$argv_away" = "1" ] && away=1
   [ "$(state_get '.session_away')" = "true" ] && away=1
   case "$tool" in
     Bash) if [ "$away" = 0 ] && [ "$(state_get '.no_guard')" = "true" ]; then return 0; fi ;;
@@ -2466,6 +2543,21 @@ cmd_guard_hook() {
     # `both` puts the note in front of it. Each returns without acting when the
     # mode isn't theirs.
     *telegram*reply*) _reply_voice_gate "$input"; _reply_voice_first_gate "$input"; return 0 ;;
+    # File writes are only inspected for an Away session, and only to keep the
+    # session from editing the guard out from under itself. Everything else a
+    # session writes is its job.
+    Write|Edit|MultiEdit|NotebookEdit)
+      [ "$away" = 1 ] || return 0
+      local fp resolved
+      fp="$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // ""' 2>/dev/null)"
+      [ -n "$fp" ] || return 0
+      resolved="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || printf '%s' "$SCRIPT_PATH")"
+      case "$fp" in
+        "$SCRIPT_PATH"|"$resolved"|"$ABS_DIR"/*)
+          printf '%s\n' "⛔ Blocked by Agent Babysitter: that file is what enforces the guard for this Away session ($fp). Editing it from inside the session would disarm the only check running while nobody is watching. Do it at the terminal in a normal session." >&2
+          exit 2 ;;
+      esac
+      return 0 ;;
     *) return 0 ;;
   esac
   if [ "$away" = 0 ]; then
@@ -2473,6 +2565,10 @@ cmd_guard_hook() {
   fi
   cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
   [ -n "$cmd" ] || return 0
+  if [ "$away" = 1 ] && _touches_guard_state "$cmd"; then
+    printf '%s\n' "⛔ Blocked by Agent Babysitter: that command writes to the guard's own state or code, which would disarm the only check running in this Away session. Do it at the terminal in a normal session." >&2
+    exit 2
+  fi
   if _is_destructive "$cmd"; then
     if [ "$away" = 1 ]; then
       printf '%s\n' "⛔ Blocked by Agent Babysitter: this command looks destructive and this is an Away session (nothing prompts, so the guard is the only check). Run it at the terminal in a normal session." >&2
@@ -4443,6 +4539,10 @@ cmd_run() {
   local hook_cmd status_cmd guard_cmd
   hook_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") __silent-hook"
   guard_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") __guard-hook"
+  # Away sessions carry the fact in the hook's ARGV. rc.json is writable by the
+  # session, so it cannot be the thing that decides whether the session is guarded.
+  [ "${ABS_AWAY:-0}" = "1" ] \
+    && guard_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") --session-away __guard-hook"
   status_cmd="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") statusline"
   # statusLine shows the live mute/active dot in the bottom bar. It's a scalar
   # (not a merge), so it overrides any global statusLine for the abs session only
@@ -4975,6 +5075,10 @@ main() {
       # session owns — the plugin would respawn it, and ending someone's working
       # bridge to fix their bot is not a trade abs gets to make.
       --reclaim)   ABS_RECLAIM=1; shift ;;
+      # Set by the hooks.json builder, never by a person: it tells the PreToolUse
+      # hook that this session is unattended, in the one place the session itself
+      # cannot rewrite. See cmd_guard_hook.
+      --session-away) ABS_GUARD_AWAY=1; shift ;;
       # v3 start-menu bypasses (interactive terminal launch): --new = skip the menu
       # and start fresh in the current folder; --resume = skip it and resume the
       # top recent. Both are no-ops when there is no menu (non-TTY / no recents).
