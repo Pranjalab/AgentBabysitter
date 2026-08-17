@@ -4,8 +4,8 @@ Two halves: the notes that go out, and the commands that put them out. The notes
 are written to be pasted into the GitHub release; the runbook is for the operator,
 because every step in it is irreversible and none of it should be automated.
 
-State at the time of writing: **853 tests passing**, `bash -n abs.sh` clean,
-`abs doctor` green, working tree clean, `v3-daemon` ahead of `origin/main` by 77
+State at the time of writing: **896 tests passing**, `bash -n abs.sh` clean,
+`abs doctor` green, working tree clean, `v3-daemon` ahead of `origin/main` by 88
 commits with a **conflict-free** merge (`git merge-tree --write-tree main v3-daemon`
 exits 0), nothing pushed.
 
@@ -55,10 +55,11 @@ inside a container with the status bar, the guard, the remote controls and a
 `session.pid` that `abs exit` can signal — not a bare `claude` in a box.
 
 **Smaller things that add up.** Arrow-key pickers everywhere (typing the number
-still works). A `● Daemon` dot on the status bar, so you can see at a glance
-whether a message sent after this session ends will land. `abs config label` to put
-your own name on the bar. Real log rotation. An event log you can read.
-`abs doctor`.
+still works). A status bar that shows your weekly and five-hour limits with their
+reset times, plus how much of this conversation's context window is left — read
+free from Claude Code's own render payload rather than polled. `abs config label` to
+put your own name on it. `abs send` for plain text when the Telegram plugin is down.
+Real log rotation. An event log you can read. `abs doctor`.
 
 #### Upgrading from 2.x
 
@@ -68,10 +69,14 @@ git pull
 ./install.sh
 ```
 
-The daemon, sandboxes and the restricted assistant need the **checkout** — a
-single-file `curl` install of `abs` has no v3 features and says so rather than
-failing oddly. Nothing about a 2.x setup has to change: your profiles, pairings
-and tokens are read where they already are.
+Or let `abs` do it: it notices a new version at launch and offers to update in
+place, which is the upgrade path for everyone from here on.
+
+The daemon and sandboxes need the **checkout**, because the daemon is Python living
+in this repository with its own venv and sandboxes need the Dockerfile. The
+`curl … | bash` install now offers to clone for exactly that reason; decline and you
+get the single script, which does everything 2.x did. Nothing about a 2.x setup has
+to change: your profiles, pairings and tokens are read where they already are.
 
 #### Known limits
 
@@ -112,10 +117,13 @@ Two things ship **unverified by hand** and are named here rather than implied:
 voice-only mode (`reply-text off`), which has automated coverage but no human has
 watched a real voice-only reply; and the restricted assistant, above.
 
-Fourteen bugs were found during the release testing itself. Three were in code the
-full suite reported green; two surfaced only once a human actually launched an Away
-session; and two — a launch killed by a slow network, and a bot that could not be
-reclaimed after a pid was recycled — surfaced only from ordinary daily use.
+Nineteen bugs were found during the release testing itself, and where they came
+from is the useful part. Three were in code the full suite reported green. Two
+surfaced only once a human launched an Away session. Two more — a launch killed by a
+slow network, and a bot that could not be reclaimed after a pid was recycled — came
+from ordinary daily use. Two were found by a security pass over the branch, both in
+code written that same day. And one, a raw unix timestamp on the status bar, was
+spotted by the operator pasting his own screen back at me.
 
 ---
 
@@ -129,10 +137,10 @@ matters: once `main` moves and a tag is pushed, other people can have it.
 ```sh
 cd ~/Projects/research/AgentBabysitter
 git status                      # must be clean
-python -m pytest -q             # expect 853 passed
+python -m pytest -q             # expect 896 passed
 bash -n abs.sh                  # silent
 abs doctor                      # green except the stale-error note
-abs --version                   # Agent Babysitter 3.0.0
+abs --version                   # Agent Babysitter 3.0.1
 ```
 
 ### 2. Merge into main
@@ -178,7 +186,7 @@ of this file is the body:
 ```sh
 gh release create v3.0.1 \
   --title "3.0.1 — the always-on daemon" \
-  --notes-file docs/RELEASE-3.0.0.md
+  --notes-file docs/RELEASE-3.0.1.md
 ```
 
 `--notes-file` takes the whole file, this runbook included. Either trim Part 2

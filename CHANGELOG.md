@@ -143,7 +143,7 @@ actually reads it — by ear. Released together with 3.0.0, since 3.0.0 never sh
   auto-approving agent with write access could still work toward subverting its own
   controls; what it cannot do any more is any of the one-step versions.
   Five mutations, each caught by the intended test. What the same pass checked and
-  found already correct is recorded in `docs/RELEASE-3.0.0.md`.
+  found already correct is recorded in `docs/RELEASE-3.0.1.md`.
 
 ## [3.0.0] — 2026-08-17 — v3: the always-on daemon
 
