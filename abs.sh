@@ -3596,6 +3596,26 @@ _pct_color() {
   fi
 }
 
+# The same idea for the context window, with the polarity the other way up.
+#
+# `_pct_color` grades a percentage USED — high is bad, and it climbs green to
+# brick. Context is reported as percentage REMAINING, so high is GOOD and the
+# scale has to run the other way. Two functions rather than a flag, because a
+# single one taking "which direction" is exactly the kind of thing that gets
+# called with the wrong argument and then quietly tells you a full context
+# window is an emergency.
+#
+# Thresholds are the operator's: above half is fine, a fifth left is worth
+# noticing, a tenth left is nearly out.
+_ctx_color() {
+  local p="$1"
+  if   [ "$p" -ge 50 ]; then printf '%b' '\033[38;5;71m'    # 50+    soft green
+  elif [ "$p" -ge 20 ]; then printf '%b' '\033[38;5;179m'   # 20-49  soft amber
+  elif [ "$p" -ge 10 ]; then printf '%b' '\033[38;5;173m'   # 10-19  soft coral
+  else                       printf '%b' '\033[38;5;131m'   # < 10   muted brick
+  fi
+}
+
 # One usage segment. With colour on, "Label N%" takes the threshold colour and
 # the (resets …) note is dimmed; with colour off (Telegram footer) it's plain.
 _glance_seg() {   # <color?> <label+pct> <pct> <paren-or-empty>
@@ -3662,13 +3682,17 @@ usage_glance_str() {
   elif [ -n "$rel" ]; then
     [ -n "$out" ] && out="${out}${sep}(resets ${rel})" || out="resets ${rel}"
   fi
-  # Context last and always dim, never colour-graded by threshold like the limits
-  # above. It is the least urgent number here — a limit at 90% stops your work, a
-  # context window at 30% just means this conversation is getting long — and the
-  # operator asked for it to read as a footnote rather than compete.
+  # Context last, and colour-graded since 3.0.3 — the operator asked for it after
+  # living with the dim version. It was deliberately a dim footnote before, on the
+  # reasoning that a limit at 90% stops your work while a long conversation only
+  # means a long conversation. In use that was wrong: running out of context ends
+  # the session just as hard, and it is the one number here that moves fast enough
+  # to be worth watching mid-task.
+  #
+  # `_ctx_color`, not `_pct_color` — this is percent REMAINING.
   if [ -n "$ctx" ]; then
     local cseg="ctx ${ctx}%"
-    [ "$color" = 1 ] && cseg="${dim}ctx ${ctx}%${off}"
+    [ "$color" = 1 ] && cseg="$(_ctx_color "$ctx")ctx ${ctx}%${off}"
     [ -n "$out" ] && out="${out}${sep}${cseg}" || out="$cseg"
   fi
   printf '%s' "$out"
