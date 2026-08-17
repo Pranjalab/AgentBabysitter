@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.0.2"
+readonly ABS_VERSION="3.1.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1161,20 +1161,15 @@ Send \"abs quiet\" to mute reports, \"abs status\" to check state." \
 
 # --- system prompt -----------------------------------------------------------
 
-build_prompt() {
-  local cid="$1"
-  local VROOT; VROOT="$(voice_root)"
-
-  # The VOICE section is only truthful when the venvs actually exist. On a fresh
-  # install they don't (voice is an opt-in add-on), and asserting a working
-  # pipeline there is what made the agent walk into dead paths and refuse to work
-  # around them. So swap in an honest "not set up" block when it isn't built.
-  # Reply mode is enforced by the hooks whatever the model believes, so this
-  # paragraph exists for one reason only: to stop the model ALSO calling `abs say`
-  # and sending the same sentence twice.
-  local reply_mode_section=""
-  case "$(reply_mode)" in
-    both) reply_mode_section="$(cat <<'REPLYBOTH'
+# The three prompt blocks below live in their own functions instead of being
+# inlined as `$(cat <<TAG ... TAG)`. bash 3.2 — still /bin/bash on macOS — finds
+# the closing paren of `$( )` with a scanner that has no idea here-documents
+# exist, so it lexes the prose body as if it were shell code. One apostrophe, a
+# stray `)`, an odd quote or a backtick in the text silently moves where the
+# substitution ends. Holding the here-doc at function level removes the hazard
+# outright: the substitution then contains nothing but a function name.
+_prompt_reply_both() {
+  cat <<'REPLYBOTH'
 Reply mode is 'both' (abs config reply). Every `reply` you send is delivered as a
 voice note FIRST and then as the same text, automatically, from a hook. You do not
 have to remember it and you must NOT run `abs say` for a reply as well, or they get
@@ -1214,20 +1209,10 @@ You do not have to announce the voice note. ABS sends a "🔊 Recording a voice
 note…" line itself when synthesis will take a moment, so saying it too would double
 up.
 REPLYBOTH
-)" ;;
-    voice) reply_mode_section="
-Reply mode is 'voice' (abs config reply). ABS speaks every \`reply\` you send and
-suppresses the text. The tool will come back as BLOCKED with a note saying it was
-delivered as audio — that is success, not failure: do not resend, do not fall back
-to another channel, and do not run \`abs say\` yourself. Messages carrying a code
-block, a link, or an attachment are let through as text instead, because a voice
-note cannot carry them; put anything they need to copy or tap in one of those.
-" ;;
-  esac
+}
 
-  local voice_section
-  if voice_have; then
-    voice_section="$(cat <<VOICEON
+_prompt_voice_on() {
+  cat <<VOICEON
 This project has a working voice pipeline in both directions. Use it. The engine
 is installed locally in its own venv — there is no TTS binary on PATH, so don't
 go hunting for one.
@@ -1255,9 +1240,10 @@ You cannot hear what you generated. If it matters, run the output back through
 transcribe.py and confirm the words survived — that catches truncation and
 garbling. On tone you are guessing; say so rather than claiming it sounds good.
 VOICEON
-)"
-  else
-    voice_section="$(cat <<VOICEOFF
+}
+
+_prompt_voice_off() {
+  cat <<VOICEOFF
 Voice is an optional add-on and is NOT set up on this machine. Do not run
 speak.py, transcribe.py, or \`abs say\` — the venvs don't exist yet and every one
 of them will just fail.
@@ -1272,7 +1258,37 @@ command builds it (a few minutes, downloads the models). Do not try to fake a
 voice reply by attaching audio through \`reply\` — it lands as a file, not a
 playable voice note.
 VOICEOFF
-)"
+}
+
+build_prompt() {
+  local cid="$1"
+  local VROOT; VROOT="$(voice_root)"
+
+  # The VOICE section is only truthful when the venvs actually exist. On a fresh
+  # install they don't (voice is an opt-in add-on), and asserting a working
+  # pipeline there is what made the agent walk into dead paths and refuse to work
+  # around them. So swap in an honest "not set up" block when it isn't built.
+  # Reply mode is enforced by the hooks whatever the model believes, so this
+  # paragraph exists for one reason only: to stop the model ALSO calling `abs say`
+  # and sending the same sentence twice.
+  local reply_mode_section=""
+  case "$(reply_mode)" in
+    both) reply_mode_section="$(_prompt_reply_both)" ;;
+    voice) reply_mode_section="
+Reply mode is 'voice' (abs config reply). ABS speaks every \`reply\` you send and
+suppresses the text. The tool will come back as BLOCKED with a note saying it was
+delivered as audio — that is success, not failure: do not resend, do not fall back
+to another channel, and do not run \`abs say\` yourself. Messages carrying a code
+block, a link, or an attachment are let through as text instead, because a voice
+note cannot carry them; put anything they need to copy or tap in one of those.
+" ;;
+  esac
+
+  local voice_section
+  if voice_have; then
+    voice_section="$(_prompt_voice_on)"
+  else
+    voice_section="$(_prompt_voice_off)"
   fi
 
   cat <<EOF
@@ -1403,18 +1419,20 @@ decision of theirs goes first. If nothing is outstanding, say exactly that —
 
     Left: · merge and push (yours) · web installer (mine, ~20m) · restricted (parked)
 
-LAST: the numbers, on their own line and verbatim from:
-
-    bash "${SCRIPT_PATH}" --profile ${PROFILE} usage-glance
+LAST: the numbers. DO NOT WRITE THEM. ABS appends this line to every reply it
+sends, because relying on you to remember meant they were usually missing:
 
     📊 Fable 0% · Week 43% (resets on Tue) · 5H 62% (resets in 1h 10m) · ctx 68%
 
-Do not retype, reorder, abbreviate or "summarise" that line, and do not replace it
-with your own numbers like a test count — those belong in the body. It is one shell
-call, it costs no tokens, and it is the same line every time so it can be read at a
-glance. \`ctx\` is how much of THIS conversation's context window is left; if it is
-getting low, say so in words in the body too, because that decides whether a long
-task can finish in this session. Skip the line only if the command prints nothing.
+Adding your own copy just produces two. If you want to see the current values —
+to talk about them in the body — the command is
+
+    bash "${SCRIPT_PATH}" --profile ${PROFILE} usage-glance
+
+\`ctx\` is how much of THIS conversation's context window is left. When it is
+getting low, say so in words in the body as well: the appended line is a number,
+and what the operator needs is your judgement on whether a long task can still
+finish in this session.
 
 COMMAND MENU
 The chat's "/" menu offers exactly one command: /usage. Take that literally —
@@ -1634,12 +1652,30 @@ bar_label_clean() {
     | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
 }
 
+# The default label is the name on the Claude account, not the literal "abs" —
+# but it is resolved ONCE, at session launch, and stored. It is deliberately not
+# resolved here: bar_label runs on every status-bar render, and ~/.claude.json is
+# a large file that also holds account tokens. Reading it per frame would be the
+# wrong cost in the wrong place.
+#
+# Called from cmd_run before the settings file is written. `.bar_label_seeded`
+# records that we tried, so `abs config label --clear` means "back to abs" and
+# stays that way rather than being re-seeded on the next launch.
+bar_label_seed() {
+  [ "$(state_get '.bar_label_seeded')" = "true" ] && return 0
+  local v; v="$(state_get '.bar_label')"
+  case "$v" in ''|null) ;; *) state_set '.bar_label_seeded = true'; return 0 ;; esac
+  local n c
+  if n="$(claude_display_name)" && c="$(bar_label_clean "$n")" && [ -n "$c" ]; then
+    state_set --arg l "$c" '.bar_label = $l | .bar_label_seeded = true'
+  else
+    state_set '.bar_label_seeded = true'
+  fi
+  return 0
+}
+
 bar_label() {
   local v; v="$(state_get '.bar_label')"
-  # TODO(3.0.3): default to the Claude account name rather than the literal "abs"
-  # (`abs config label auto` does it today). Held back with the reply-mode default
-  # for the same reason — it changes what tests assert, and both belong in one
-  # considered change rather than two rushed ones.
   case "$v" in ''|null) printf '%s' "$BAR_LABEL_DEFAULT"; return 0 ;; esac
   # Clean on the way OUT as well as in. A profile edited by hand, or written by an
   # older abs, must not be able to inject escapes into every single render.
@@ -1806,8 +1842,9 @@ cmd_statusline() {
 # the hooks enforce it on every outbound Telegram message whether the model
 # remembers or not.
 #
-#   text   every reply is text (the default — today's behaviour)
-#   both   the text goes out, and a voice note of it follows
+#   text   every reply is text
+#   both   the text goes out, and a voice note of it follows (the default on a
+#          machine that can speak)
 #   voice  the voice note IS the reply; the text is suppressed
 #
 # `voice` still lets some messages through as text — see _voice_speakable. A
@@ -1816,12 +1853,32 @@ cmd_statusline() {
 
 readonly VOICE_MIRROR_MAX="${ABS_VOICE_MAX_CHARS:-1200}"
 
+# Answered once per process. `reply_mode` sits in the status-bar render path,
+# which runs on every frame, and the answer cannot change inside one invocation.
+_VOICE_CAN_SPEAK=
+
+# The mode to use when the profile has never been told one. Voice is the point
+# of this tool for the operator, so a machine that CAN speak should speak
+# without being asked twice; a machine that cannot must stay on text, or every
+# reply would queue behind an engine that isn't there.
+#
+# `both` and never `voice`: an unattended default must not be the one mode that
+# SUPPRESSES text. Choosing to hear only the voice is a decision, not a default.
+reply_mode_default() {
+  case "$_VOICE_CAN_SPEAK" in
+    yes) printf 'both' ;;
+    no)  printf 'text' ;;
+    *)   if voice_can_speak; then _VOICE_CAN_SPEAK=yes; printf 'both'
+         else                     _VOICE_CAN_SPEAK=no;  printf 'text'; fi ;;
+  esac
+}
+
+# Anything that is not one of the three known modes — unset, or garbage written
+# by a hand-edit or an older abs — reads as the machine default. One rule, so a
+# corrupt value can never become a working-but-unintended mode.
 reply_mode() {
   local m; m="$(state_get '.reply_mode')"
-  # TODO(3.0.3): default to `both` where the machine can speak. The operator asked
-  # for it and the change is one line, but it flips a contract ~18 tests assert, and
-  # rewriting those in a hurry is how a default becomes a bug.
-  case "$m" in both|voice) printf '%s' "$m" ;; *) printf 'text' ;; esac
+  case "$m" in both|voice|text) printf '%s' "$m" ;; *) reply_mode_default ;; esac
 }
 
 # The three modes above, seen as the two switches people actually reason about.
@@ -1882,7 +1939,10 @@ _reply_channel_set() {   # $1 = text|voice   $2 = on|off|""
       voice_can_speak || warn "Voice isn't installed here — set it up with 'abs voice setup' or the notes won't send."
     fi
   fi
-  if   [ "$t" = on ]  && [ "$v" = off ]; then state_set 'del(.reply_mode)'
+  # Written as "text", NOT as a deleted key. Unset means "use the machine
+  # default", which on a machine that can speak IS voice — so deleting here
+  # would turn voice straight back on and make `reply-voice off` a no-op.
+  if   [ "$t" = on ]  && [ "$v" = off ]; then state_set '.reply_mode = "text"'
   elif [ "$t" = on ]  && [ "$v" = on  ]; then state_set '.reply_mode = "both"'
   else                                        state_set '.reply_mode = "voice"'
   fi
@@ -1913,21 +1973,49 @@ _reply_channel_set() {   # $1 = text|voice   $2 = on|off|""
 # Markdown reads terribly out loud: asterisks become "star", a URL becomes a
 # minute of alphabet, a code fence becomes noise. Strip the syntax and keep the
 # prose. Deliberately blunt — this feeds a speech engine, not a parser.
+# The emoji strip, as raw UTF-8 byte ranges under LC_ALL=C.
+#
+# The engine reads an emoji aloud as an invented word — "📊 5h 3%" came back as a
+# nonsense syllable followed by the number. It has to go before synthesis.
+#
+# Why bytes and not a unicode class: the class version needs perl or python, and
+# this is the one path that must never fail. With `pipefail`, a machine without
+# perl would break EVERY voice reply rather than mispronouncing one word. sed and
+# tr are already dependencies of this pipeline, so the strip costs nothing new.
+#
+# Why LC_ALL=C: it makes sed byte-oriented, so a bracket range means a byte range
+# and nothing depends on the locale being UTF-8 — which is exactly the assumption
+# that differs between this machine and a Mac. The literal bytes are produced by
+# the shell's $'…' quoting, not by sed, because BSD sed (macOS) has no \xNN.
+#
+#   f0 9f xx xx        U+1F000–U+1FFFF  pictographs, faces, flags, skin tones
+#   e2 98–9e xx        U+2600–U+27BF    misc symbols and dingbats (✅ ❤ ✗)
+#   e2 ac–af xx        U+2B00–U+2BFF    stars and arrows (⭐)
+#   ef b8 80–8f        U+FE00–U+FE0F    variation selectors (the ️ after ❤)
+#   e2 80 8d           U+200D           zero-width joiner, between the two halves
+#                                       of a composed emoji
+#
+# Deliberately NOT stripped: the rest of e2 80 xx, which is em dash, ellipsis and
+# curly quotes — the punctuation the reports are actually written with.
+_voice_strip_emoji() {
+  LC_ALL=C sed -E \
+    -e $'s/\xf0\x9f[\x80-\xbf][\x80-\xbf]//g' \
+    -e $'s/\xe2[\x98-\x9e][\x80-\xbf]//g' \
+    -e $'s/\xe2[\xac-\xaf][\x80-\xbf]//g' \
+    -e $'s/\xef\xb8[\x80-\x8f]//g' \
+    -e $'s/\xe2\x80\x8d//g'
+}
+
 _voice_prep() {
   # Emoji and dotted versions are the two things that visibly break the speech
   # engine, and both were reported from the phone rather than found here.
-  #
-  # Emoji stripping is NOT here yet, deliberately. The obvious fix — a perl hop with
-  # a unicode class — adds an external dependency inside the one path that must
-  # never fail, and with `pipefail` a machine without perl would break every voice
-  # reply rather than mispronouncing one. Doing it in pure sed portably is the next
-  # change, not a thing to bolt on at the end of a session.
   #
   # "3.0.1" is worse than mispronounced: the engine's text normaliser treats the
   # dots as sentence ends, and everything after the number was being swallowed. So
   # dotted version numbers become spoken words BEFORE anything else runs. Written
   # for two- and three-part versions, since those are what appear in a report.
   printf '%s' "$1" \
+    | _voice_strip_emoji \
     | sed -E 's/\b([0-9]+)\.([0-9]+)\.([0-9]+)\b/\1 point \2 point \3/g' \
     | sed -E 's/\b([0-9]+)\.([0-9]+)\b/\1 point \2/g' \
     | sed -E 's/^```.*$/ code block. /' \
@@ -2204,6 +2292,11 @@ cmd_voice_then_text() {
 
   { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
   [ -n "${BOT_TOKEN:-}" ] || load_token 2>/dev/null || return 0
+  # The numbers, appended here rather than left to the model to remember. AFTER
+  # the speech above, deliberately: the note reads `lead`, which came from the
+  # original text, so the footer is never read aloud as "chart increasing, five
+  # H sixty two percent".
+  text="$(with_usage_footer "$text")"
   # One retry: a single dropped packet must not cost the operator the message.
   tg_send "$chat" "$text" >/dev/null 2>&1 && return 0
   sleep 2
@@ -2918,8 +3011,10 @@ cmd_config() {
           info "Status-bar label: $(bar_label)$([ "$(bar_label)" = "$BAR_LABEL_DEFAULT" ] && echo " (default)")"
           info "  Set yours:  ${c_bold}abs config label <name>${c_reset}   or   ${c_bold}abs config label auto${c_reset}" ;;
         --clear|clear)
-          state_set 'del(.bar_label)'
-          ok "Status-bar label back to '$BAR_LABEL_DEFAULT' — the bar reads ${BAR_LABEL_DEFAULT}:@$(state_get '.bot')." ;;
+          # Marked seeded, or the next launch would helpfully put the account
+          # name back and clearing would look broken.
+          state_set 'del(.bar_label) | .bar_label_seeded = true'
+          ok "Status-bar label back to '$BAR_LABEL_DEFAULT' — the bar reads ${BAR_LABEL_DEFAULT}:@$(state_get '.bot'). Your account name: ${c_bold}abs config label auto${c_reset}" ;;
         auto)
           local n; n="$(claude_display_name)" \
             || die "No display name on the Claude account here. Set one directly: abs config label <name>"
@@ -2939,6 +3034,17 @@ cmd_config() {
           else
             ok "Status-bar label: $c — the bar reads ${c}:@$(state_get '.bot')."
           fi ;;
+      esac ;;
+    footer)
+      case "$val" in
+        on|true)   state_set 'del(.no_usage_footer)'
+                   ok "Usage footer ON — every reply abs sends carries the limits and the context left." ;;
+        off|false) state_set '.no_usage_footer = true'
+                   ok "Usage footer OFF — replies go out with nothing appended." ;;
+        "")        info "Usage footer: $([ "$(state_get '.no_usage_footer')" = "true" ] && echo off || echo on)"
+                   local _f; _f="$(usage_footer_line)"
+                   [ -n "$_f" ] && info "  Right now: ${_f}" ;;
+        *)         die "Usage: abs config footer on|off" ;;
       esac ;;
     usage-refresh)
       case "$val" in
@@ -3004,8 +3110,14 @@ cmd_config() {
       # not by the model remembering — which is the whole point of it living here.
       case "$val" in
         text|off)
-          state_set 'del(.reply_mode)'
+          # Stored, not deleted — see the note in _reply_channel_set. An
+          # absent key means "whatever this machine can do", which is not what
+          # someone who just typed `text` asked for.
+          state_set '.reply_mode = "text"'
           ok "Replies: text only." ;;
+        auto|default|--clear|clear)
+          state_set 'del(.reply_mode)'
+          ok "Replies: $(reply_mode) — following the machine (voice where it can speak)." ;;
         both|voice+text|on)
           voice_can_speak || warn "Voice isn't installed here — set it up with 'abs voice setup' or the notes won't send."
           state_set '.reply_mode = "both"'
@@ -3016,7 +3128,7 @@ cmd_config() {
           ok "Replies: voice only. Code, links and attachments still go as text — a voice note can't carry them. Takes effect next session." ;;
         "")
           info "Replies: $(reply_mode)" ;;
-        *) die "Usage: abs config reply text|both|voice" ;;
+        *) die "Usage: abs config reply text|both|voice|auto" ;;
       esac
       # Asking for a voice note on every result and then having a heuristic decide
       # you didn't want to be told is the exact contradiction this is meant to end.
@@ -3096,6 +3208,7 @@ cmd_config() {
       info "  start menu     $([ "$(state_get '.no_start_menu')" = "true" ] && echo off || echo on)"
       info "  reply text     $(reply_text_on && echo on || echo off)"
       info "  reply voice    $(reply_voice_on && echo on || echo off)"
+      info "  usage footer   $([ "$(state_get '.no_usage_footer')" = "true" ] && echo off || echo on)"
       info "  voice first    $(voice_first_on && echo on || echo off)$([ "$(reply_mode)" = both ] || echo " (mode '$(reply_mode)' — no effect)")"
       info "  auto-silent    $([ "$(state_get '.no_auto_silent')" = "true" ] && echo off || echo on)"
       info "  voice engine   $(state_get '.tts_engine' | sed 's/^null$/auto/')"
@@ -3103,7 +3216,7 @@ cmd_config() {
       info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
       info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice  |  voice-first on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice|auto  |  footer on|off  |  voice-first on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 
@@ -3502,6 +3615,26 @@ _pct_color() {
   fi
 }
 
+# The same idea for the context window, with the polarity the other way up.
+#
+# `_pct_color` grades a percentage USED — high is bad, and it climbs green to
+# brick. Context is reported as percentage REMAINING, so high is GOOD and the
+# scale has to run the other way. Two functions rather than a flag, because a
+# single one taking "which direction" is exactly the kind of thing that gets
+# called with the wrong argument and then quietly tells you a full context
+# window is an emergency.
+#
+# Thresholds are the operator's: above half is fine, a fifth left is worth
+# noticing, a tenth left is nearly out.
+_ctx_color() {
+  local p="$1"
+  if   [ "$p" -ge 50 ]; then printf '%b' '\033[38;5;71m'    # 50+    soft green
+  elif [ "$p" -ge 20 ]; then printf '%b' '\033[38;5;179m'   # 20-49  soft amber
+  elif [ "$p" -ge 10 ]; then printf '%b' '\033[38;5;173m'   # 10-19  soft coral
+  else                       printf '%b' '\033[38;5;131m'   # < 10   muted brick
+  fi
+}
+
 # One usage segment. With colour on, "Label N%" takes the threshold colour and
 # the (resets …) note is dimmed; with colour off (Telegram footer) it's plain.
 _glance_seg() {   # <color?> <label+pct> <pct> <paren-or-empty>
@@ -3568,13 +3701,17 @@ usage_glance_str() {
   elif [ -n "$rel" ]; then
     [ -n "$out" ] && out="${out}${sep}(resets ${rel})" || out="resets ${rel}"
   fi
-  # Context last and always dim, never colour-graded by threshold like the limits
-  # above. It is the least urgent number here — a limit at 90% stops your work, a
-  # context window at 30% just means this conversation is getting long — and the
-  # operator asked for it to read as a footnote rather than compete.
+  # Context last, and colour-graded since 3.0.3 — the operator asked for it after
+  # living with the dim version. It was deliberately a dim footnote before, on the
+  # reasoning that a limit at 90% stops your work while a long conversation only
+  # means a long conversation. In use that was wrong: running out of context ends
+  # the session just as hard, and it is the one number here that moves fast enough
+  # to be worth watching mid-task.
+  #
+  # `_ctx_color`, not `_pct_color` — this is percent REMAINING.
   if [ -n "$ctx" ]; then
     local cseg="ctx ${ctx}%"
-    [ "$color" = 1 ] && cseg="${dim}ctx ${ctx}%${off}"
+    [ "$color" = 1 ] && cseg="$(_ctx_color "$ctx")ctx ${ctx}%${off}"
     [ -n "$out" ] && out="${out}${sep}${cseg}" || out="$cseg"
   fi
   printf '%s' "$out"
@@ -3584,6 +3721,52 @@ usage_glance_str() {
 cmd_usage_glance() {
   local g; g="$(usage_glance_str)"
   [ -n "$g" ] && printf '📊 %s' "$g"
+  return 0
+}
+
+# --- the usage footer, enforced rather than remembered ------------------------
+#
+# The numbers used to reach Telegram only if the model remembered to run
+# `usage-glance` and paste the output. It forgot, and the operator noticed: he was
+# not seeing the limits or the context percentage on his phone at all.
+#
+# This is the same lesson as reply mode. An instruction in the prompt is a wish; a
+# hook is a guarantee. So abs appends the line itself, on every reply it sends,
+# and the prompt now tells the model NOT to add its own.
+#
+# The caveat, stated plainly because it is a real hole: abs can only append to a
+# message abs is sending. In voice-first `both` — the default on a machine that
+# can speak, and what the operator runs — the gate blocks the tool and abs does
+# the send, so the footer is guaranteed. In plain `text` mode the plugin does the
+# send and abs never touches the bytes; there the prompt is still the mechanism.
+#
+# `abs config footer off` turns it off.
+usage_footer_line() {
+  [ "$(state_get '.no_usage_footer')" = "true" ] && return 0
+  local g; g="$(usage_glance_str 2>/dev/null || true)"
+  [ -n "$g" ] || return 0
+  printf '📊 %s' "$g"
+  return 0
+}
+
+# Append it, separated by a blank line so it reads as a footer rather than as the
+# last sentence. Never fails: a message with no footer beats no message.
+with_usage_footer() {
+  local text="$1" f=""
+  f="$(usage_footer_line 2>/dev/null || true)"
+  [ -n "$f" ] || { printf '%s' "$text"; return 0; }
+  # Already there — the model pasted one despite being told not to, or this is a
+  # retry of a send that got the footer on the first attempt. Don't stack them.
+  # The LAST line specifically, not anywhere in the body: a report is perfectly
+  # entitled to mention 📊 in a sentence, and skipping the footer because of that
+  # is the failure this whole function exists to prevent.
+  local last; last="$(printf '%s' "$text" | tail -n 1)"
+  case "$last" in "📊 "*) printf '%s' "$text"; return 0 ;; esac
+  # Telegram's ceiling is 4096 characters and it REJECTS the message rather than
+  # truncating it. A footer that pushes a long report over the line would cost the
+  # whole report to add a status line — so near the limit, the report wins.
+  if [ "$(( ${#text} + ${#f} + 2 ))" -gt 4096 ]; then printf '%s' "$text"; return 0; fi
+  printf '%s\n\n%s' "$text" "$f"
   return 0
 }
 
@@ -3842,6 +4025,11 @@ cmd_menu() {
 # Where the voice add-on lives. Beside abs when the scripts sit there (dev
 # checkout); otherwise the dedicated dir under ABS_HOME.
 voice_root() {
+  # An explicit answer wins. Set by the suite so a test can pin "this machine can
+  # speak" / "cannot" rather than inheriting whatever the box it runs on happens
+  # to have — the reply-mode default now depends on it, and a default that
+  # answers differently per machine is untestable otherwise.
+  if [ -n "${ABS_VOICE_ROOT:-}" ]; then printf '%s\n' "$ABS_VOICE_ROOT"; return 0; fi
   local beside="${SCRIPT_PATH%/*}"
   if [ -f "$beside/speak.py" ] || [ -d "$beside/.venv-tts" ]; then
     printf '%s\n' "$beside"
@@ -4757,6 +4945,10 @@ cmd_run() {
   local cid policy
   cid="$(state_get '.chat_id')"
   [ -n "$cid" ] && [ "$cid" != "null" ] || die "State file is corrupt. Run: abs --profile $PROFILE setup"
+
+  # One read of ~/.claude.json per profile, ever, so the bar says who you are
+  # instead of "abs" without any render paying for it.
+  bar_label_seed
 
   policy="$(jq -r '.dmPolicy // "pairing"' "$TG_ACCESS" 2>/dev/null || echo "?")"
   if [ "$policy" = "disabled" ]; then

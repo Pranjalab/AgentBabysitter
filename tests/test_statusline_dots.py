@@ -38,6 +38,9 @@ ABS_SH = os.path.join(REPO, "abs.sh")
 
 PROFILE = "bartest"
 GREEN = "38;5;71"
+AMBER = "38;5;179"
+CORAL = "38;5;173"
+BRICK = "38;5;131"
 DIM = "38;5;244"
 
 _DOT = re.compile(r"\x1b\[(38;5;\d+)m●\x1b\[0m (Text|Voice|Daemon)")
@@ -126,6 +129,17 @@ def bar(tmp_path):
 
         def dots(self, **extra):
             return {name: colour for colour, name in _DOT.findall(self.render(**extra))}
+
+        def run(self, *args, **extra):
+            """Any other abs subcommand against the same throwaway home."""
+            env = dict(os.environ, ABS_HOME=str(home))
+            for k in ("TELEGRAM_STATE_DIR", "ABS_SESSION_PROFILE"):
+                env.pop(k, None)
+            env.update(extra)
+            return subprocess.run(
+                ["bash", str(lone / "abs"), "--profile", PROFILE, *args],
+                capture_output=True, text=True, env=env,
+            )
 
     b = Bar()
     Bar.home = home
@@ -258,16 +272,66 @@ def test_no_daemon_directory_is_also_quiet(bar):
 # ---- the shape the operator asked for ----------------------------------------
 
 
-def test_context_is_last_and_dim_rather_than_colour_graded(bar):
-    """A limit at 90% stops your work; a context window at 30% only means this
-    conversation is getting long. It reads as a footnote: lowercase, always dim,
-    after the limits — never in the amber/red the limits use."""
+def test_context_is_last_on_the_bar(bar):
+    """After the limits. Those are what stop your work outright; context is the one
+    that runs down inside a single session."""
     bar.rc()
-    out = _render_with(bar, PAYLOAD)
-    plain = _plain(out)
+    plain = _plain(_render_with(bar, PAYLOAD))
     assert "ctx 68%" in plain, plain
     assert plain.index("ctx 68%") > plain.index("5H "), plain
-    assert f"\x1b[{DIM}mctx 68%" in out, out
+
+
+# ---- the context colour, and its polarity ------------------------------------
+#
+# 3.0.3, at the operator's request. It was a dim footnote before, on the reasoning
+# that a long conversation is not an emergency — which did not survive contact with
+# actually running out mid-task.
+#
+# The polarity is the thing to hold on to. The limits beside it are percent USED,
+# so they climb green → brick as they fill. Context is percent REMAINING, so it
+# falls green → brick as it empties. Same bar, opposite direction, which is why
+# there are two colour functions and why this test checks both ends.
+
+
+@pytest.mark.parametrize(
+    "left,colour,why",
+    [
+        (100, GREEN,  "a fresh session"),
+        (68,  GREEN,  "the ordinary middle"),
+        (50,  GREEN,  "exactly half is still fine"),
+        (49,  AMBER,  "under half: worth noticing"),
+        (20,  AMBER,  "the amber floor"),
+        (19,  CORAL,  "a fifth left"),
+        (10,  CORAL,  "the coral floor"),
+        (9,   BRICK,  "nearly out"),
+        (0,   BRICK,  "out"),
+    ],
+)
+def test_the_context_percentage_is_coloured_by_how_much_is_left(bar, left, colour, why):
+    bar.rc()
+    out = _render_with(bar, {"context_window": {"remaining_percentage": float(left)}})
+    assert f"\x1b[{colour}mctx {left}%" in out, f"{why}: {out!r}"
+
+
+def test_context_and_the_limits_grade_in_opposite_directions(bar):
+    """The mistake this guards against: colouring context with the used-percentage
+    scale, which would paint a nearly-empty window green and a fresh one red."""
+    bar.rc()
+    out = _render_with(bar, {
+        "context_window": {"remaining_percentage": 5.0},
+        "rate_limits": {"five_hour": {"used_percentage": 5.0}},
+    })
+    assert f"\x1b[{GREEN}m5H 5%" in out, out      # 5% of the limit used: fine
+    assert f"\x1b[{BRICK}mctx 5%" in out, out     # 5% of the window left: not fine
+
+
+def test_the_telegram_footer_carries_no_colour(bar):
+    """`usage-glance` feeds a chat message. An ESC sequence there is literal junk."""
+    bar.rc()
+    _render_with(bar, PAYLOAD)
+    out = bar.run("usage-glance").stdout
+    assert "ctx 68%" in out, out
+    assert "\x1b[" not in out, repr(out)
 
 
 def test_the_version_is_the_last_thing_on_the_bar(bar):

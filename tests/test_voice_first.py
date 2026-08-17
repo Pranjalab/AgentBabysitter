@@ -548,3 +548,51 @@ def test_a_short_reply_is_not_announced(box):
     """Announcing a five-second note is noise."""
     _hook(box, _reply(text=SAYABLE))
     assert box.tags() == ["VOICE", "TEXT"]
+
+
+# ---- the usage footer rides with the text ------------------------------------
+#
+# This is the path that makes the footer a guarantee rather than a request: the
+# gate blocks the reply tool, so abs owns the send and can append the numbers
+# itself. The model no longer has to remember, and cannot double it up.
+
+
+def _warm_usage_cache(box, **fields):
+    cache = {"session_pct": 62, "week_pct": 43, "ctx_left_pct": 68,
+             "fetched_at": 4102444800, "source": "statusline"}
+    cache.update(fields)
+    (box.rc.parent / "usage.json").write_text(json.dumps(cache))
+
+
+def test_the_delivered_text_carries_the_usage_footer(box):
+    _warm_usage_cache(box)
+    assert _hook(box, _reply()).returncode == 2
+    sent = box.delivered()["text"]
+    assert sent.startswith(SAYABLE)
+    assert sent.rstrip().splitlines()[-1].startswith("📊 ")
+    assert "ctx 68%" in sent
+
+
+def test_the_footer_is_never_read_aloud(box):
+    """It would come out as "chart increasing, five H sixty two percent". The
+    note is built from the original text, before the footer is added — the order
+    inside the worker is what guarantees it, so it gets a test."""
+    _warm_usage_cache(box)
+    _hook(box, _reply())
+    spoken = box.spoken()
+    assert spoken, "nothing was spoken at all"
+    assert "📊" not in spoken
+    assert "ctx 68%" not in spoken
+
+
+def test_a_cold_cache_still_delivers_the_message(box):
+    """No numbers yet is not a reason to lose the report."""
+    assert _hook(box, _reply()).returncode == 2
+    assert box.delivered()["text"] == SAYABLE
+
+
+def test_the_footer_can_be_turned_off(box):
+    _warm_usage_cache(box)
+    box.set(no_usage_footer=True)
+    assert _hook(box, _reply()).returncode == 2
+    assert box.delivered()["text"] == SAYABLE
