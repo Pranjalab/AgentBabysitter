@@ -120,18 +120,27 @@ Send a voice note and it's transcribed; ask for the answer spoken and it replies
 with a real voice message. Both run **locally** — no audio ever leaves your
 machine.
 
-Voice is an optional add-on (it pulls in Whisper + Chatterbox, a few GB), so the
-installer offers it as a separate step — or turn it on any time with a single
-command:
+Voice is an optional add-on (it pulls in Whisper for listening and Kokoro for
+speaking), so the installer offers it as a separate step — or turn it on any time
+with a single command:
 
 ```bash
 abs voice setup      # builds the local speech engines; abs voice status to check
 ```
 
-Pick the **model** for speed vs. expression (`abs config voice standard|turbo` —
-turbo generates ~1.8× faster), and **clone a voice** from any short reference clip
-so replies speak in the voice you choose (`abs config voice-sample <clip>`, or
-`--audio-prompt` per call).
+The speaking engine is **Kokoro**: 82M parameters, built for the CPU, a note in
+seconds on a laptop. That matters more than it sounds — the alternative engine
+wants a GPU, and without one a long report takes minutes, which is long enough
+for a burst of replies to pile up on each other.
+
+**Cloning a voice** is the one thing Kokoro cannot do. If you want replies in a
+voice from your own reference clip, build the other engine as well — it is opt-in
+precisely because it is slow:
+
+```bash
+abs voice setup --chatterbox          # adds the GPU engine, for cloning only
+abs config voice-sample <clip>        # then point it at your reference audio
+```
 
 **"Always answer me in voice" — as a setting, not a request.** Asking the
 assistant to always reply with a voice note works until the session gets long and

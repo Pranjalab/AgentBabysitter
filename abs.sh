@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.2.2"
+readonly ABS_VERSION="3.2.3"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -4183,12 +4183,19 @@ voice_root() {
   fi
 }
 
-# True only when the whole pipeline is present: both venvs and both scripts.
+# True when the whole pipeline is present: transcription in, speech out.
 # Both build_prompt and cmd_say gate on this, so "installed" means one thing.
+#
+# "Speech out" is EITHER engine, not chatterbox specifically. It used to demand
+# .venv-tts, which since 3.2.3 would call a perfectly good kokoro-only install
+# broken — and kokoro is what a normal install now gets. Chatterbox is the opt-in
+# extra, kept for the one thing kokoro cannot do (clone a voice), so requiring it
+# would be requiring the exception.
 voice_have() {
   local r; r="$(voice_root)"
-  [ -x "$r/.venv/bin/python" ] && [ -x "$r/.venv-tts/bin/python" ] \
-    && [ -f "$r/speak.py" ] && [ -f "$r/transcribe.py" ]
+  [ -x "$r/.venv/bin/python" ] && [ -f "$r/transcribe.py" ] || return 1
+  { [ -x "$r/.venv-kokoro/bin/python" ] && [ -f "$r/speak_kokoro.py" ]; } \
+    || { [ -x "$r/.venv-tts/bin/python" ] && [ -f "$r/speak.py" ]; }
 }
 
 # Narrower than voice_have: can this machine SPEAK? Either engine will do, and
@@ -4235,16 +4242,13 @@ voice_status() {
   local r; r="$(voice_root)"
   info "${c_bold}Voice${c_reset}  ${c_dim}(root: $r)${c_reset}"
   _voice_row "transcribe.py   speech → text"  "$r/transcribe.py"        file "abs voice setup"
-  _voice_row "speak.py        text → speech"  "$r/speak.py"             file "abs voice setup"
+  _voice_row "speak_kokoro.py text → speech"  "$r/speak_kokoro.py"      file "abs voice setup"
   _voice_row "STT engine      .venv"          "$r/.venv/bin/python"     x    "abs voice setup"
-  _voice_row "TTS chatterbox  .venv-tts"      "$r/.venv-tts/bin/python" x    "abs voice setup"
-  # Listed on its own line since 3.2.2. It was invisible before, and its absence
-  # is the difference between a note that takes seconds and one that takes
-  # minutes: chatterbox wants a GPU, kokoro is an 82M model that runs on CPU. On
-  # the operator's MacBook Air only chatterbox was installed, and every note was
-  # a multi-minute CPU inference — which is what turned a burst of replies into
-  # three wedged processes. You cannot fix what the status page does not show.
-  _voice_row "TTS kokoro      .venv-kokoro"   "$r/.venv-kokoro/bin/python" x "abs voice setup --force  (CPU-fast; recommended without a GPU)"
+  _voice_row "TTS kokoro      .venv-kokoro"   "$r/.venv-kokoro/bin/python" x "abs voice setup"
+  # Chatterbox is OPTIONAL from 3.2.3 — the slow GPU engine, kept only because it
+  # is the one that can clone a voice. Its row says so, otherwise a missing tick
+  # beside "TTS" reads as a broken install.
+  _voice_row "voice cloning   .venv-tts"      "$r/.venv-tts/bin/python" x    "abs voice setup --chatterbox  (optional)"
   _voice_row "ffmpeg          packages Opus"  ffmpeg                    cmd  "sudo apt install ffmpeg  (or brew install ffmpeg)"
   _voice_row "uv              env manager"    uv                        cmd  "abs voice setup installs it for you"
   info ""
@@ -4253,10 +4257,11 @@ voice_status() {
     # Say which engine will actually run, because "ready" hides a 10x difference
     # in how long a note takes and the operator had no way to see which he had.
     if [ -x "$r/.venv-kokoro/bin/python" ]; then
-      info "  ${c_dim}Engine: kokoro (CPU, fast).${c_reset}"
+      info "  ${c_dim}Engine: kokoro — 82M, CPU, a note in seconds.${c_reset}"
     else
-      info "  ${c_dim}Engine: chatterbox only — it wants a GPU, and on CPU a long"
-      info "  report can take minutes. Add the fast CPU engine with:${c_reset} ${c_bold}abs voice setup --force${c_reset}"
+      warn "  Engine: chatterbox only. It wants a GPU; on CPU a long report takes"
+      info "  minutes, and overlapping notes can pile up. Get the fast one:"
+      info "    ${c_bold}abs voice setup --force${c_reset}"
     fi
   else
     info "Not set up yet.  Build it with: ${c_bold}abs voice setup${c_reset}"
@@ -4264,17 +4269,34 @@ voice_status() {
 }
 
 # `abs voice setup` — the one place voice gets built. Idempotent; safe to re-run.
+# Since 3.2.3 this builds KOKORO, not chatterbox.
+#
+# Chatterbox was the original engine and it was the wrong default for almost
+# everyone. It is torch on a GPU; without one it falls back to the CPU and a
+# report takes minutes rather than seconds — which is how the operator's MacBook
+# Air ended up with three overlapping synthesis processes and no voice notes at
+# all. Kokoro is 82M parameters, designed for CPU, and produces a note in
+# seconds on the same hardware.
+#
+# Chatterbox is not deleted, because it can do exactly one thing kokoro cannot:
+# clone a voice from a sample. It is `--chatterbox` now — the exception, asked
+# for on purpose, rather than the thing everybody gets by default.
 voice_setup() {
-  local force=0
+  local force=0 want_chatter=0 want_kokoro=1
   for a in "$@"; do
     case "$a" in
       --force|--rebuild) force=1 ;;
+      --chatterbox) want_chatter=1 ;;
+      --both) want_chatter=1 ;;
+      --kokoro) want_kokoro=1 ;;
       -h|--help)
-        info "Usage: abs voice setup [--force]"
-        info "  Builds the local speech-to-text (Whisper) and text-to-speech (Chatterbox) engines."
-        info "  --force  rebuild the venvs even if they already exist."
+        info "Usage: abs voice setup [--force] [--chatterbox]"
+        info "  Builds speech-to-text (Whisper) and text-to-speech (Kokoro — 82M, CPU, fast)."
+        info "  --force       rebuild the venvs even if they already exist."
+        info "  --chatterbox  ALSO build chatterbox: slower and wants a GPU, but it is"
+        info "                the only engine that can clone a voice from a sample."
         return 0 ;;
-      *) die "Usage: abs voice setup [--force]" ;;
+      *) die "Usage: abs voice setup [--force] [--chatterbox]" ;;
     esac
   done
 
@@ -4286,8 +4308,9 @@ voice_setup() {
     return 0
   fi
 
-  info "${c_bold}Setting up voice${c_reset} — local speech-to-text (Whisper) and text-to-speech (Chatterbox)."
-  info "${c_dim}Everything runs on your machine. First use also downloads ~3-5 GB of model weights.${c_reset}"
+  info "${c_bold}Setting up voice${c_reset} — local speech-to-text (Whisper) and text-to-speech (Kokoro)."
+  [ "$want_chatter" = 1 ] && info "${c_dim}Plus chatterbox, for cloning a voice from a sample.${c_reset}"
+  info "${c_dim}Everything runs on your machine. First use also downloads the model weights once.${c_reset}"
   info "${c_dim}Target: $r${c_reset}"
   info ""
 
@@ -4321,10 +4344,13 @@ voice_setup() {
 
   mkdir -p "$r" || die "Could not create $r"
 
-  # The two CLI scripts. In a dev checkout they already sit beside abs (r is the
+  # The CLI scripts. In a dev checkout they already sit beside abs (r is the
   # checkout, nothing to fetch); for an installed abs, pull them into ~/.abs/voice.
-  local f
-  for f in transcribe.py speak.py; do
+  # speak.py comes down only with chatterbox — no point shipping the driver for
+  # an engine this install is not going to build.
+  local f scripts="transcribe.py speak_kokoro.py"
+  [ "$want_chatter" = 1 ] && scripts="$scripts speak.py"
+  for f in $scripts; do
     if [ ! -f "$r/$f" ]; then
       info "  ${c_dim}Fetching ${f}…${c_reset}"
       curl -fsSL "$ABS_RAW/$f" -o "$r/$f" || die "Could not download $f from $ABS_RAW"
@@ -4337,20 +4363,34 @@ voice_setup() {
   VIRTUAL_ENV="$r/.venv" uv pip install faster-whisper || die "Could not install faster-whisper."
   ok "Speech-to-text ready."
 
-  # TTS: chatterbox-tts on Python 3.11 (its numba pin needs an older Python, so
-  # it gets its own env). setuptools<81 is not optional — chatterbox's
-  # watermarker imports pkg_resources, which setuptools 81 dropped. This step
-  # pulls torch, so it's the slow one.
-  info "  ${c_dim}Building text-to-speech engine (.venv-tts, Python 3.11)… pulls torch, a few minutes.${c_reset}"
-  uv venv "$r/.venv-tts" --python 3.11 || die "Could not create the TTS venv (uv venv --python 3.11)."
-  VIRTUAL_ENV="$r/.venv-tts" uv pip install chatterbox-tts "setuptools<81" || die "Could not install chatterbox-tts."
-  ok "Text-to-speech ready."
+  # TTS: kokoro on Python 3.12. The default, and for most machines the only one
+  # worth having — 82M parameters, built for CPU, a note in seconds.
+  if [ "$want_kokoro" = 1 ]; then
+    info "  ${c_dim}Building text-to-speech engine (.venv-kokoro, Python 3.12)…${c_reset}"
+    uv venv "$r/.venv-kokoro" --python 3.12 || die "Could not create the kokoro venv (uv venv --python 3.12)."
+    VIRTUAL_ENV="$r/.venv-kokoro" uv pip install kokoro soundfile || die "Could not install kokoro."
+    ok "Text-to-speech ready (kokoro)."
+  fi
+
+  # Chatterbox, only when asked for. Python 3.11 because its numba pin needs an
+  # older interpreter, so it gets its own env. setuptools<81 is not optional —
+  # chatterbox's watermarker imports pkg_resources, which setuptools 81 dropped.
+  # This step pulls torch for a GPU, so it is the slow one by a wide margin.
+  if [ "$want_chatter" = 1 ]; then
+    info "  ${c_dim}Building chatterbox (.venv-tts, Python 3.11)… pulls torch, a few minutes.${c_reset}"
+    uv venv "$r/.venv-tts" --python 3.11 || die "Could not create the chatterbox venv (uv venv --python 3.11)."
+    VIRTUAL_ENV="$r/.venv-tts" uv pip install chatterbox-tts "setuptools<81" || die "Could not install chatterbox-tts."
+    ok "Voice cloning ready (chatterbox)."
+  fi
 
   info ""
   ok "Voice is set up."
   info "  Speak a line:  ${c_bold}abs say \"hi from your laptop\"${c_reset}"
   info "  Check it:      ${c_bold}abs voice status${c_reset}"
+  [ "$want_chatter" = 0 ] \
+    && info "  ${c_dim}Want to clone a voice from a sample? That needs the slower engine: ${c_reset}${c_bold}abs voice setup --chatterbox${c_reset}"
   info "  ${c_dim}The first say/transcribe downloads the model weights once — after that it's local and offline.${c_reset}"
+  return 0
 }
 
 cmd_voice() {
@@ -4361,7 +4401,10 @@ cmd_voice() {
     -h|--help)
       info "Usage: abs voice [status|setup]"
       info "  status   show which voice pieces are installed (default)"
-      info "  setup    build the local voice engines (add --force to rebuild)" ;;
+      info "  setup    build the local voice engines — Whisper in, Kokoro out"
+      info "           --force       rebuild even if they already exist"
+      info "           --chatterbox  also build the slow GPU engine, the only one"
+      info "                         that can clone a voice from a sample" ;;
     *) die "Usage: abs voice [status|setup]" ;;
   esac
 }
@@ -4503,10 +4546,10 @@ cmd_say() {
   case "$engine" in
     kokoro)
       venv="$venv_kokoro"; script="$vroot/speak_kokoro.py"
-      [ -x "$venv" ] || die "Kokoro isn't installed at $vroot/.venv-kokoro. Use --engine chatterbox, or install it." ;;
+      [ -x "$venv" ] || die "Kokoro isn't installed at $vroot/.venv-kokoro. Run: abs voice setup" ;;
     chatterbox)
       venv="$venv_chatter"; script="$vroot/speak.py"
-      [ -x "$venv" ] || die "Chatterbox isn't installed. Run: abs voice setup" ;;
+      [ -x "$venv" ] || die "Chatterbox isn't installed — it is the optional engine now. Run: abs voice setup --chatterbox" ;;
     *) die "Unknown engine '$engine'. Use kokoro or chatterbox." ;;
   esac
   # Strip flags the target engine doesn't understand rather than letting it
