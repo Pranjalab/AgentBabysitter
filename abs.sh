@@ -3896,6 +3896,10 @@ cmd_restricted_create() {
   assert_no_live_session
   ensure_plugin
   [ -t 0 ] || die "abs restricted create is interactive — run it at a terminal."
+  # 3.0.0 ships this dormant. The code is complete and unit-tested, but no human has
+  # ever provisioned one end to end (it needs a third bot token), so anyone reaching
+  # this point deserves to hear that from the tool rather than discover it.
+  warn "The restricted assistant is EXPERIMENTAL and not part of the 3.0.0 release — complete and unit-tested, but never provisioned by hand. Development continues on the 'restricted-assistant' branch."
   command -v docker >/dev/null 2>&1 || die "abs restricted create needs Docker."
   profile_exists "$name" && die "A profile named '$name' already exists."
 
@@ -4566,8 +4570,10 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
                           Docker sandbox sessions — one dedicated host folder, isolated (v3)
   ${c_bold}abs${c_reset} start sandbox [name]  Run a Claude session INSIDE a sandbox container (v3)
   ${c_bold}abs${c_reset} start new-bot        Provision a brand-new bot + profile, then launch it (v3)
-  ${c_bold}abs${c_reset} restricted create <name>  Locked-down assistant: own box, separate login,
-                          Haiku, no code-writing — daemon keeps it alive (v3)
+  ${c_bold}abs${c_reset} restricted create <name>  ${c_dim}EXPERIMENTAL, not part of 3.0.0${c_reset} — locked-down
+                          assistant: own box, separate login, Haiku, no
+                          code-writing. Never driven by hand; see
+                          docs/v3/manual-tests/restricted.md
   ${c_bold}abs${c_reset} restricted login <name>   Log Claude in inside a restricted assistant's box
   ${c_bold}abs${c_reset} restricted list             List restricted assistants
   ${c_bold}abs${c_reset} restricted start|stop|destroy <name>  Resume / pause / remove one

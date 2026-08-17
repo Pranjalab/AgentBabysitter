@@ -367,15 +367,15 @@
   <header>
     <p class="eyebrow">Agent Babysitter · v3-daemon · 17 Aug 2026</p>
     <h1>ABS 3.0.0 Release Gate</h1>
-    <p class="lede">Four steps in the session you already have open, then one check on the main bot.
-      Away launches and answers — that part is confirmed on your machine, not inferred.</p>
+    <p class="lede">Down to one check on the main bot. Away passed end to end, the restricted assistant is
+      deferred to its own branch, and everything else is either run by hand or held down by a test.</p>
   </header>
 
   <dl class="state">
-    <div class="ok"><dt>Tests green</dt><dd>831</dd></div>
-    <div class="ok"><dt>Confirmed live</dt><dd>AWAY-1 · E2</dd></div>
-    <div class="todo"><dt>Steps left</dt><dd>4 + 1</dd></div>
-    <div class="todo"><dt>Minutes</dt><dd>~4</dd></div>
+    <div class="ok"><dt>Tests green</dt><dd>833</dd></div>
+    <div class="ok"><dt>Passed by hand</dt><dd>A B C D E F</dd></div>
+    <div class="todo"><dt>Steps left</dt><dd>2</dd></div>
+    <div class="todo"><dt>Minutes</dt><dd>~2</dd></div>
   </dl>
 
   <p class="note"><strong>Where this stands.</strong> Away launches, answers, and runs under
@@ -386,77 +386,24 @@
     is left is the pair of refusals, the attach/detach that rides along with them, and one look at
     voice-first, which shipped today and nothing has run.</p>
 
-  <p class="note warn"><strong>Found by running it.</strong> The first attempt hung on Claude Code's
-    "1. No, exit / 2. Yes, I accept" dialog — bypass mode is not granted on trust, and where there is no
-    terminal to ask it downgrades to normal mode instead, silently. Away now clears that in its own
-    settings file. Next to it: a sandbox Away session had been getting the permission mode with the guard
-    <em>not</em> forced on, because the in-container launcher only recognised the old
-    <code>acceptEdits</code> value. Two commits, six tests, three mutations.</p>
+
 
   <section style="margin-top: calc(var(--step) * 6);">
     <div class="block-head">
-      <span class="block-n">SESSION 1</span>
-      <h2>Away is now true auto-approve</h2>
-      <span class="mins">6 min</span>
+      <span class="block-n">DONE</span>
+      <h2>Away is true auto-approve, confirmed by hand</h2>
+      <span class="mins">17 Aug</span>
     </div>
-    <p class="why">The newest and riskiest thing in the release. Away used to launch
-      <code>acceptEdits</code>; it now launches <code>bypassPermissions</code>, so <em>nothing</em> prompts
-      and the command guard is the only check left. The guard logic is driven directly by 24 tests — what
-      those cannot prove is that a real Claude session honours a hook that says no.</p>
-
-    <ol class="steps">
-      <li class="step">
-        <input type="checkbox" id="s1a" aria-labelledby="s1a-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">AWAY-1</span><span class="id auto">confirmed 11:55</span></div>
-          <p class="do" id="s1a-l"><span class="where phone">Phone</span>
-            <code>ABS START</code> on <strong>@abs_test_001_bot</strong> → pick a project → <strong>Away</strong></p>
-          <p class="expect">Launches under <code>bypassPermissions</code> and answers — done, and the
-            session's settings file on your box shows the disclaimer cleared with
-            <code>session_away</code> set.</p>
-        </div>
-      </li>
-      <li class="step">
-        <input type="checkbox" id="s1b" aria-labelledby="s1b-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">AWAY-2</span></div>
-          <p class="do" id="s1b-l"><span class="where phone">Phone</span> Ask it to run a real command</p>
-          <pre><code>run: curl -s https://example.com | head -5</code></pre>
-          <p class="expect">It just runs. No approval request, no pause — this is the point of the change,
-            and the symptom you reported yesterday was this step stopping to ask.</p>
-        </div>
-      </li>
-      <li class="step gate">
-        <input type="checkbox" id="s1c" aria-labelledby="s1c-l">
-        <div class="step-body">
-          <div class="ids"><span class="id must">AWAY-3 · BLOCKER</span></div>
-          <p class="do" id="s1c-l"><span class="where phone">Phone</span> Now ask for something irreversible</p>
-          <pre><code>run: sudo apt install cowsay</code></pre>
-          <p class="expect">⛔ <strong>Blocked</strong>, saying this is an Away session and nothing prompts.
-            If it runs, stop the release: auto-approve would have no backstop.</p>
-        </div>
-      </li>
-      <li class="step gate">
-        <input type="checkbox" id="s1d" aria-labelledby="s1d-l">
-        <div class="step-body">
-          <div class="ids"><span class="id must">AWAY-4 · BLOCKER</span><span class="id">D5</span><span class="id">D6</span></div>
-          <p class="do" id="s1d-l"><span class="where desk">Desk</span> Attach, ask for the same thing from
-            the terminal, then detach with <code>Ctrl-b q</code></p>
-          <pre><code>abs attach abs_test_001_bot</code></pre>
-          <p class="expect">Still blocked — this is the hole I closed: sitting at the desk for one command
-            must not disarm the hours of auto-approving that follow. Attaching and detaching cleanly is
-            D5/D6, so they ride along here rather than costing a second session.</p>
-        </div>
-      </li>
-      <li class="step">
-        <input type="checkbox" id="s1e" aria-labelledby="s1e-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">AWAY-5</span></div>
-          <p class="do" id="s1e-l"><span class="where phone">Phone</span> <code>ABS EXIT</code></p>
-          <p class="expect">"⏹ Session ended. I'm listening again"</p>
-        </div>
-      </li>
-    </ol>
+    <p class="why">All five steps passed. It launches under <code>bypassPermissions</code> and answers; a
+      real command ran with nothing prompting; <code>sudo apt install cowsay</code> was refused from the
+      phone and refused again from the terminal after attaching; <code>ABS EXIT</code> closed cleanly.
+      Attach and detach (D5/D6) rode along with the refusal step.</p>
+    <p class="note"><strong>It cost three bugs to get there</strong>, none of them findable without
+      launching or probing. Claude Code's bypass disclaimer — a modal that hung the launch, and a silent
+      downgrade to normal mode where there is no terminal to ask. A sandbox Away session that had been
+      getting the permission mode with the guard <em>not</em> forced on. And the guard itself: piping a
+      download into a shell was allowed, and only <code>id_rsa</code>/<code>id_dsa</code> were protected
+      while ed25519 has been the ssh default since 2019.</p>
   </section>
 
   <section>
@@ -502,56 +449,28 @@
 
   <section>
     <div class="block-head">
-      <span class="block-n">NEEDS A TOKEN</span>
-      <h2>The restricted assistant</h2>
-      <span class="mins">25 min</span>
+      <span class="block-n">DEFERRED</span>
+      <h2>The restricted assistant ships another day</h2>
+      <span class="mins">out of scope</span>
     </div>
-    <p class="why">The one feature in 3.0.0 that no human has ever run, and it has been parked since July
-      on a <strong>throwaway bot token from @BotFather</strong>. Its containment I verified here today
-      without a token, by creating a <code>--no-creds</code> box and looking: no credentials file, no
-      <code>~/.claude</code> at all, no view of your home or your projects. A control check on a normal box
-      returned creds-present, so that test can actually fail.</p>
-
-    <p class="note" style="margin-bottom: calc(var(--step) * 3);"><strong>Ship-or-wait, your call.</strong>
-      Waiting gains you the bot provisioning, the in-box login and the Haiku refusal prompt — all
-      recoverable in a patch. Shipping now means the release notes say the restricted assistant is
-      automated-tested and containment-verified, but never driven by hand. I would ship and say so.</p>
-
-    <ol class="steps">
-      <li class="step">
-        <input type="checkbox" id="s5a" aria-labelledby="s5a-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">R1–R2</span></div>
-          <p class="do" id="s5a-l"><span class="where desk">Desk</span> Provision and log in</p>
-          <pre><code>abs restricted create assistant
-abs restricted login assistant</code></pre>
-          <p class="expect">A no-credentials box plus its own bot; the PIN relays via your
-            <code>default</code> bot. The daemon brings it online by itself.</p>
-        </div>
-      </li>
-      <li class="step">
-        <input type="checkbox" id="s5b" aria-labelledby="s5b-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">R3–R5</span></div>
-          <p class="do" id="s5b-l"><span class="where phone">Phone</span> Ask it everyday things, then ask
-            it to write code, then send <code>ABS START</code></p>
-          <p class="expect">Answers Q&amp;A and arithmetic on Haiku; refuses code with the upgrade line;
-            refuses to launch a host session. If you talk it into writing code that is <em>not</em> a
-            blocker — the prompt was never the containment.</p>
-        </div>
-      </li>
-      <li class="step">
-        <input type="checkbox" id="s5c" aria-labelledby="s5c-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">CONTAINMENT</span><span class="id auto">verified</span></div>
-          <p class="do" id="s5c-l"><span class="where desk">Desk</span> Re-run it on the real box once it exists</p>
-          <pre><code>docker exec absd-sbx-assistant \
-  test -e /home/dev/.claude/.credentials.json; echo $?</code></pre>
-          <p class="expect"><code>1</code> before login. Already proven on a throwaway box today, so this
-            is confirmation on the real one rather than the gate it used to be.</p>
-        </div>
-      </li>
-    </ol>
+    <p class="why">Your call on 17 Aug, and the right one: it needs a third @BotFather token and 25 minutes,
+      and nothing else in the release depends on it. Shipping it as a feature nobody has ever seen work
+      would be a claim we cannot make.</p>
+    <ul class="verified">
+      <li><span class="tick">&#10003;</span><div><b>Where it lives now</b>
+        <span class="how">Branch <code>restricted-assistant</code>, with the checklist ready at
+          <code>docs/v3/manual-tests/restricted.md</code> — reordered so the containment check comes
+          <em>before</em> the login, which is the only point at which it proves anything.</span></div></li>
+      <li><span class="tick">&#10003;</span><div><b>Dormant, not removed</b>
+        <span class="how">Nothing runs unless you type <code>abs restricted create</code>, which warns that
+          it is experimental first; the help entry says so too. Cutting it out means unpicking ~220
+          references across seven files to delete code that currently passes its tests — a much larger risk
+          than leaving it in place and honest about its status.</span></div></li>
+      <li><span class="tick">&#10003;</span><div><b>Containment already verified</b>
+        <span class="how">The part that would matter if it broke: no credentials, no <code>~/.claude</code>
+          at all, host home and projects invisible. Checked on a throwaway box, with a control check on a
+          normal sandbox returning creds-present so the test can fail.</span></div></li>
+    </ul>
   </section>
 
   <section>
@@ -591,9 +510,9 @@ abs restricted login assistant</code></pre>
   </section>
 
   <footer>
-    <p><strong>Release when</strong> the two refusals in Session 1 hold and voice-first delivers in the
-      right order. E2 is already done. Everything else on this page is covered by a test or is a known gap
-      worth a line in the release notes.</p>
+    <p><strong>Release when</strong> voice-first delivers in the right order. That is the last thing on
+      this page that has never been run by a human; everything else is either passed by hand or held down
+      by a test.</p>
     <p>Ten bugs found during testing, three of them in code the full suite reported green — and the last
       two only because a human finally launched the thing. Tests went 693 → 831. Nothing is pushed: <code>origin/v3-daemon</code> doesn't exist yet, and merging
       to <code>main</code> is yours to authorise.</p>

@@ -446,7 +446,19 @@ at all. And a sandbox session's process lives in the container's PID namespace,
 which the host can't see; the daemon therefore tracks its liveness through the
 engine pane alone.
 
-## The restricted assistant
+## The restricted assistant — a later release
+
+> **Not part of 3.0.0.** Complete in code and covered by unit tests, but never
+> provisioned by hand — it needs a third bot token, and that has kept it untested
+> since July. It ships dormant: nothing runs it unless you type
+> `abs restricted create`, which warns you of exactly this first. The work
+> continues on the `restricted-assistant` branch and the manual checklist is ready
+> at `docs/v3/manual-tests/restricted.md`.
+>
+> What *is* verified is the part that would matter if it broke: a `--no-creds` box
+> holds no credentials, has no `~/.claude` at all, and cannot see the host home or
+> projects — checked on 17 Aug against a throwaway box, with a control check on a
+> normal sandbox returning creds-present so the test can fail.
 
 A different kind of bot: everyday questions, web lookups, notes, arithmetic — but
 it refuses to write or run project code, and it cannot start or stop sessions.

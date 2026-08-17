@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased — deferred out of 3.0.0
+
+- **The restricted assistant is not part of this release.** `abs restricted` is
+  complete in code and covered by unit tests, but no human has ever provisioned one
+  end to end: it needs a third @BotFather token, which has blocked the checklist
+  since July. Shipping it as a feature on that basis would be claiming something
+  nobody has seen work.
+  It ships **dormant** rather than removed. Nothing runs unless you type
+  `abs restricted create`, which now warns that it is experimental before it does
+  anything, and the help entry says so too. Removing it instead would mean unpicking
+  ~220 references across `abs.sh`, `daemon.py`, `sandbox.py`, `flow.py`,
+  `prompts.py`, `config.py` and `profiles.py` on the eve of a release, to delete code
+  that is currently passing its tests — a far larger risk than leaving it in place
+  and honest about its status.
+  Development continues on the **`restricted-assistant`** branch; the manual
+  checklist is ready at `docs/v3/manual-tests/restricted.md`.
+  What *is* verified is the containment, which is the part that would matter if it
+  broke: a `--no-creds` box holds no credentials, has no `~/.claude` at all, and
+  cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
+  control check on a normal sandbox returning creds-present so the test can fail.
+
 ## [3.0.0] — 2026-08-10 — v3: the always-on daemon
 
 - **An Away session gets past Claude Code's bypass disclaimer instead of hanging

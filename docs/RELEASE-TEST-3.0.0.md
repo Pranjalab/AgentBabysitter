@@ -201,8 +201,8 @@ Don't file these as FAILs:
 
 ```
 Must-pass  A PASS   B PASS*   C PASS (machine)
-Should     D PASS†  E PASS†   F PASS
-Restricted ___      Containment PASS (machine)
+Should     D PASS   E PASS    F PASS
+Restricted DEFERRED — not in 3.0.0    Containment PASS (machine)
 ```
 
 **\* B6/B7 (voice-only mode) were skipped by the operator's decision on 16 Aug.**
@@ -217,12 +217,24 @@ harness rather than by hand — `test_profile_picker_tty.py` — which is strong
 than a human eyeballing it once, except for C4, where "no residue on screen" is
 asserted against a replayed screen buffer and not a retina.
 
-**The restricted assistant remains the one genuinely untested feature**, and it
-is untested for a reason that is not a bug: it needs a third bot token. Its
+**The restricted assistant is deferred out of 3.0.0** by the operator's decision on
+17 Aug, rather than shipped untested. It stays in the tree, dormant and labelled
+experimental at both the help entry and the point of use, because removing ~220
+references across seven files hours before a release is a bigger risk than leaving
+passing code in place. Work continues on the `restricted-assistant` branch. Its
 containment — the part that would matter if it failed — is verified.
+
+**D and E are now PASS outright.** AWAY-1 through AWAY-5 and D5/D6 were run by hand
+on 17 Aug; E2 fired for real on a genuinely unanswered prompt during the run that
+found the disclaimer bug. What is left unverified by hand is B6/B7 and, by choice,
+the restricted assistant.
 
 Release when A, B and C pass and the containment spot-check passes. Anything else
 that failed goes in the release notes as a known issue rather than silently.
+
+**All of that now holds**, with the restricted assistant deferred rather than
+failed. Remaining before a tag: the voice-first check (shipped 17 Aug, one session
+to confirm the note leads), then merge and release.
 
 ## Run log — 16 Aug 2026, Pranjal + Claudex
 

@@ -358,7 +358,7 @@ abs doctor                            # diagnose the whole stack
 | 🖥 `abs sessions` / `abs attach [profile]` | List / attach engine sessions |
 | ▶️ `abs --resume` / `abs --new` | Skip the terminal start menu (resume top / fresh) |
 | 🏖 `abs sandbox build\|create\|list\|start\|stop\|destroy` | Docker sandboxes ([below](#-sandboxes--let-it-build-without-letting-it-near-your-machine)) |
-| 🤖 `abs restricted create\|login\|list\|start\|stop\|destroy` | The restricted assistant bot |
+| 🤖 `abs restricted create\|login\|list\|start\|stop\|destroy` | The restricted assistant bot — **experimental, not in 3.0.0** |
 
 From **Telegram** (daemon-mode grammar, whole-message):
 `ABS START` · `ABS STATUS` · `ABS POOL` · `ABS CLEAR POOL` · `ABS OFF` · `ABS BLOCK`
@@ -385,7 +385,13 @@ From Telegram, `ABS START` offers **🏖 Sandbox…** alongside your projects. N
 Claude credentials are **copied in at create**, never mounted, so what happens in
 the box stays in the box.
 
-### 🤖 The restricted assistant
+### 🤖 The restricted assistant — coming in a later release
+
+> **Not part of 3.0.0.** The code is here and unit-tested, but nobody has ever
+> provisioned one end to end, so it ships dormant and unadvertised rather than as a
+> feature. Development continues on the `restricted-assistant` branch, with the
+> checklist it needs in `docs/v3/manual-tests/restricted.md`. Running
+> `abs restricted create` works and says the same thing before it starts.
 
 A second kind of bot: everyday questions, web lookups, notes and arithmetic — but
 it will not write or run project code, and it cannot start or stop sessions.
