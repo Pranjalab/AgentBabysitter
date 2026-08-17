@@ -25,6 +25,44 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.1.0] — 2026-08-18 — voice by default, and the numbers you were promised
+
+Everything held back from 3.0.2 as `TODO(3.0.3)`, plus two things the operator
+asked for while this was being built. Ships on top of the 3.0.3 crash fix below;
+macOS launches cleanly for the first time in three releases.
+
+- **Voice is on by default where the machine can speak.** `reply_mode` with
+  nothing stored asks `voice_can_speak` and answers `both`. Never `voice`: an
+  unattended default must not be the one mode that suppresses the written record.
+  The consequence that made this more than one line — `text` used to be stored by
+  DELETING the key, which with the new default would hand back `both` and make
+  `abs config reply text` look ignored. Both `text` and `reply-voice off` now
+  write the value explicitly, and `abs config reply auto` is the way back to the
+  machine default.
+
+- **The status bar says who you are.** The label defaults to the Claude account
+  display name instead of the literal `abs` — resolved once at launch and stored,
+  never at render time, because `~/.claude.json` is a large file that also holds
+  account tokens and the bar redraws on every frame. `--clear` still means "back
+  to abs", and stays that way.
+
+- **Emoji never reach the speech engine.** They were read aloud as invented
+  words. Stripped as raw UTF-8 byte ranges under `LC_ALL=C` — no perl, no python,
+  nothing new inside the one path that must never fail. Verified identical under
+  GNU sed and busybox sed, on bash 5 and bash 3.2.
+
+- **The context percentage is coloured by how much is left**: green above 50,
+  amber to 20, coral to 10, brick below. Deliberately a separate colour scale from
+  the usage limits beside it — those grade percent USED and climb as they fill,
+  this grades percent REMAINING and falls as it empties.
+
+- **The usage footer is appended by abs, not remembered by the model.** The
+  limits and the context percentage were reaching Telegram only when the model
+  thought to paste them, which is to say rarely. In voice-first `both` — the
+  default now — abs owns the send and appends the line itself. It is kept out of
+  the voice note, dropped rather than pushing a message past Telegram's 4096-char
+  ceiling, and switchable with `abs config footer off`.
+
 ## [3.0.3] — 2026-08-18 — the third bash 3.2 crash, and the gap that let all three through
 
 - **`abs` died on every macOS launch with voice installed.** `build_prompt` exited
