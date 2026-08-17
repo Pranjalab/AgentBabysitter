@@ -48,7 +48,7 @@ def test_restricted_list_fails_once_and_cleanly(lone_abs, tmp_path):
     out = run(lone_abs, tmp_path, "restricted", "list")
     assert out.returncode != 0
     # The real message, once.
-    assert "needs the full checkout" in out.stderr
+    assert "needs the v3 source" in out.stderr
     # NOT the ERR trap's follow-up, which is the actual regression.
     assert "Unexpected failure" not in out.stderr
     assert out.stderr.count("✗") == 1
@@ -76,9 +76,15 @@ def test_no_restricted_subcommand_double_errors(lone_abs, tmp_path, args):
 
 
 def test_restricted_says_how_to_get_it(lone_abs, tmp_path):
-    """A dead end with no way out is a bad error. Name the fix."""
+    """A dead end with no way out is a bad error. Name the fix.
+
+    Since 3.2.0 the fix is `abs src install`, not `git clone`. Telling someone to
+    clone was a dead end of its own once the installer stopped offering it — the
+    v3 source now arrives as a tarball in ~/.abs/src.
+    """
     out = run(lone_abs, tmp_path, "restricted", "list")
-    assert "git clone" in out.stderr
+    assert "abs src install" in out.stderr
+    assert "git clone" not in out.stderr
 
 
 def test_sandbox_also_fails_once(lone_abs, tmp_path):

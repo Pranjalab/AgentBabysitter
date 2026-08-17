@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.1.0"
+readonly ABS_VERSION="3.2.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -49,6 +49,51 @@ readonly PROFILES_DIR="$ABS_HOME/profiles"
 # Raw-file base for anything abs fetches for itself at runtime (currently the
 # voice scripts). Overridable for testing against a fork/branch.
 readonly ABS_RAW="${ABS_REPO:-https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main}"
+
+# Tarball base, for the v3 source drop. Same repo, different endpoint.
+readonly ABS_TARBALL_BASE="${ABS_TARBALL_BASE:-https://github.com/Pranjalab/AgentBabysitter/archive/refs}"
+
+# --- where the v3 source lives ------------------------------------------------
+#
+# abs.sh alone is a complete v2. Everything v3 — the daemon, sandboxes, the start
+# menu's registry and recents, the restricted assistant — is the `absd` Python
+# package plus a venv, and for two releases the only way to have those was a git
+# checkout with abs.sh sitting inside it.
+#
+# That made a `curl … | bash` install a second-class one, and the operator's
+# instruction was blunt: an installer should install, not interview. So there is
+# no clone prompt any more, and instead `abs src install` unpacks the release
+# tarball into ~/.abs/src and builds the venv there. No git, no question, full v3.
+#
+# The resolution mirrors voice_root() deliberately — same shape, same reasoning:
+#
+#   * a dev checkout keeps absd/ beside abs.sh, and that always wins, so working
+#     on the repo never picks up a stale copy from ~/.abs/src;
+#   * anything else (the symlink or copy at ~/.local/bin/abs) looks in ~/.abs/src,
+#     which `abs uninstall` already wipes along with the rest of ~/.abs.
+abs_src_root() {
+  # Explicit answer wins — set by the suite to pin "installed" / "not installed"
+  # rather than inheriting whatever the box running the tests happens to have.
+  if [ -n "${ABS_SRC_ROOT:-}" ]; then printf '%s\n' "$ABS_SRC_ROOT"; return 0; fi
+  local beside="${SCRIPT_PATH%/*}"
+  if [ -d "$beside/absd" ]; then printf '%s\n' "$beside"; else printf '%s\n' "$ABS_HOME/src"; fi
+}
+
+# Is the v3 layer actually usable? Both halves, because either alone is a broken
+# install that fails later and less clearly: the package without the venv has no
+# interpreter, the venv without the package has nothing to run.
+abs_src_have() {
+  local r; r="$(abs_src_root)"
+  [ -d "$r/absd" ] && [ -x "$r/.venv/bin/python" ]
+}
+
+# What every v3 command says when the source isn't there. One sentence, one
+# command to run — this is the message that used to read "needs the full
+# checkout", which told people to go and clone something the installer had just
+# deliberately stopped offering.
+abs_src_missing_msg() {
+  printf '%s needs the v3 source, which this install does not have yet.\n  Get it with:  abs src install' "${1:-This}"
+}
 
 # Two older layouts, both migrated on first run and then left where they are.
 # This tool was called Claude RC until v2 and kept profiles under ~/.claude/clauderc.
@@ -1097,7 +1142,7 @@ RELAY_TOKEN=""; RELAY_CID=""; RELAY_BOT=""
 _resolve_relay_target() {
   RELAY_TOKEN=""; RELAY_CID=""; RELAY_BOT=""
   local root py relay_prof
-  root="$(dirname "$SCRIPT_PATH")"; py="$root/.venv/bin/python"
+  root="$(abs_src_root)"; py="$root/.venv/bin/python"
   [ -x "$py" ] || return 0
   relay_prof="$(env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.newbot relay-target --abs-home "$ABS_HOME" 2>/dev/null || true)"
   [ -n "$relay_prof" ] || return 0
@@ -2129,6 +2174,96 @@ _voice_speakable() {
 # The lock stops them overlapping — it does NOT promise an order, since flock is
 # not FIFO. If a queued note waits out the timeout it counts as a failure, which
 # in `voice` mode means the words go out as text rather than being dropped.
+# --- one note at a time, and never forever ------------------------------------
+#
+# Both of these are the fix for a bug the operator hit on a Mac: three replies
+# produced three TTS processes, all wedged, none ever finishing. He got the text
+# and never the audio.
+#
+# The serialisation used to be `flock`, which is Linux-only. The old comment said
+# so and called the macOS case "a weaker ordering guarantee, not a failure" —
+# that was wrong. On a Mac every reply started its own synthesis, so three
+# replies meant three copies of a multi-gigabyte speech model loading at once.
+# They thrashed and none of them finished.
+#
+# There was also no timeout ANYWHERE, on any platform. Linux only looked healthy
+# because flock kept the concurrency to one; a single hung engine wedges Linux
+# just as hard, and takes the TEXT with it in voice-first mode, where the words
+# are held until the note has gone.
+#
+# How long one note may take before it is abandoned. Kokoro does a long report in
+# well under a minute on CPU; chatterbox on a machine with no GPU is the slow
+# case this has to accommodate without ever being unbounded.
+readonly VOICE_SYNTH_TIMEOUT="${ABS_VOICE_TIMEOUT:-300}"
+# How long to wait for someone else's note before giving up on ours. Longer than
+# one synthesis, so a queue of two is served rather than dropped.
+readonly VOICE_LOCK_WAIT="${ABS_VOICE_LOCK_WAIT:-420}"
+# Grace on top of the timeout before a held lock is declared abandoned. The
+# holder should already have given up by then; this only covers the gap between
+# with_timeout killing it and the release running.
+readonly VOICE_LOCK_STALE_MARGIN="${ABS_VOICE_LOCK_STALE_MARGIN:-60}"
+
+_voice_lock_dir() { printf '%s' "$ABS_DIR/voice.lock.d"; }
+
+# mkdir is the portable atomic test-and-set: it either creates the directory or
+# fails, with no window in between, on every POSIX filesystem. A DIRECTORY, and a
+# new name, because older versions used `$ABS_DIR/voice.lock` as a flock file —
+# and a leftover regular file of that name would make mkdir fail forever.
+#
+# The timestamp goes in a file inside the lock rather than being read off the
+# directory's mtime: `stat` is spelled differently on GNU and BSD, and this is
+# code that has to work on the Mac by definition.
+_voice_lock_acquire() {
+  local lock waited=0 ts age now holder
+  lock="$(_voice_lock_dir)"
+  while :; do
+    if mkdir "$lock" 2>/dev/null; then
+      date +%s > "$lock/ts" 2>/dev/null || true
+      printf '%s\n' "$$" > "$lock/pid" 2>/dev/null || true
+      return 0
+    fi
+
+    # Two independent staleness signals, because each covers the other's blind
+    # spot. The holder's pid is the fast one: a process killed by the OOM killer,
+    # or lost to a reboot, is gone the moment we look, and queueing behind a
+    # corpse for six minutes would be its own outage.
+    holder="$(cat "$lock/pid" 2>/dev/null || true)"
+    case "$holder" in
+      ''|*[!0-9]*) : ;;
+      *) if ! kill -0 "$holder" 2>/dev/null; then
+           rm -rf "$lock" 2>/dev/null || true
+           continue
+         fi ;;
+    esac
+
+    # And age, because a pid can be REUSED — on a busy box the number in that
+    # file may belong to something entirely unrelated by now, and `kill -0` would
+    # cheerfully report a live holder forever. A lock older than one synthesis
+    # plus its grace is abandoned whatever the pid says.
+    #
+    # A lock with no readable stamp gets one now rather than being deleted on
+    # sight: there is no way to distinguish a process killed between the mkdir
+    # and the write from one that took the lock a millisecond ago, and deleting
+    # would race the live case. Stamping means it ages out like any other.
+    now="$(date +%s)"
+    ts="$(cat "$lock/ts" 2>/dev/null || true)"
+    case "$ts" in
+      ''|*[!0-9]*) date +%s > "$lock/ts" 2>/dev/null || true; age=0 ;;
+      *) age="$((now - ts))" ;;
+    esac
+    if [ "$age" -gt "$((VOICE_SYNTH_TIMEOUT + VOICE_LOCK_STALE_MARGIN))" ]; then
+      rm -rf "$lock" 2>/dev/null || true
+      continue
+    fi
+
+    [ "$waited" -ge "$VOICE_LOCK_WAIT" ] && return 1
+    sleep 2
+    waited="$((waited + 2))"
+  done
+}
+
+_voice_lock_release() { rm -rf "$(_voice_lock_dir)" 2>/dev/null || true; }
+
 _voice_mirror() {
   local original="$1" ceiling="${2:-$VOICE_MIRROR_MAX}" prepped hash last_hash last_ts now rc=0
   prepped="$(_voice_prep "$original")"
@@ -2157,18 +2292,22 @@ _voice_mirror() {
     if [ "$hash" = "$last_hash" ] && [ "$((now - last_ts))" -lt 300 ]; then return 0; fi
   fi
 
-  local lock="$ABS_DIR/voice.lock"
   mkdir -p "$ABS_DIR" 2>/dev/null || true
   # The text goes over stdin, never in argv: a reply can quote anything the
   # operator pasted, and argv is world-readable through /proc for as long as
   # synthesis runs. `-` is how both TTS scripts (and cmd_say) ask for stdin.
   #
-  # flock is Linux-only; on macOS the notes just aren't serialised, which is a
-  # weaker ordering guarantee, not a failure.
-  if command -v flock >/dev/null 2>&1; then
-    printf '%s' "$prepped" | flock -w 180 "$lock" -c "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+  # One note at a time, and never forever. See _voice_lock_acquire for why the
+  # lock is not flock any more, and with_timeout for why synthesis is bounded.
+  if _voice_lock_acquire; then
+    printf '%s' "$prepped" \
+      | with_timeout "$VOICE_SYNTH_TIMEOUT" bash -c "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+    _voice_lock_release
   else
-    printf '%s' "$prepped" | eval "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+    # Another note has been synthesising for longer than anyone should wait.
+    # Treated as a failure so `voice` mode falls back to text rather than
+    # swallowing the message.
+    rc=1
   fi
 
   if [ "$rc" -eq 0 ]; then
@@ -2943,10 +3082,9 @@ cmd_config() {
   if [ "${1:-}" = "workspace-root" ]; then
     shift
     local proot ppy
-    proot="$(dirname "$SCRIPT_PATH")"
+    proot="$(abs_src_root)"
     ppy="$proot/.venv/bin/python"
-    [ -x "$ppy" ] || die "abs config workspace-root needs $proot/.venv (Python 3.11+). Not found."
-    [ -d "$proot/absd" ] || die "absd/ not found next to abs.sh ($proot)."
+    abs_src_have || die "$(abs_src_missing_msg 'abs config workspace-root')"
     exec env PYTHONPATH="$proot" ABS_HOME="$ABS_HOME" "$ppy" -m absd.registry workspace-root "$@"
   fi
   require_setup
@@ -3226,7 +3364,7 @@ cmd_config() {
 # Silent on a v2-only install (no venv/absd) so nothing about v2 breaks.
 _v3_dashboard() {
   local droot dpy
-  droot="$(dirname "$SCRIPT_PATH")"
+  droot="$(abs_src_root)"
   dpy="$droot/.venv/bin/python"
   [ -x "$dpy" ] && [ -d "$droot/absd" ] || return 0
   printf '\n'
@@ -3341,6 +3479,13 @@ with_timeout() {
     exec >/dev/null 2>&1
     sleep "$secs"
     kill -TERM "-$cmd_pid" 2>/dev/null || kill -TERM "$cmd_pid" 2>/dev/null || true
+    # Then insist. TERM is a request, and the tree under a speech engine — abs,
+    # `abs say`, python, ffmpeg — is deep enough that something in it can be
+    # busy in a way that does not service signals promptly. Without the
+    # escalation the `wait` below never returns and this "timeout" times nothing
+    # out, which is exactly the failure it was added to prevent.
+    sleep 5
+    kill -KILL "-$cmd_pid" 2>/dev/null || kill -KILL "$cmd_pid" 2>/dev/null || true
   ) &
   killer_pid=$!
   wait "$cmd_pid" 2>/dev/null || rc=$?
@@ -4460,7 +4605,7 @@ flood_check() {
 _record_recent() {
   [ "${ABS_DAEMON_START:-0}" = "1" ] && return 0
   local rroot rpy rmode
-  rroot="$(dirname "$SCRIPT_PATH")"
+  rroot="$(abs_src_root)"
   rpy="$rroot/.venv/bin/python"
   [ -x "$rpy" ] && [ -d "$rroot/absd" ] || return 0
   rmode="normal"; [ "${ABS_AWAY:-0}" = "1" ] && rmode="away"
@@ -4540,7 +4685,7 @@ _start_menu() {
   START_CWD=""; MENU_CONTINUE=0
   [ "${ABS_DAEMON_START:-0}" = "1" ] && return 0        # daemon launch = no menu
   local mroot mpy
-  mroot="$(dirname "$SCRIPT_PATH")"
+  mroot="$(abs_src_root)"
   mpy="$mroot/.venv/bin/python"
   [ -x "$mpy" ] && [ -d "$mroot/absd" ] || return 0     # v2-only install → no menu
 
@@ -4597,9 +4742,9 @@ _start_menu() {
 _start_sandbox() {
   local name="${1:-}"; shift || true
   local root py
-  root="$(dirname "$SCRIPT_PATH")"
+  root="$(abs_src_root)"
   py="$root/.venv/bin/python"
-  if [ ! -x "$py" ] || [ ! -d "$root/absd" ]; then die "abs start sandbox needs $root/.venv (Python 3.11+)."; fi
+  abs_src_have || die "$(abs_src_missing_msg 'abs start sandbox')"
   command -v docker >/dev/null 2>&1 || die "abs start sandbox needs Docker."
   if [ -z "$name" ]; then
     local names=() n
@@ -4675,9 +4820,9 @@ cmd_new_bot() {
   [ -t 0 ] || die "abs start new-bot is interactive — run it at a terminal."
 
   local root py
-  root="$(dirname "$SCRIPT_PATH")"
+  root="$(abs_src_root)"
   py="$root/.venv/bin/python"
-  if [ ! -x "$py" ] || [ ! -d "$root/absd" ]; then die "abs start new-bot needs $root/.venv (Python 3.11+)."; fi
+  abs_src_have || die "$(abs_src_missing_msg 'abs start new-bot')"
 
   # Resolve the trusted relay target (an existing paired bot) into RELAY_* globals
   # NOW, while globals still point at it — before read_new_token overwrites BOT_TOKEN
@@ -4771,13 +4916,12 @@ _restricted_py() {
   # top of the real message. Callers use `|| return 1` and the dispatch site turns
   # that into the exit status.
   local root py
-  root="$(dirname "$SCRIPT_PATH")"; py="$root/.venv/bin/python"
+  root="$(abs_src_root)"; py="$root/.venv/bin/python"
   if [ ! -x "$py" ] || [ ! -d "$root/absd" ]; then
     printf '%s✗%s %s\n' "$c_red" "$c_reset" \
-      "abs restricted needs the full checkout (Python 3.11+ venv at $root/.venv)." >&2
-    info "  It isn't in a single-file install. Get it with:"
-    info "    ${c_bold}git clone https://github.com/Pranjalab/AgentBabysitter${c_reset}"
-    info "    ${c_bold}cd AgentBabysitter && ./install.sh${c_reset}"
+      "$(abs_src_missing_msg 'abs restricted')" >&2
+    info "  That downloads the release tarball into $ABS_HOME/src and builds its"
+    info "  venv. Nothing to clone, nothing to answer."
     return 1
   fi
   printf '%s' "$py"
@@ -4801,7 +4945,7 @@ cmd_restricted_create() {
   command -v docker >/dev/null 2>&1 || die "abs restricted create needs Docker."
   profile_exists "$name" && die "A profile named '$name' already exists."
 
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
+  local root py; root="$(abs_src_root)"; py="$(_restricted_py)" || return 1
 
   # 1) dedicated sandbox, NO host credentials copied (separate login inside the box).
   step "Creating the dedicated sandbox '$name' (no host credentials)…"
@@ -4852,7 +4996,7 @@ cmd_restricted_login() {
   profile_exists "$name" || die "No such restricted profile: '$name'."
   command -v docker >/dev/null 2>&1 || die "abs restricted login needs Docker."
   [ -t 0 ] || die "abs restricted login is interactive — run it at a terminal."
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
+  local root py; root="$(abs_src_root)"; py="$(_restricted_py)" || return 1
 
   step "Logging Claude in inside sandbox '$name'"
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
@@ -4862,7 +5006,7 @@ cmd_restricted_login() {
 
 # abs restricted list — every restricted profile + its sandbox/model/paused state.
 cmd_restricted_list() {
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
+  local root py; root="$(abs_src_root)"; py="$(_restricted_py)" || return 1
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.restricted list --abs-home "$ABS_HOME"
 }
 
@@ -4874,7 +5018,7 @@ cmd_restricted_stop() {
   profile_exists "$name" || die "No such restricted profile: '$name'."
   use_profile "$name"
   state_set '.paused = true'
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
+  local root py; root="$(abs_src_root)"; py="$(_restricted_py)" || return 1
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox stop "$name" >/dev/null 2>&1 || true
   ok "Restricted assistant '$name' paused (keep-alive off) and its box stopped."
   info "${c_dim}Resume with: abs restricted start $name${c_reset}"
@@ -4887,7 +5031,7 @@ cmd_restricted_start() {
   profile_exists "$name" || die "No such restricted profile: '$name'."
   use_profile "$name"
   state_set 'del(.paused)'
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
+  local root py; root="$(abs_src_root)"; py="$(_restricted_py)" || return 1
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox start "$name" >/dev/null 2>&1 || true
   ok "Restricted assistant '$name' resumed — the daemon will bring it back online shortly."
 }
@@ -4897,7 +5041,7 @@ cmd_restricted_destroy() {
   local name="${1:-}"
   [ -n "$name" ] || die "Usage: abs restricted destroy <name>"
   profile_exists "$name" || die "No such restricted profile: '$name'."
-  local root py; root="$(dirname "$SCRIPT_PATH")"; py="$(_restricted_py)" || return 1
+  local root py; root="$(abs_src_root)"; py="$(_restricted_py)" || return 1
   # Pause first so the daemon stops relaunching while we tear down.
   use_profile "$name"; state_set '.paused = true' 2>/dev/null || true
   env PYTHONPATH="$root" ABS_HOME="$ABS_HOME" "$py" -m absd.sandbox destroy "$name" --purge >/dev/null 2>&1 || true
@@ -5181,6 +5325,149 @@ cmd_run() {
     ${prompt_args[@]+"${prompt_args[@]}"}
 }
 
+# --- `abs src` — the v3 source, without a git clone ---------------------------
+#
+# The v3 layer is a Python package and a venv. Until now the only way to have
+# them was a git checkout with abs.sh living inside it, so the installer asked
+# "clone the repository?" — and the operator's verdict on that was that an
+# installer should install, not interview. The prompt is gone; this is what
+# replaces it. It downloads the release tarball, unpacks it into ~/.abs/src, and
+# builds the venv. No git, no question.
+#
+# Nothing here is silent or automatic: it downloads tens of megabytes and builds
+# a virtualenv, which is not something to do behind someone's back on a launch.
+
+# The newest python that will do. absd is asyncio-heavy and uses 3.11 syntax, so
+# 3.11 is a floor rather than a preference — an older interpreter fails at import
+# time with a SyntaxError, which is a terrible way to find out.
+_src_python() {
+  local c v
+  for c in python3.14 python3.13 python3.12 python3.11 python3 python; do
+    command -v "$c" >/dev/null 2>&1 || continue
+    v="$("$c" -c 'import sys; print(sys.version_info[0]*100+sys.version_info[1])' 2>/dev/null || echo 0)"
+    case "$v" in ''|*[!0-9]*) continue ;; esac
+    [ "$v" -ge 311 ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
+# Where a given ref's tarball lives. The tag first, because a release should
+# install the release; main as the fallback, because a version can be shipped
+# before anyone tags it and "no tag yet" must not mean "no daemon".
+_src_fetch() {   # <destination .tar.gz>
+  local dst="$1" url
+  url="$ABS_TARBALL_BASE/tags/v${ABS_VERSION}.tar.gz"
+  if curl -fsSL --max-time 300 -o "$dst" "$url" 2>/dev/null; then
+    printf '%s' "v$ABS_VERSION"; return 0
+  fi
+  url="$ABS_TARBALL_BASE/heads/main.tar.gz"
+  if curl -fsSL --max-time 300 -o "$dst" "$url" 2>/dev/null; then
+    printf '%s' "main"; return 0
+  fi
+  return 1
+}
+
+cmd_src() {
+  local sub="${1:-}"; shift || true
+  local root beside; root="$(abs_src_root)"; beside="${SCRIPT_PATH%/*}"
+
+  case "$sub" in
+    ""|status)
+      if [ -d "$beside/absd" ]; then
+        ok "v3 source: the checkout beside abs.sh ($beside)."
+        info "  A checkout always wins, so nothing under $ABS_HOME/src is used."
+        return 0
+      fi
+      if abs_src_have; then
+        ok "v3 source: $root"
+        info "  Version: $(cat "$root/VERSION" 2>/dev/null || echo unknown)   abs: $ABS_VERSION"
+        [ "$(cat "$root/VERSION" 2>/dev/null || true)" = "$ABS_VERSION" ] \
+          || warn "  The source and abs are different versions. Refresh with: abs src install --force"
+      else
+        warn "v3 source: not installed."
+        info "  Without it, abs is a complete v2 — pairing, voice, reports, the kill"
+        info "  ladder all work. The daemon, sandboxes and the start menu do not."
+        info "  Get them with: ${c_bold}abs src install${c_reset}"
+      fi
+      return 0 ;;
+    path) printf '%s\n' "$root"; return 0 ;;
+    install|update) ;;
+    *) die "Usage: abs src install [--force]  |  status  |  path" ;;
+  esac
+
+  local force=0
+  case "${1:-}" in --force|-f) force=1 ;; esac
+
+  # A checkout is the source. Overwriting ~/.abs/src would build something that
+  # is then never read, which is worse than doing nothing because it looks like
+  # it worked.
+  if [ -d "$beside/absd" ]; then
+    ok "This install already has the v3 source: the checkout at $beside."
+    info "  ~/.abs/src is only used when abs.sh is a lone copy. Nothing to do."
+    return 0
+  fi
+
+  if abs_src_have && [ "$force" = 0 ] \
+     && [ "$(cat "$root/VERSION" 2>/dev/null || true)" = "$ABS_VERSION" ]; then
+    ok "v3 source is already at $ABS_VERSION ($root)."
+    info "  Rebuild from scratch with: ${c_bold}abs src install --force${c_reset}"
+    return 0
+  fi
+
+  command -v curl >/dev/null 2>&1 || die "abs src install needs curl."
+  command -v tar  >/dev/null 2>&1 || die "abs src install needs tar."
+  local py3
+  py3="$(_src_python)" || die "abs src install needs Python 3.11 or newer on PATH.
+  The daemon is asyncio and uses 3.11 syntax; an older one fails at import."
+
+  info "${c_bold}Installing the v3 source${c_reset} — the daemon, sandboxes and the start menu."
+  info "${c_dim}Target: $root   Python: $py3 ($("$py3" -V 2>&1))${c_reset}"
+
+  # Staged beside the destination and swapped at the end, so an interrupted
+  # download or a failed venv build leaves the working copy alone rather than
+  # half-replacing it.
+  local stage="$ABS_HOME/src.new" old="$ABS_HOME/src.old" tarball
+  mkdir -p "$ABS_HOME"
+  rm -rf "$stage" "$old"
+  mkdir -p "$stage"
+  tarball="$stage/src.tar.gz"
+
+  local ref
+  info "${c_dim}Downloading…${c_reset}"
+  ref="$(_src_fetch "$tarball")" || { rm -rf "$stage"; die "Could not download the source tarball."; }
+  info "${c_dim}Got $ref.${c_reset}"
+
+  # GitHub wraps everything in one top-level directory whose name carries the
+  # ref. --strip-components=1 unwraps it without having to guess the name.
+  tar -xzf "$tarball" -C "$stage" --strip-components=1 \
+    || { rm -rf "$stage"; die "The tarball did not unpack — a truncated download?"; }
+  rm -f "$tarball"
+  [ -d "$stage/absd" ] || { rm -rf "$stage"; die "No absd/ in the downloaded source. Wrong ref?"; }
+
+  info "${c_dim}Building the venv…${c_reset}"
+  "$py3" -m venv "$stage/.venv" >/dev/null 2>&1 \
+    || { rm -rf "$stage"; die "Could not create a virtualenv with $py3. (On Debian/Ubuntu: sudo apt install python3-venv)"; }
+  # aiohttp is absd's only third-party import. Kept explicit rather than
+  # installing the project, because the project's own metadata targets the
+  # published wheel and does not list the daemon's deps.
+  "$stage/.venv/bin/python" -m pip install --quiet --disable-pip-version-check aiohttp >/dev/null 2>&1 \
+    || { rm -rf "$stage"; die "Could not install aiohttp into the venv."; }
+
+  # Import it before claiming success. A venv that exists but cannot import absd
+  # is exactly the failure this whole command is meant to stop happening later,
+  # at launch, in a pane nobody is watching.
+  env PYTHONPATH="$stage" "$stage/.venv/bin/python" -c 'import absd' >/dev/null 2>&1 \
+    || { rm -rf "$stage"; die "The downloaded source does not import. Nothing was changed."; }
+
+  if [ -d "$root" ]; then mv "$root" "$old"; fi
+  mv "$stage" "$root"
+  rm -rf "$old"
+
+  ok "v3 source installed at $root ($ref)."
+  info "  Next:  ${c_bold}abs daemon install${c_reset}   then   ${c_bold}abs daemon start${c_reset}"
+  return 0
+}
+
 # `abs daemon` — control surface for the v3 always-on daemon (absd): the
 # install|start|stop|status|logs|run verbs that manage the single background
 # process polling every idle bot. absd is a Python asyncio daemon (absd/ package,
@@ -5195,7 +5482,7 @@ cmd_run() {
 cmd_daemon() {
   local sub="${1:-}"; shift || true
   local root py unit_src unit_dst cfg_home
-  root="$(dirname "$SCRIPT_PATH")"
+  root="$(abs_src_root)"
   py="$root/.venv/bin/python"
   unit_src="$root/assets/absd.service"
   cfg_home="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -5203,8 +5490,7 @@ cmd_daemon() {
 
   case "$sub" in
     install)
-      [ -x "$py" ] || die "absd needs $root/.venv (Python 3.11+). Not found."
-      [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root)."
+      abs_src_have || die "$(abs_src_missing_msg 'The daemon')"
       [ -f "$unit_src" ] || die "Unit template missing: $unit_src"
       mkdir -p "$cfg_home/systemd/user"
       # Substitute the two placeholders. Use a non-/ sed delimiter since the
@@ -5270,8 +5556,7 @@ cmd_daemon() {
       exit 0
       ;;
     run)
-      [ -x "$py" ] || die "absd needs $root/.venv (Python 3.11+). Not found."
-      [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root)."
+      abs_src_have || die "$(abs_src_missing_msg 'The daemon')"
       exec env PYTHONPATH="$root" "$py" -m absd "$@"
       ;;
     *)
@@ -5295,10 +5580,9 @@ cmd_daemon() {
 cmd_engine() {
   local sub="${1:-}"; shift || true
   local root py
-  root="$(dirname "$SCRIPT_PATH")"
+  root="$(abs_src_root)"
   py="$root/.venv/bin/python"
-  [ -x "$py" ] || die "The v3 engine adapter needs $root/.venv (Python 3.11+). Not found."
-  [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root); v3 adapter unavailable."
+  abs_src_have || die "$(abs_src_missing_msg 'The v3 engine adapter')"
   # `abs attach` with no positional target may take the global --profile instead.
   if [ "$sub" = "attach" ] && [ "$#" -eq 0 ] && [ -n "${want_profile:-}" ]; then
     set -- "$want_profile"
@@ -5314,10 +5598,9 @@ cmd_engine() {
 cmd_project() {
   local sub="${1:-}"; shift || true
   local root py
-  root="$(dirname "$SCRIPT_PATH")"
+  root="$(abs_src_root)"
   py="$root/.venv/bin/python"
-  [ -x "$py" ] || die "abs project needs $root/.venv (Python 3.11+). Not found."
-  [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root)."
+  abs_src_have || die "$(abs_src_missing_msg 'abs project')"
   case "$sub" in
     add|list|rm) ;;
     *) die "Usage: abs project add|list|rm <dir>" ;;
@@ -5331,10 +5614,9 @@ cmd_project() {
 cmd_sandbox() {
   local sub="${1:-}"; shift || true
   local root py
-  root="$(dirname "$SCRIPT_PATH")"
+  root="$(abs_src_root)"
   py="$root/.venv/bin/python"
-  [ -x "$py" ] || die "abs sandbox needs $root/.venv (Python 3.11+). Not found."
-  [ -d "$root/absd" ] || die "absd/ not found next to abs.sh ($root)."
+  abs_src_have || die "$(abs_src_missing_msg 'abs sandbox')"
   command -v docker >/dev/null 2>&1 || die "abs sandbox needs Docker. Install it: https://docs.docker.com/engine/install/"
   case "$sub" in
     build|create|list|start|stop|destroy) ;;
@@ -5360,7 +5642,7 @@ cmd_sandbox() {
 # Clear ✓/!/✗ lines with actionable hints; never changes anything.
 cmd_doctor() {
   local root py cfg_home unit
-  root="$(dirname "$SCRIPT_PATH")"
+  root="$(abs_src_root)"
   py="$root/.venv/bin/python"
   cfg_home="${XDG_CONFIG_HOME:-$HOME/.config}"
   unit="$cfg_home/systemd/user/absd.service"
@@ -5385,9 +5667,12 @@ cmd_doctor() {
 
   step "Python & engines"
   if [ -x "$py" ] && env PYTHONPATH="$root" "$py" -c "import absd, aiohttp" >/dev/null 2>&1; then
-    info "  $g absd package + aiohttp importable"
+    info "  $g absd package + aiohttp importable  ${c_dim}($root)${c_reset}"
+    local srcver; srcver="$(cat "$root/VERSION" 2>/dev/null || true)"
+    [ -n "$srcver" ] && [ "$srcver" != "$ABS_VERSION" ] \
+      && info "  $y source is $srcver but abs is $ABS_VERSION — abs src install --force"
   else
-    info "  $b absd/.venv not usable — reinstall (see install.sh)"
+    info "  $b v3 source not usable — run: abs src install"
   fi
   if command -v tmux >/dev/null 2>&1; then info "  $g tmux ($(tmux -V 2>/dev/null))"; else info "  $y tmux not found (reference engine)"; fi
   local herdr_bin="" herdr_v
@@ -5464,6 +5749,9 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config start-menu on|off  Resume-first picker on interactive launch (default on)
   ${c_bold}abs${c_reset} config              Show this profile's launch defaults
 
+  ${c_bold}abs${c_reset} src install         Fetch the v3 source into ~/.abs/src (no git clone
+                          needed) — this is what turns a curl install into full v3
+  ${c_bold}abs${c_reset} src status          Where the v3 source is, and whether it matches abs
   ${c_bold}abs${c_reset} sessions            List engine sessions (v3; --json for scripts)
   ${c_bold}abs${c_reset} attach [profile]    Attach to a running session (v3)
   ${c_bold}abs${c_reset} project add|list|rm <dir>  Register projects the ABS START flow offers (v3)
@@ -5556,6 +5844,10 @@ main() {
   case "$cmd" in
     help|-h|--help) cmd_help; return 0 ;;
     version|--version|-V) printf 'Agent Babysitter %s\n' "$ABS_VERSION"; return 0 ;;
+    # src: fetches the v3 source into ~/.abs/src. Deliberately ahead of the jq
+    # check and the profile picker — it is the command you run on a bare install
+    # to GET the rest, so it must not depend on anything the rest needs.
+    src) shift; cmd_src "$@"; return 0 ;;
     # daemon: v3 always-on daemon control; needs no profile and no jq, and each
     # subcommand exits itself (install/start/stop/status/logs) or execs (run).
     daemon) shift; cmd_daemon "$@" ;;

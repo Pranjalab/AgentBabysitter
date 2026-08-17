@@ -25,6 +25,74 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.2.1] — 2026-08-18 — voice notes that wedged on macOS and never arrived
+
+Reported from the Mac within minutes of 3.1.0 going out: text arrived, audio
+never did, and three TTS processes sat on the box, one per reply, none of them
+finishing. Two defects, and Linux only looked healthy because one hid the other.
+
+- **The synthesis lock was `flock`, which is Linux-only.** The old code knew, and
+  called the macOS case "a weaker ordering guarantee, not a failure". It was a
+  failure: with no lock at all, every reply started its own synthesis, so three
+  replies meant three copies of a multi-gigabyte speech model loading at once on
+  an 8 GB machine. They thrashed and none returned. Serialisation is an atomic
+  `mkdir` mutex now — one code path on every OS — with the holder's pid and the
+  lock's age as two independent staleness signals, so neither a crashed holder
+  nor a recycled pid can silence voice permanently.
+
+- **Nothing was ever bounded, on any platform.** This is the worse half. `flock`
+  kept Linux to one process at a time, so a hang there read as slowness rather
+  than a wedge — but a single hung engine wedges Linux just as hard, and in
+  voice-first mode it takes the TEXT with it, because the words are held until
+  the note has gone. Synthesis runs under `with_timeout` now, which also learned
+  to escalate TERM to KILL: the tree under a speech engine is `abs` → `abs say`
+  → python → ffmpeg, and a timeout that only asks politely is not a timeout.
+  Verified on bash 3.2 and 5.2 that a wedged engine is abandoned in seconds and
+  the whole process tree is reaped, with no orphans.
+
+  The consequence of that bound is the point: `_voice_fallback_text` — the "voice
+  failed, send the words instead" path — existed all along and was **unreachable
+  on the only platform that needed it**, because a run that never returns never
+  sets a failure status.
+
+Found in parallel on the Mac and on Linux, from opposite ends. The pid-based
+reaping and the TERM→KILL escalation come from the Mac session's patch; the
+mutex, the timeout and the tests are this side's.
+
+## [3.2.0] — 2026-08-18 — the daemon, without a clone
+
+The last of the four items queued behind the macOS crash, and the one that made a
+`curl … | bash` install a second-class one.
+
+- **`abs src install`.** The v3 layer — the daemon, sandboxes, the start menu's
+  registry and recents — is the `absd` Python package plus a venv, and until now
+  the only way to have them was a git checkout with `abs.sh` living inside it. So
+  the installer asked "clone the repository?", which is exactly the interview an
+  installer should not conduct. The prompt went in 3.0.2; this is what replaces
+  it. The release tarball is unpacked into `~/.abs/src` and the venv is built
+  there. No git, no question.
+
+  The installer runs it automatically and does **not** fail if it can't: the step
+  needs Python 3.11+, and losing a working v2 over an optional layer would be the
+  wrong trade. It says what happened and moves on.
+
+  Staged and swapped rather than written in place, so an interrupted download or
+  a failed venv build leaves the working copy alone. Success is claimed only
+  after `import absd` actually succeeds in the new venv — a venv that exists but
+  cannot import is the failure this command exists to stop happening later, at
+  launch, in a pane nobody is watching.
+
+- **One place decides where the v3 source is.** `abs_src_root()`, shaped exactly
+  like `voice_root()`: a checkout beside `abs.sh` always wins, so working on the
+  repo can never pick up a stale copy from `~/.abs/src`; anything else looks
+  under `$ABS_HOME/src`, which `abs uninstall` already wipes. Nineteen separate
+  `dirname "$SCRIPT_PATH"` resolutions collapsed into it.
+
+- **Every v3 command names the one command that fixes it.** They used to say
+  "needs the full checkout" and point at a `git clone` the installer had
+  deliberately stopped offering — a dead end. They say `abs src install` now, and
+  `abs doctor` reports where the source is and whether it matches `abs`.
+
 ## [3.1.0] — 2026-08-18 — voice by default, and the numbers you were promised
 
 Everything held back from 3.0.2 as `TODO(3.0.3)`, plus two things the operator

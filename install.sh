@@ -304,10 +304,32 @@ if [ "$claude_fresh" = "1" ]; then
   info "    ${c_bold}export PATH=\"\$HOME/.local/bin:\$PATH\"${c_reset}"
   info ""
 fi
-# --- v3 always-on daemon (optional; needs the repo checkout + .venv) ---------
-# The daemon (absd) is Python and lives in the repo tree with its own .venv, so it
-# is only offered for a checkout install (not a bare `curl abs.sh`). Refreshing
-# the unit here is how existing users pick up daemon changes across releases.
+# --- the v3 source, for an install with no checkout --------------------------
+#
+# A `curl … | bash` install used to be a second-class one: abs.sh alone is a
+# complete v2, but the daemon, sandboxes and the start menu all need the absd
+# package and a venv, and the only way to have those was a git clone. So the
+# installer asked "clone the repository?" — and an installer should install, not
+# interview.
+#
+# It just does it now: `abs src install` unpacks the release tarball into
+# ~/.abs/src and builds the venv there. It needs Python 3.11+, which not every
+# machine has, so this is NOT fatal — failing here would mean losing a working v2
+# over an optional layer. It says what happened and moves on.
+if [ -z "$here" ] || [ ! -d "$here/absd" ]; then
+  info ""
+  info "${c_bold}Fetching the v3 source${c_reset} — the daemon, sandboxes and the start menu."
+  if "$TARGET" src install >&2; then
+    :
+  else
+    warn "The v3 source didn't install — abs still works as v2 (pairing, voice, reports)."
+    info "  Try again any time with: ${c_bold}abs src install${c_reset}"
+  fi
+fi
+
+# --- v3 always-on daemon (optional; needs the checkout or ~/.abs/src) --------
+# Refreshing the unit here is how existing users pick up daemon changes across
+# releases.
 if [ -n "$here" ] && [ -d "$here/absd" ] && [ -x "$here/.venv/bin/python" ]; then
   info ""
   info "${c_bold}Optional — the always-on daemon (v3).${c_reset} It polls your idle bots so you"
