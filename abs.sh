@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.0.1"
+readonly ABS_VERSION="3.0.2"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1174,10 +1174,10 @@ build_prompt() {
   # and sending the same sentence twice.
   local reply_mode_section=""
   case "$(reply_mode)" in
-    both) reply_mode_section="
-Reply mode is 'both' (abs config reply). Every \`reply\` you send is delivered as a
+    both) reply_mode_section="$(cat <<'REPLYBOTH'
+Reply mode is 'both' (abs config reply). Every `reply` you send is delivered as a
 voice note FIRST and then as the same text, automatically, from a hook. You do not
-have to remember it and you must NOT run \`abs say\` for a reply as well, or they get
+have to remember it and you must NOT run `abs say` for a reply as well, or they get
 it twice. The tool may come back BLOCKED with a note saying it was delivered as
 audio plus text — that is success. Do not resend.
 
@@ -1213,7 +1213,8 @@ clearest. Several messages are fine if one would be a wall.
 You do not have to announce the voice note. ABS sends a "🔊 Recording a voice
 note…" line itself when synthesis will take a moment, so saying it too would double
 up.
-" ;;
+REPLYBOTH
+)" ;;
     voice) reply_mode_section="
 Reply mode is 'voice' (abs config reply). ABS speaks every \`reply\` you send and
 suppresses the text. The tool will come back as BLOCKED with a note saying it was
@@ -1635,6 +1636,10 @@ bar_label_clean() {
 
 bar_label() {
   local v; v="$(state_get '.bar_label')"
+  # TODO(3.0.3): default to the Claude account name rather than the literal "abs"
+  # (`abs config label auto` does it today). Held back with the reply-mode default
+  # for the same reason — it changes what tests assert, and both belong in one
+  # considered change rather than two rushed ones.
   case "$v" in ''|null) printf '%s' "$BAR_LABEL_DEFAULT"; return 0 ;; esac
   # Clean on the way OUT as well as in. A profile edited by hand, or written by an
   # older abs, must not be able to inject escapes into every single render.
@@ -1813,6 +1818,9 @@ readonly VOICE_MIRROR_MAX="${ABS_VOICE_MAX_CHARS:-1200}"
 
 reply_mode() {
   local m; m="$(state_get '.reply_mode')"
+  # TODO(3.0.3): default to `both` where the machine can speak. The operator asked
+  # for it and the change is one line, but it flips a contract ~18 tests assert, and
+  # rewriting those in a hurry is how a default becomes a bug.
   case "$m" in both|voice) printf '%s' "$m" ;; *) printf 'text' ;; esac
 }
 
@@ -1906,7 +1914,22 @@ _reply_channel_set() {   # $1 = text|voice   $2 = on|off|""
 # minute of alphabet, a code fence becomes noise. Strip the syntax and keep the
 # prose. Deliberately blunt — this feeds a speech engine, not a parser.
 _voice_prep() {
+  # Emoji and dotted versions are the two things that visibly break the speech
+  # engine, and both were reported from the phone rather than found here.
+  #
+  # Emoji stripping is NOT here yet, deliberately. The obvious fix — a perl hop with
+  # a unicode class — adds an external dependency inside the one path that must
+  # never fail, and with `pipefail` a machine without perl would break every voice
+  # reply rather than mispronouncing one. Doing it in pure sed portably is the next
+  # change, not a thing to bolt on at the end of a session.
+  #
+  # "3.0.1" is worse than mispronounced: the engine's text normaliser treats the
+  # dots as sentence ends, and everything after the number was being swallowed. So
+  # dotted version numbers become spoken words BEFORE anything else runs. Written
+  # for two- and three-part versions, since those are what appear in a report.
   printf '%s' "$1" \
+    | sed -E 's/\b([0-9]+)\.([0-9]+)\.([0-9]+)\b/\1 point \2 point \3/g' \
+    | sed -E 's/\b([0-9]+)\.([0-9]+)\b/\1 point \2/g' \
     | sed -E 's/^```.*$/ code block. /' \
     | sed -E 's/`([^`]*)`/\1/g' \
     | sed -E 's/!?\[([^]]*)\]\([^)]*\)/\1/g' \
@@ -3955,7 +3978,7 @@ voice_setup() {
   local f
   for f in transcribe.py speak.py; do
     if [ ! -f "$r/$f" ]; then
-      info "  ${c_dim}Fetching $f…${c_reset}"
+      info "  ${c_dim}Fetching ${f}…${c_reset}"
       curl -fsSL "$ABS_RAW/$f" -o "$r/$f" || die "Could not download $f from $ABS_RAW"
     fi
   done
