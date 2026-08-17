@@ -1,9 +1,14 @@
 # Release test — Agent Babysitter 3.0.0
 
-The one checklist to run before publishing. Everything here is a **manual** test:
-764 automated tests already cover what a machine can check, and none of them can
-tell you whether a real Telegram bot, a real Docker container, or a real Claude
-login behaves. That is what this is for.
+The one checklist to run before publishing. It was written as an all-manual
+checklist: 803 automated tests cover what a machine can check, and none of them
+can tell you whether a real Telegram bot, a real Docker container, or a real
+Claude login behaves. That is what this is for.
+
+Since then, several sections turned out to be machine-drivable after all — the
+terminal menus through a pty, the containment check through a throwaway box — and
+those are marked as such in the 17 Aug run log rather than left for a human to
+repeat.
 
 **Time:** ~75 minutes for everything. ~35 for the Must-pass block alone.
 
@@ -195,17 +200,26 @@ Don't file these as FAILs:
 # Sign-off
 
 ```
-Must-pass  A PASS   B PASS*   C UNTESTED
-Should     D ___    E ___     F ___
-Restricted ___      Containment ___
+Must-pass  A PASS   B PASS*   C PASS (machine)
+Should     D PASS†  E PASS†   F PASS
+Restricted ___      Containment PASS (machine)
 ```
 
-**\* and the UNTESTED are deliberate, not oversights.** B6/B7 (voice-only mode)
-and all of section C (the arrow-key menus) were skipped by the operator's
-decision on 16 Aug. They are covered by automated tests — `test_reply_voice.py`,
-`test_reply_switches.py`, `test_menu_tty.py` — but nothing has driven the real
-terminal UI or watched a real voice-only reply. Ship them as *unverified by
-hand*, and say so in the release notes rather than implying a human checked.
+**\* B6/B7 (voice-only mode) were skipped by the operator's decision on 16 Aug.**
+Covered by `test_reply_voice.py` and `test_reply_switches.py`, but no human has
+watched a real voice-only reply. Ship as *unverified by hand* and say so.
+
+**† D and E pass on everything reachable without a live session.** D8 was
+measured on the live bar; D9's logic is unit-tested but the daemon was never
+stopped; D5/D6 (attach/detach) and E1/E2/E4 (a real herdr probe of a real Claude
+prompt) still want two minutes at the keyboard. Section C is now driven by a pty
+harness rather than by hand — `test_profile_picker_tty.py` — which is stronger
+than a human eyeballing it once, except for C4, where "no residue on screen" is
+asserted against a replayed screen buffer and not a retina.
+
+**The restricted assistant remains the one genuinely untested feature**, and it
+is untested for a reason that is not a bug: it needs a third bot token. Its
+containment — the part that would matter if it failed — is verified.
 
 Release when A, B and C pass and the containment spot-check passes. Anything else
 that failed goes in the release notes as a known issue rather than silently.
@@ -232,6 +246,37 @@ that failed goes in the release notes as a known issue rather than silently.
 | D, E, F | not started | |
 | Restricted | blocked | needs a throwaway @BotFather token |
 
+## Run log — 17 Aug 2026, machine-verified (Claudex, no operator time)
+
+Pranjal asked for everything that could be tested without him. These were run
+here, not reasoned about. Each protection was mutation-verified: the fix was
+reverted, exactly the intended tests failed, the file was md5-restored.
+
+| Step | Result | How |
+| --- | --- | --- |
+| C1–C6 | **PASS** | `tests/test_profile_picker_tty.py` — 11 tests driving `bash abs.sh` in a real pty: arrow keys, wrap, `q`, digit jump, out-of-range digit, the collapse, the `ABS_NO_TUI` fallback, and no escape bytes through a pipe |
+| D8 | **PASS** | read off the live bar's SGR bytes: `● Daemon` is `38;5;71` (green) during this session |
+| E3, E5, E6, E7 | **PASS** | three new wiring tests in `test_blocked_notify.py`: silence while answering at the desk, a second block pinging again, and the event carrying no text |
+| Containment | **PASS** | a throwaway `--no-creds` box: no `.credentials.json`, no `~/.claude` at all, host home and projects invisible, only `workspace` mounted. Control check on a normal box returned creds-present, so the test can fail |
+| Suite | **PASS** | 803 tests, `bash -n abs.sh` clean, `abs doctor` all ✓ |
+
+**C4 had no coverage at all, and my first test for it was vacuous.** Removing the
+erase from the collapse block broke nothing — `abs status`'s own output happened
+to overwrite the rows, so "one line left" held for the wrong reason. The real
+symptom is residue: the hint line reappearing as a tail on a shorter line. The
+test now asserts that, and fails under both a missing erase and a missing
+cursor-up.
+
+**What no amount of machine testing can reach**, and why:
+
+| Left to the operator | Why it can't be automated here |
+| --- | --- |
+| AWAY-1/2/3 | needs a real Claude session. `claude -p` from inside an ABS session tears down this session's Telegram MCP server, so it cannot be run from here |
+| D5, D6 | attaching and detaching is an interactive TUI, from inside the session that would be attached to |
+| E1, E2, E4 | needs herdr reading a real Claude prompt. The decision, the wiring and the send are covered; herdr's own status output is not |
+| D9 | `systemctl --user stop absd` — the operator's daemon, and the dim/green logic is already unit-tested |
+| Restricted 1–7 | needs a throwaway @BotFather token, which only he can create |
+
 **Found and fixed during this run** — none of these were in the release when the
 checklist was written:
 
@@ -251,4 +296,4 @@ records — six such paths, all unverified, all looking tested. The orphan tests
 assigned `_session_sandbox` by hand, proving the reaper worked and never that
 anything reached it. Coverage of the mechanism is not coverage of the path.
 
-Automated tests over the same period: 693 → 764.
+Automated tests over the same period: 693 → 803.

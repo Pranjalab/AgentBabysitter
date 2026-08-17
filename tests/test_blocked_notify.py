@@ -11,6 +11,7 @@ and an injected clock (PLAN.md §10). No herdr, no network, no claude.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -301,6 +302,116 @@ async def test_a_block_does_not_survive_into_the_next_session(
     poller._reset_session_fields()
     assert not poller._status_watcher.blocked_pending
     assert poller._session_label is None
+
+
+async def test_answering_at_the_desk_within_seconds_pings_nothing(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    """E6, through the wired poller: the operator is AT the keyboard.
+
+    ``test_a_short_block_answered_at_the_desk_never_pings`` pins this in the
+    decision layer, which is where the arithmetic lives — but a poller that
+    probed the wrong pane, or sent on any non-empty status, would sail past that
+    test and still cry wolf on every prompt. This is the case the feature lives
+    or dies on: a watcher that pings while someone is sitting there gets muted,
+    and a muted watcher never works when it counts.
+    """
+    write_profile(abs_home, allow_ids=[42])
+    engine = StatusEngine(status="working")
+    now = [0.0]
+    poller = await _go_live(
+        abs_home,
+        client_factory,
+        engine,
+        tmp_path,
+        now,
+        blocked_debounce_s=20.0,
+        events=_events(abs_home),
+    )
+    before = len(fake.sent_messages)
+
+    # Three prompts, each answered inside the debounce. Blocked is only ever
+    # observed for a few seconds at a time, exactly as it looks at the desk.
+    for answered_at in (30.0, 90.0, 150.0):
+        engine.status = "blocked"
+        now[0] = answered_at - 5.0
+        assert await poller.watch_once() is True
+        engine.status = "working"
+        now[0] = answered_at
+        assert await poller.watch_once() is True
+
+    assert len(fake.sent_messages) == before
+    assert engine.asked  # it did probe — silence is the verdict, not a skip
+    assert [e for e in _records(abs_home) if e["event"] == EVENT_SESSION_BLOCKED] == []
+
+
+async def test_a_second_block_in_the_same_session_pings_again(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    """E5, through the wired poller. A new block is a new episode.
+
+    The once-per-episode latch is what makes E3 pass; if it never cleared, you'd
+    get exactly one ping per session and every later block would be silent — the
+    feature quietly dying after first use, which no other test here would catch.
+    """
+    write_profile(abs_home, allow_ids=[42])
+    engine = StatusEngine(status="blocked")
+    now = [0.0]
+    poller = await _go_live(
+        abs_home,
+        client_factory,
+        engine,
+        tmp_path,
+        now,
+        blocked_debounce_s=20.0,
+        events=_events(abs_home),
+    )
+    before = len(fake.sent_messages)
+
+    await poller.watch_once()  # episode 1 starts at t=0
+    now[0] = 25.0
+    await poller.watch_once()
+    assert len(fake.sent_messages) == before + 1
+
+    engine.status = "working"  # answered in the chat
+    now[0] = 30.0
+    await poller.watch_once()
+
+    engine.status = "blocked"  # episode 2
+    now[0] = 100.0
+    await poller.watch_once()
+    now[0] = 125.0
+    await poller.watch_once()
+    assert len(fake.sent_messages) == before + 2
+
+    blocked = [e for e in _records(abs_home) if e["event"] == EVENT_SESSION_BLOCKED]
+    assert [e["blocked_for_s"] for e in blocked] == [25, 25]
+
+
+async def test_the_blocked_event_carries_no_message_text(
+    abs_home: Path, fake: FakeTelegram, client_factory, tmp_path: Path
+) -> None:
+    """E7. The event log is a diagnostic, not a transcript — it records that a
+    session blocked and for how long, never what was being said."""
+    write_profile(abs_home, allow_ids=[42])
+    engine = StatusEngine(status="blocked")
+    now = [0.0]
+    poller = await _go_live(
+        abs_home,
+        client_factory,
+        engine,
+        tmp_path,
+        now,
+        blocked_debounce_s=0.0,
+        events=_events(abs_home),
+    )
+    await poller.watch_once()
+    sent = fake.sent_messages[-1]["text"]
+    assert "waiting" in sent  # the ping did go out, so there was something to leak
+
+    (blocked,) = [e for e in _records(abs_home) if e["event"] == EVENT_SESSION_BLOCKED]
+    assert set(blocked) == {"ts", "event", "level", "profile", "blocked_for_s"}
+    assert "web" not in json.dumps(blocked)  # not even the project label
 
 
 # ---- the done ping (opt-in) --------------------------------------------------
