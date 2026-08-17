@@ -1175,10 +1175,27 @@ build_prompt() {
   local reply_mode_section=""
   case "$(reply_mode)" in
     both) reply_mode_section="
-Reply mode is 'both' (abs config reply). ABS already mirrors every \`reply\` you
-send as a voice note, automatically, from a hook — you do not have to remember it
-and you must NOT run \`abs say\` for a reply as well, or they get it twice. Write
-the reply as normal text and let the mirror do the speaking.
+Reply mode is 'both' (abs config reply). Every \`reply\` you send is delivered as a
+voice note FIRST and then as the same text, automatically, from a hook. You do not
+have to remember it and you must NOT run \`abs say\` for a reply as well, or they get
+it twice. The tool may come back BLOCKED with a note saying it was delivered as
+audio plus text — that is success. Do not resend.
+
+WRITE FOR THE EAR FIRST. They listen; they do not read most of it. Only the part
+of your reply that fits the spoken budget is read aloud, and it is taken from your
+FIRST PARAGRAPH — so that paragraph has to stand completely on its own:
+
+- Say what happened and what it means, in plain sentences, no lists or tables.
+- If a decision is needed, ASK IT THERE, in that paragraph, as a real question.
+  A question that only appears further down is a question they will never hear.
+- No 'see below', no 'as the table shows'. They cannot see below while listening.
+- Aim for 4-8 sentences. Beyond about 700 characters the spoken part is cut, and
+  what falls off the end is exactly what you put last.
+
+Then, AFTER a blank line, write everything else: the detail, the tables, the exact
+commands, the file paths, the numbers worth keeping. That half is the record — they
+read it when they need to act on something or check a value. Never make the text a
+shorter version of the voice; it should carry strictly more.
 " ;;
     voice) reply_mode_section="
 Reply mode is 'voice' (abs config reply). ABS speaks every \`reply\` you send and
@@ -1261,22 +1278,53 @@ never mutes a reply to something they just asked. If a full answer needs work,
 send a one-line "on it" first so they know it landed.
 
 WHEN TO SEND (proactively, unprompted)
-- Send ONE short message when you finish a task the operator asked for, or when
-  you stop and are handing control back.
-- Include: what you did (1-3 lines, plain language), then anything that needs
-  their decision. End by inviting feedback, e.g. "Anything to change, or next?"
-- Do NOT send for: routine progress, intermediate steps, or quick questions they
-  are obviously watching in the terminal. One message per completed task.
-- If a task will run long, send one short "started" line, then use
-  \`edit_message\` to update it rather than sending a stream of new messages.
-- If you become blocked and need a decision, send a message saying exactly what
-  you need. Being blocked silently is the worst outcome when they are away.
+
+Three moments, and the first one is the one most easily skipped:
+
+1. WHEN A TASK ARRIVES. Read it against what you can actually see — the repo, the
+   state, the constraints — and decide whether anything material is genuinely
+   unclear or would change what you build. If so, ASK NOW, before working. One or
+   two real questions, the kind whose answer changes the work. If nothing is
+   unclear, say in one line what you have started on, so they know it landed and
+   what to expect.
+   Do not ask for permission you already have, do not ask what you can find out
+   yourself, and do not ask four questions where one decides everything.
+2. WHILE WORKING, whenever you hit a real fork: a choice only they can make, a
+   surprise that changes the plan, a result worth knowing before the end. Send it
+   then — a question held until the report is a question asked too late, and an
+   interesting finding held back is a finding they could not act on. Do not narrate
+   routine progress; a fork or a finding is not routine.
+3. WHEN YOU FINISH, or when you stop and hand control back. That is the report: what
+   happened, what it means, what is left, and what you need decided.
+
+If a task will run long, send one short "started" line, then use \`edit_message\` to
+update it rather than a stream of new messages. Being blocked silently is the worst
+outcome when they are away.
+
+WHAT MAKES A REPORT WORTH HEARING
+- The outcome first, not the process. What is true now that was not before.
+- What you verified versus what you assumed. Never say something works when you
+  have not run it; say what you ran.
+- Anything that surprised you, especially a result that contradicts what either of
+  you expected. That is usually the most useful sentence in the message.
+- The decision they now own, phrased as a question with the options and your
+  recommendation. Recommend, do not present a menu and wait.
+- What you did NOT do, if you left something out on purpose.
 
 HOW TO WRITE IT
-- Plain text. No markdown tables, no headings, no code fences unless a short
-  command is genuinely the point. Telegram renders them poorly.
-- Under ~800 characters. They are reading on a phone.
-- Lead with the outcome, not the process.
+- One message, two halves, split by a blank line. First a spoken-summary paragraph
+  that stands alone; then the detail. If voice is on, the first half is what they
+  hear (see the reply-mode note above) — but write it that way regardless, because
+  the first paragraph is also all most people read on a phone.
+- The summary half: plain sentences only. No tables, no headings, no code fences,
+  no bullet lists. Those are unreadable aloud and they are what makes a phone
+  message a wall.
+- The detail half: whatever the job needs. Exact commands, paths, numbers, a small
+  table if a table is genuinely the clearest form. Keep the whole message under
+  about 3000 characters; past that, send what matters and say where the rest is.
+- Lead with the outcome, not the process. Then the decision, then the detail.
+- Nothing that must be copied — a command, a path, a URL — belongs only in the
+  summary half. Repeat it in the detail, because audio cannot be copied.
 
 USAGE FOOTER
 When you send a proactive task-done report (not on every message, just the
@@ -1748,10 +1796,18 @@ _voice_worth_saying() {
 }
 
 # How much of a long message voice-first reads out before the text follows.
-# ~400 characters is about 9 seconds of synthesis on a mid-range CPU and rather
-# more than that to listen to — long enough to carry the outcome, short enough
-# that the text is not held up waiting for it.
-readonly VOICE_LEAD_MAX="${ABS_VOICE_LEAD_CHARS:-400}"
+#
+# 700 characters is roughly 15 seconds of speech and about 14 of synthesis. It was
+# 400, which was chosen as "an opening" and was the wrong idea: the operator listens
+# and does not read, so a truncated opening delivered half a message and left the
+# decision he needed to make in the part he never heard.
+#
+# The budget only bounds what is spoken. What makes the spoken part *complete* is
+# the reply being WRITTEN with a self-contained summary first — that contract lives
+# in the injected prompt (see build_prompt), because summarising is the model's job
+# and no amount of cutting can do it here. This is the honest division: the prompt
+# decides what the first paragraph says, the hook guarantees it is what gets spoken.
+readonly VOICE_LEAD_MAX="${ABS_VOICE_LEAD_CHARS:-700}"
 
 # Is this message too long to speak WHOLE, but otherwise fine to speak?
 #
@@ -1780,8 +1836,20 @@ _voice_too_long_only() {
 # punctuation from being cut mid-word. The closing line exists so the operator is
 # never left wondering whether they missed something.
 _voice_lead() {
-  local prepped cut
-  prepped="$(_voice_prep "$1")"
+  local first prepped cut
+  # The FIRST PARAGRAPH first, because the prompt asks for a self-contained summary
+  # there and a paragraph break is the one boundary the writer controls on purpose.
+  # Sentence-cutting a wall of text can only ever produce an excerpt; a paragraph
+  # the author meant as a summary is a summary.
+  first="$(printf '%s' "$1" | awk 'BEGIN{RS=""} NR==1{print; exit}')"
+  prepped="$(_voice_prep "${first:-$1}")"
+
+  # A first paragraph that is only a greeting or a one-line preamble is not a
+  # summary, so fall back to the whole message and cut that instead.
+  if [ "${#prepped}" -lt 80 ]; then
+    prepped="$(_voice_prep "$1")"
+  fi
+
   if [ "${#prepped}" -le "$VOICE_LEAD_MAX" ]; then
     printf '%s' "$prepped"
     return 0
@@ -2011,17 +2079,24 @@ _reply_voice_first_gate() {
   text="$(printf '%s' "$input" | jq -r '.tool_input.text // ""' 2>/dev/null)"
   [ -n "$text" ] || return 0
 
-  # Two ways to take this message: speak it whole, or — when it is only *long* —
-  # speak an opening and let the full text land behind it. Code and links still
-  # decline entirely: those have to be read, so the text has to go first.
-  local lead=""
-  if _voice_speakable "$text"; then
-    lead="$text"
-  elif _voice_too_long_only "$text"; then
-    lead="$(_voice_lead "$text")"
-  else
-    return 0
-  fi
+  # What gets SPOKEN is the summary half — the first paragraph — whatever the total
+  # length. Speaking the whole message was wrong twice over: past the ceiling it gave
+  # up and went text-first, and under the ceiling it read the tables, paths and
+  # commands out loud. Both land as "you sent me half a message", from opposite ends.
+  local lead first
+  lead="$(_voice_lead "$text")"
+  [ -n "$lead" ] || return 0
+  _voice_worth_saying "$lead" || return 0
+
+  # Code and links in the DETAIL half are fine — the text always follows here, so
+  # there is nothing to lose by speaking the summary first. In the SUMMARY they are
+  # a signal that this message is to be read rather than heard, and then the old
+  # order is the right one. (Mode `voice` keeps the stricter whole-message test in
+  # `_voice_speakable`: there the note replaces the text, so a swallowed link is
+  # a link the operator never receives.)
+  first="$(printf '%s' "$text" | awk 'BEGIN{RS=""} NR==1{print; exit}')"
+  printf '%s' "$first" | grep -q '```' && return 0
+  printf '%s' "$first" | grep -qE 'https?://' && return 0
 
   chat="$(printf '%s' "$input" | jq -r '.tool_input.chat_id // ""' 2>/dev/null)"
   case "$chat" in ''|null) chat="$(state_get '.chat_id')" ;; esac

@@ -394,7 +394,7 @@ def test_the_spoken_lead_is_short_and_the_text_is_whole(box):
     lines = box.order()
     spoken = lines[0].split(" ", 1)[1]
     sent = json.loads(lines[1].split(" ", 1)[1])
-    assert len(spoken) < 600, spoken            # an opening, not the whole wall
+    assert len(spoken) < 900, spoken            # a summary, not the whole wall
     assert spoken.endswith("The rest is in the text.")
     assert sent["text"] == LONG                 # nothing is lost from the record
 
@@ -418,3 +418,62 @@ def test_a_long_message_with_code_still_goes_text_first(box):
     run = _hook(box, _reply(text=LONG + "\n```sh\nabs status\n```"))
     assert run.returncode == 0
     assert box.order(wait=2.0) == []
+
+# ---- the spoken half is the summary the writer wrote -------------------------
+#
+# The lead started life as "the first 400 characters", and the operator's verdict
+# on it was "you are sending half a message" — he listens and does not read, so the
+# decision he was being asked for sat in the part he never heard. A cut cannot
+# summarise. What can is the writer putting a self-contained summary in the first
+# paragraph (the injected prompt now asks for exactly that), and the hook speaking
+# that paragraph rather than a measured-off prefix.
+
+SUMMARY = (
+    "Voice-first is fixed and the security review is still running. Your last note "
+    "was half a message because the spoken part was an excerpt rather than a "
+    "summary. Two decisions I need from you: should the installer learn to clone, "
+    "and do we publish to PyPI or drop the line from the README?"
+)
+DETAIL = (
+    "Details:\n- 853 tests green, 80 commits ahead of main.\n"
+    "- The runbook is in docs/RELEASE-3.0.0.md.\n"
+    "| channel | state |\n| --- | --- |\n| VERSION on main | 2.6.0 |"
+)
+TWO_HALVES = SUMMARY + "\n\n" + DETAIL
+
+
+def test_the_spoken_half_is_the_first_paragraph(box):
+    _hook(box, _reply(text=TWO_HALVES))
+    spoken = box.order()[0].split(" ", 1)[1]
+    assert "PyPI" in spoken, spoken          # the questions are IN the audio
+    assert "853 tests" not in spoken         # the detail half is not
+    assert "| channel |" not in spoken       # and neither is the table
+
+
+def test_the_text_still_carries_both_halves(box):
+    _hook(box, _reply(text=TWO_HALVES))
+    sent = json.loads(box.order()[1].split(" ", 1)[1])
+    assert sent["text"] == TWO_HALVES
+
+
+def test_a_summary_longer_than_the_budget_is_cut_at_a_sentence(box):
+    long_summary = ("This sentence is here to fill the spoken budget. " * 20)
+    _hook(box, _reply(text=long_summary + "\n\ndetail here"))
+    spoken = box.order()[0].split(" ", 1)[1]
+    assert len(spoken) < 900, len(spoken)
+    assert spoken.endswith("The rest is in the text.")
+
+
+def test_a_one_line_preamble_does_not_become_the_whole_report(box):
+    """A first paragraph that is just "Done." is not a summary. Speaking only that
+    would be the same half-a-message failure in a new shape, so a very short first
+    paragraph falls back to cutting the whole message instead."""
+    _hook(box, _reply(text="Done.\n\n" + SUMMARY))
+    spoken = box.order()[0].split(" ", 1)[1]
+    assert "half a message" in spoken, spoken
+
+
+def test_a_single_paragraph_message_is_unaffected(box):
+    _hook(box, _reply(text=SAYABLE))
+    spoken = box.order()[0].split(" ", 1)[1]
+    assert spoken.strip() == SAYABLE
