@@ -103,10 +103,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   It also does the auto-silent bookkeeping the blocked `PostToolUse` would have
   done, so a session replying perfectly well no longer drifts toward muting
   itself for being too quiet.
+  **A long message is led, not skipped.** The first real report after this shipped
+  was 1854 characters against a 1200-character ceiling, so the gate declined and the
+  operator got text first with a truncated note behind it — the exact order the
+  feature exists to fix, looking broken while behaving as written. A finished-task
+  report is long *because* it is the thing worth hearing about, so length now means
+  "speak the opening" (~400 characters, cut at a sentence end, ending "the rest is
+  in the text") and the full text follows. Only code and links still stand aside
+  entirely: those have to be read, not heard.
   The cost is stated rather than hidden: the words only exist once the reply is
-  written, synthesis is ~5s for a sentence and ~13s for a long report on this
-  machine, and the text waits for the note. `abs config voice-first off` restores
-  the old order.
+  written, synthesis is ~5s for a sentence and ~9s for a lead on this machine, and
+  the text waits for the note. `abs config voice-first off` restores the old order.
 
 - **The daemon says when a session is stuck.** A remotely-started session that
   stops to ask a question is invisible from the phone: the daemon has handed the

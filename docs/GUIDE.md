@@ -181,10 +181,16 @@ the rule every branch in it follows — if synthesis fails, if the engine is bus
 if the sentence was already spoken five minutes ago, the text still goes out. A
 voice note is a nicety; the message is not.
 
+**Long messages get an opening, not a fallback.** Above ~1200 characters a note is
+too long to listen to, but a finished-task report is long precisely because it is
+what you wanted to hear — so voice-first speaks the first ~400 characters, cut at a
+sentence end and closing with "the rest is in the text", and the full message
+follows as text. `ABS_VOICE_LEAD_CHARS` changes the budget.
+
 The gate declines, leaving the old order intact, for anything it should not own: an
 attachment (the plugin does the upload), MarkdownV2 (the plugin does the escaping),
-and everything `voice` mode also declines — code, links, a wall of text, or too
-little to be worth saying. Declining is the safe direction: the cost is a message
+and the two things `voice` mode also refuses to swallow — code and links, which have
+to be read rather than heard — or a message too short to be worth a note. Declining is the safe direction: the cost is a message
 in the less useful order, where the cost of wrongly accepting is a message that
 never arrives.
 

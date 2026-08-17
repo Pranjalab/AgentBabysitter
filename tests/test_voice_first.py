@@ -219,7 +219,6 @@ def test_a_reply_with_nowhere_to_send_it_is_not_blocked(box):
         (_reply(format="markdownv2"), "the plugin owns the escaping"),
         (_reply(text="Here:\n```py\nprint(1)\n```"), "code is for copying"),
         (_reply(text="It's at https://example.com/report — have a look"), "a link is for tapping"),
-        (_reply(text="word " * 400), "too long to listen to"),
         (_reply(text="ok"), "not worth a note"),
     ],
 )
@@ -369,3 +368,53 @@ def test_the_config_switch_round_trips(box):
     out = cfg("voice-first")
     assert "on" in out.stdout + out.stderr
     assert cfg("voice-first", "sideways").returncode != 0
+
+# ---- long messages: a lead, not a fallback -----------------------------------
+#
+# The first real message after voice-first shipped was 1854 characters against a
+# 1200-character ceiling, so the gate declined and the operator got text first with
+# a truncated note behind it — the exact order the feature exists to fix, looking
+# broken while behaving as written. A finished-task report is long *because* it is
+# the thing worth hearing about, so length now means "speak the opening", and only
+# code and links mean "stand aside".
+
+
+LONG = ("Checked everything and the merge is clean. " * 30)   # ~1260 chars
+
+
+def test_a_long_report_is_led_by_voice_rather_than_falling_back(box):
+    assert len(LONG) > 1200
+    run = _hook(box, _reply(text=LONG))
+    assert run.returncode == 2, run.stderr
+    assert box.tags() == ["VOICE", "TEXT"]
+
+
+def test_the_spoken_lead_is_short_and_the_text_is_whole(box):
+    _hook(box, _reply(text=LONG))
+    lines = box.order()
+    spoken = lines[0].split(" ", 1)[1]
+    sent = json.loads(lines[1].split(" ", 1)[1])
+    assert len(spoken) < 600, spoken            # an opening, not the whole wall
+    assert spoken.endswith("The rest is in the text.")
+    assert sent["text"] == LONG                 # nothing is lost from the record
+
+
+def test_the_lead_stops_at_a_sentence_end(box):
+    _hook(box, _reply(text=LONG))
+    spoken = box.order()[0].split(" ", 1)[1]
+    body = spoken[: -len(" The rest is in the text.")]
+    assert body.endswith("."), body
+
+
+def test_a_long_message_with_a_link_still_goes_text_first(box):
+    """Length is speakable-in-part; a link is not speakable at all. The operator
+    has to be able to tap it, so this one keeps the old order."""
+    run = _hook(box, _reply(text=LONG + " see https://example.com/report"))
+    assert run.returncode == 0
+    assert box.order(wait=2.0) == []
+
+
+def test_a_long_message_with_code_still_goes_text_first(box):
+    run = _hook(box, _reply(text=LONG + "\n```sh\nabs status\n```"))
+    assert run.returncode == 0
+    assert box.order(wait=2.0) == []

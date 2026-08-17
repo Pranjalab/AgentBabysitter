@@ -1747,6 +1747,53 @@ _voice_worth_saying() {
   [ "${#1}" -ge 8 ]
 }
 
+# How much of a long message voice-first reads out before the text follows.
+# ~400 characters is about 9 seconds of synthesis on a mid-range CPU and rather
+# more than that to listen to — long enough to carry the outcome, short enough
+# that the text is not held up waiting for it.
+readonly VOICE_LEAD_MAX="${ABS_VOICE_LEAD_CHARS:-400}"
+
+# Is this message too long to speak WHOLE, but otherwise fine to speak?
+#
+# The distinction matters because the two reasons a message is unspeakable want
+# opposite treatment. Code and links have to be *read*, so voice-first must stand
+# aside and let the text go first. Length is not like that: a finished-task report
+# is long precisely because it is the thing the operator wanted to hear about, and
+# silently reverting to text-first for every real report — which is what happened
+# on the first message after this shipped, at 1854 characters against a 1200 ceiling
+# — makes the feature look broken while behaving exactly as written.
+_voice_too_long_only() {
+  local text="$1" prepped
+  printf '%s' "$text" | grep -q '```' && return 1
+  printf '%s' "$text" | grep -qE 'https?://' && return 1
+  [ "${#text}" -gt "$VOICE_MIRROR_MAX" ] || return 1
+  prepped="$(_voice_prep "$text")"
+  _voice_worth_saying "$prepped" || return 1
+  return 0
+}
+
+# The opening of a message, cut at a sentence end, for voice-first to speak while
+# the full text follows behind it.
+#
+# Trimming to the last `.`/`!`/`?` inside the budget is what keeps it from ending
+# mid-thought; falling back to the last space keeps a wall of text without
+# punctuation from being cut mid-word. The closing line exists so the operator is
+# never left wondering whether they missed something.
+_voice_lead() {
+  local prepped cut
+  prepped="$(_voice_prep "$1")"
+  if [ "${#prepped}" -le "$VOICE_LEAD_MAX" ]; then
+    printf '%s' "$prepped"
+    return 0
+  fi
+  cut="$(printf '%s' "$prepped" | cut -c1-"$VOICE_LEAD_MAX")"
+  case "$cut" in
+    *[.!?]*) cut="$(printf '%s' "$cut" | sed -E 's/([.!?])[^.!?]*$/\1/')" ;;
+    *\ *)    cut="${cut% *}" ;;
+  esac
+  printf '%s The rest is in the text.' "$cut"
+}
+
 # Is this message safe to deliver as voice INSTEAD of text? Only asked in `voice`
 # mode. Anything the operator might need to copy, tap, or look at stays text.
 _voice_speakable() {
@@ -1870,17 +1917,22 @@ cmd_voice_mirror() {
 # The payload is JSON on stdin (text + chat), because a reply can contain anything
 # and argv is world-readable through /proc while synthesis runs.
 cmd_voice_then_text() {
-  local payload text chat
+  local payload text chat lead
   payload="$(cat)"
   text="$(printf '%s' "$payload" | jq -r '.text // ""' 2>/dev/null || true)"
   chat="$(printf '%s' "$payload" | jq -r '.chat // ""' 2>/dev/null || true)"
+  # What gets SPOKEN may be an opening rather than the whole message; what gets
+  # SENT is always the whole thing. Older payloads have no lead, so it falls back
+  # to the text — a spawn from a previous version must not go silent.
+  lead="$(printf '%s' "$payload" | jq -r '.lead // ""' 2>/dev/null || true)"
   [ -n "$text" ] || return 0
+  [ -n "$lead" ] || lead="$text"
   case "$chat" in ''|null) chat="$(state_get '.chat_id')" ;; esac
 
   # Speak it. _voice_mirror is silent about failure by design and, in mode
   # `both`, deliberately does not fall back to text — that is this function's job
   # below, and doing it in both places would send the message twice.
-  _voice_mirror "$text" || true
+  _voice_mirror "$lead" || true
 
   { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
   load_token 2>/dev/null || return 0
@@ -1898,9 +1950,11 @@ cmd_voice_then_text() {
 # does for the mirror and for the same reason: the hook has a 5s budget and this
 # work takes tens of seconds.
 _voice_then_text_spawn() {
-  local text="$1" chat="$2" cmdline payload
+  local text="$1" chat="$2" lead="${3:-}" cmdline payload
   [ -n "$text" ] || return 1
-  payload="$(jq -n --arg t "$text" --arg c "$chat" '{text:$t, chat:$c}' 2>/dev/null)" || return 1
+  [ -n "$lead" ] || lead="$text"
+  payload="$(jq -n --arg t "$text" --arg c "$chat" --arg l "$lead" \
+    '{text:$t, chat:$c, lead:$l}' 2>/dev/null)" || return 1
   cmdline="bash $(printf '%q' "$SCRIPT_PATH") --profile $(printf '%q' "$PROFILE") __voice-then-text"
   if command -v setsid >/dev/null 2>&1; then cmdline="setsid $cmdline"; fi
   ( printf '%s' "$payload" | eval "$cmdline" >/dev/null 2>&1 & ) 2>/dev/null || return 1
@@ -1956,17 +2010,25 @@ _reply_voice_first_gate() {
 
   text="$(printf '%s' "$input" | jq -r '.tool_input.text // ""' 2>/dev/null)"
   [ -n "$text" ] || return 0
-  # Code, a link, or a wall of text: not worth listening to, so there is nothing
-  # to put first. Same test the voice-only gate uses, so both agree on what is
-  # sayable.
-  _voice_speakable "$text" || return 0
+
+  # Two ways to take this message: speak it whole, or — when it is only *long* —
+  # speak an opening and let the full text land behind it. Code and links still
+  # decline entirely: those have to be read, so the text has to go first.
+  local lead=""
+  if _voice_speakable "$text"; then
+    lead="$text"
+  elif _voice_too_long_only "$text"; then
+    lead="$(_voice_lead "$text")"
+  else
+    return 0
+  fi
 
   chat="$(printf '%s' "$input" | jq -r '.tool_input.chat_id // ""' 2>/dev/null)"
   case "$chat" in ''|null) chat="$(state_get '.chat_id')" ;; esac
   { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
 
   # If the worker cannot even be spawned, do not block: let the text go.
-  _voice_then_text_spawn "$text" "$chat" || return 0
+  _voice_then_text_spawn "$text" "$chat" "$lead" || return 0
 
   # PostToolUse never runs for a blocked call, so the bookkeeping it would have
   # done happens here instead — otherwise a session in voice-first mode would
