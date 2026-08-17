@@ -81,8 +81,10 @@ These are behaviours, not bugs, and they are documented rather than quietly true
   design.
 - **Quiet and auto-silent are advisory.** The prompt asks the session to check
   them. Reply mode *is* hook-enforced.
-- **Voice mode still sends text** for code blocks, links, attachments and anything
-  over 1200 characters — a voice note cannot carry them.
+- **Voice mode still sends text** for code blocks, links and attachments — a voice
+  note cannot carry them. In `voice`-only mode a message over 1200 characters also
+  goes as text; with voice-first (mode `both`) a long message is instead *led* by a
+  spoken opening and the full text follows.
 - **The same sentence is not spoken twice within five minutes**, so a repeated
   report gives you text twice and voice once.
 - **A normal sandbox is created *with* your credentials.** It isolates the
@@ -110,8 +112,10 @@ Two things ship **unverified by hand** and are named here rather than implied:
 voice-only mode (`reply-text off`), which has automated coverage but no human has
 watched a real voice-only reply; and the restricted assistant, above.
 
-Ten bugs were found during the release testing itself — three in code the full
-suite reported green, and two only once a human actually launched an Away session.
+Fourteen bugs were found during the release testing itself. Three were in code the
+full suite reported green; two surfaced only once a human actually launched an Away
+session; and two — a launch killed by a slow network, and a bot that could not be
+reclaimed after a pid was recycled — surfaced only from ordinary daily use.
 
 ---
 
@@ -125,7 +129,7 @@ matters: once `main` moves and a tag is pushed, other people can have it.
 ```sh
 cd ~/Projects/research/AgentBabysitter
 git status                      # must be clean
-python -m pytest -q             # expect 833 passed
+python -m pytest -q             # expect 853 passed
 bash -n abs.sh                  # silent
 abs doctor                      # green except the stale-error note
 abs --version                   # Agent Babysitter 3.0.0
