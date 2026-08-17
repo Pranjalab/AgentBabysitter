@@ -4,9 +4,10 @@ Two halves: the notes that go out, and the commands that put them out. The notes
 are written to be pasted into the GitHub release; the runbook is for the operator,
 because every step in it is irreversible and none of it should be automated.
 
-State at the time of writing: **833 tests passing**, `bash -n abs.sh` clean,
-`abs doctor` green, working tree clean, `v3-daemon` **74 commits** ahead of
-`origin/main`, nothing pushed.
+State at the time of writing: **853 tests passing**, `bash -n abs.sh` clean,
+`abs doctor` green, working tree clean, `v3-daemon` ahead of `origin/main` by 77
+commits with a **conflict-free** merge (`git merge-tree --write-tree main v3-daemon`
+exits 0), nothing pushed.
 
 ---
 
@@ -173,13 +174,53 @@ gh release create v3.0.0 \
 `--notes-file` takes the whole file, this runbook included. Either trim Part 2
 first or paste Part 1 into `gh release create --notes-file -` from a scratch copy.
 
-### 6. Elsewhere
+### 6. The distribution channels — checked 17 Aug, and two of them are stale
 
-- **agentbabysitter.com** — the waitlist site is a separate project (Vercel +
-  MongoDB Atlas). Announcing there is a change to a different repo, so it is a
-  separate decision and a separate review.
-- **The README badge and install line** already say 3.0.0; nothing to change after
-  the tag.
+This is the part that decides whether anyone actually *gets* 3.0.0, and none of it
+follows automatically from the tag.
+
+| Channel | State today | What it needs |
+| --- | --- | --- |
+| `VERSION` on `origin/main` | **2.6.0** | Pushing main. Every installed `abs` polls this file — until it moves, no existing user is ever told 3.0.0 exists |
+| `agentbabysitter.com/install.sh` | **stale 2.x copy** | Updating `Pranjalab/agentbabysitter-web` |
+| PyPI `agent-babysitter` | **2.0.0** | Publishing 3.0.0, or removing the claim from the README |
+| The checkout (`git pull && ./install.sh`) | current | nothing |
+
+**The installer is served by GitHub Pages, not by this repo.** `curl -sI
+https://agentbabysitter.com/install.sh` answers `server: GitHub.com`, and the file's
+checksum matches neither this branch nor `origin/main` — it is a hand-copied
+snapshot living in `Pranjalab/agentbabysitter-web`. It predates v3: no herdr
+install, no daemon step. Pushing main does **not** update it.
+
+It does set `REPO=raw.githubusercontent.com/…/main`, which fixes the ordering for
+you: **push main first** and even the stale installer immediately starts fetching
+`abs.sh` 3.0.0. Update the site second. The other way round and the site's fresh
+installer would still pull a 2.6.0 script.
+
+**PyPI is two majors behind** while the README says `pipx install agent-babysitter`.
+A user following that line today gets 2.0.0 and none of this. Publish or delete the
+line; leaving both as they are is the only wrong answer.
+
+### 7. The gap the tag cannot close
+
+`curl … | bash` installs **one file**. `install.sh` gates the daemon and herdr on
+`[ -n "$here" ]` — a checkout — so the one-liner cannot offer them. Someone
+following the README's headline install gets 3.0.0's script-level work (the reply
+switches, voice-first, the command guard, the status bar, the label) and **none of
+the features the release is named for**: no daemon, no `ABS START` from the phone,
+no sandboxes.
+
+Two honest ways out, and they are not equivalent:
+
+1. **Teach `install.sh` to clone.** Run via curl with no checkout, offer to clone
+   into a real directory and continue as a checkout install, so the daemon and herdr
+   are offered and `abs update` works through `git pull`. The one-liner then delivers
+   what the README promises. Roughly an hour with tests.
+2. **Reorder the README** to lead with `git clone && ./install.sh` for v3 and demote
+   the one-liner to "minimal install, no daemon". Ten minutes, no code — but the
+   headline path stays second-class.
+
+Doing neither ships a release whose own quick-start contradicts its release notes.
 
 ### If something goes wrong after step 4
 
