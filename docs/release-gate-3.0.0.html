@@ -367,22 +367,31 @@
   <header>
     <p class="eyebrow">Agent Babysitter · v3-daemon · 17 Aug 2026</p>
     <h1>ABS 3.0.0 Release Gate</h1>
-    <p class="lede">Everything that could be tested without you has been. What's below is what a machine
-      genuinely cannot reach: a real Claude session, a real approval prompt, and a bot token only you can
-      create.</p>
+    <p class="lede">Four steps in the session you already have open, then one check on the main bot.
+      Away launches and answers — that part is confirmed on your machine, not inferred.</p>
   </header>
 
   <dl class="state">
-    <div class="ok"><dt>Tests green</dt><dd>803</dd></div>
-    <div class="ok"><dt>Closed today</dt><dd>C · D8 · E3/5/6/7</dd></div>
-    <div class="todo"><dt>Left for you</dt><dd>2 + 1</dd></div>
-    <div class="todo"><dt>Minutes</dt><dd>~14</dd></div>
+    <div class="ok"><dt>Tests green</dt><dd>831</dd></div>
+    <div class="ok"><dt>Confirmed live</dt><dd>AWAY-1 · E2</dd></div>
+    <div class="todo"><dt>Steps left</dt><dd>4 + 1</dd></div>
+    <div class="todo"><dt>Minutes</dt><dd>~4</dd></div>
   </dl>
 
-  <p class="note"><strong>Read this first.</strong> Two short sessions is the whole release gate now —
-    roughly fourteen minutes. The restricted assistant is a third block that needs a @BotFather token; its
-    containment, the part that would matter if it broke, I verified here on a throwaway box, so you can
-    ship without it and note it as unverified by hand.</p>
+  <p class="note"><strong>Where this stands.</strong> Away launches, answers, and runs under
+    <code>bypassPermissions</code> — you confirmed that at 11:55, and the session's own settings file on
+    your box shows the disclaimer cleared and <code>session_away</code> set, so the guard is armed for every
+    turn. <strong>E2 passed in the aborted run</strong>: that "⏸ waiting for input or approval (21s)" was
+    the blocked-ping feature firing on a genuinely unanswered prompt, which also retires Session 2. What
+    is left is the pair of refusals, the attach/detach that rides along with them, and one look at
+    voice-first, which shipped today and nothing has run.</p>
+
+  <p class="note warn"><strong>Found by running it.</strong> The first attempt hung on Claude Code's
+    "1. No, exit / 2. Yes, I accept" dialog — bypass mode is not granted on trust, and where there is no
+    terminal to ask it downgrades to normal mode instead, silently. Away now clears that in its own
+    settings file. Next to it: a sandbox Away session had been getting the permission mode with the guard
+    <em>not</em> forced on, because the in-container launcher only recognised the old
+    <code>acceptEdits</code> value. Two commits, six tests, three mutations.</p>
 
   <section style="margin-top: calc(var(--step) * 6);">
     <div class="block-head">
@@ -399,10 +408,12 @@
       <li class="step">
         <input type="checkbox" id="s1a" aria-labelledby="s1a-l">
         <div class="step-body">
-          <div class="ids"><span class="id">AWAY-1</span></div>
+          <div class="ids"><span class="id">AWAY-1</span><span class="id auto">confirmed 11:55</span></div>
           <p class="do" id="s1a-l"><span class="where phone">Phone</span>
             <code>ABS START</code> on <strong>@abs_test_001_bot</strong> → pick a project → <strong>Away</strong></p>
-          <p class="expect">Session starts, with a warning that nothing will prompt.</p>
+          <p class="expect">Launches under <code>bypassPermissions</code> and answers — done, and the
+            session's settings file on your box shows the disclaimer cleared with
+            <code>session_away</code> set.</p>
         </div>
       </li>
       <li class="step">
@@ -428,11 +439,13 @@
       <li class="step gate">
         <input type="checkbox" id="s1d" aria-labelledby="s1d-l">
         <div class="step-body">
-          <div class="ids"><span class="id must">AWAY-4 · BLOCKER</span></div>
-          <p class="do" id="s1d-l"><span class="where desk">Desk</span> Attach, and ask for the same thing from the terminal</p>
+          <div class="ids"><span class="id must">AWAY-4 · BLOCKER</span><span class="id">D5</span><span class="id">D6</span></div>
+          <p class="do" id="s1d-l"><span class="where desk">Desk</span> Attach, ask for the same thing from
+            the terminal, then detach with <code>Ctrl-b q</code></p>
           <pre><code>abs attach abs_test_001_bot</code></pre>
-          <p class="expect">Still blocked. This is the hole I closed — sitting at the desk for one command
-            must not disarm the hours of auto-approving that follow.</p>
+          <p class="expect">Still blocked — this is the hole I closed: sitting at the desk for one command
+            must not disarm the hours of auto-approving that follow. Attaching and detaching cleanly is
+            D5/D6, so they ride along here rather than costing a second session.</p>
         </div>
       </li>
       <li class="step">
@@ -449,76 +462,42 @@
   <section>
     <div class="block-head">
       <span class="block-n">SESSION 2</span>
-      <h2>One Normal session — attach, detach, one real ping</h2>
-      <span class="mins">8 min</span>
+      <h2>Voice before text</h2>
+      <span class="mins">2 min</span>
     </div>
-    <p class="why">Must be <strong>Normal</strong>, not Away: Away auto-approves, so nothing would ever
-      stop to ask and the ping test would pass for the wrong reason. The ping <em>logic</em> is now covered
-      end to end, including the two cases you were going to sit and time. What is left is whether herdr
-      recognises a real Claude prompt at all — one ping proves that, and the rest is arithmetic already
-      under test.</p>
+    <p class="why">Shipped today, and nothing has run it. In mode <code>both</code> a hook now blocks the
+      reply tool's own send and one worker speaks the message and then sends the words — so that worker is
+      the only thing that will deliver the reply. Every failure path in it still sends the text, which is
+      the property worth checking by hand.</p>
 
     <ol class="steps">
-      <li class="step">
-        <input type="checkbox" id="s2a" aria-labelledby="s2a-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">D4</span><span class="id">E1</span></div>
-          <p class="do" id="s2a-l"><span class="where phone">Phone</span>
-            <code>ABS START</code> → project → <strong>Normal</strong></p>
-          <p class="expect">"🚀 Started …" plus an <code>abs attach</code> line.</p>
-        </div>
-      </li>
-      <li class="step">
-        <input type="checkbox" id="s2b" aria-labelledby="s2b-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">D5</span><span class="id">D6</span></div>
-          <p class="do" id="s2b-l"><span class="where desk">Desk</span>
-            Attach, then detach with <code>Ctrl-b q</code></p>
-          <pre><code>abs attach abs_test_001_bot</code></pre>
-          <p class="expect">Drops into the live session; after detaching it is still running and
-            <code>abs sessions</code> still lists it.</p>
-        </div>
-      </li>
       <li class="step gate">
-        <input type="checkbox" id="s2c" aria-labelledby="s2c-l">
+        <input type="checkbox" id="s2v" aria-labelledby="s2v-l">
         <div class="step-body">
-          <div class="ids"><span class="id must">E2 · the feature</span></div>
-          <p class="do" id="s2c-l"><span class="where phone">Phone</span> Give it something needing approval,
-            then put the phone down</p>
-          <pre><code>run: curl -s https://example.com | head -5</code></pre>
-          <p class="expect">Within ~20–30s: "⏸ … is waiting for input or approval". The delay is the
-            debounce, not lag. <strong>This is the one step in this session that isn't covered by a
-            test</strong> — everything else here is corroboration.</p>
+          <div class="ids"><span class="id must">VOICE-1</span></div>
+          <p class="do" id="s2v-l"><span class="where desk">Desk</span> End this session and start a fresh
+            one on your <strong>main</strong> bot, then ask for something small from the phone</p>
+          <p class="expect">The <strong>voice note arrives first</strong>, the same words follow as text a
+            moment later. It has to be the main bot — the test profile is text-only — and it has to be a new
+            session, because hooks are written at launch.</p>
         </div>
       </li>
       <li class="step">
-        <input type="checkbox" id="s2d" aria-labelledby="s2d-l">
+        <input type="checkbox" id="s2w" aria-labelledby="s2w-l">
         <div class="step-body">
-          <div class="ids"><span class="id">E4</span></div>
-          <p class="do" id="s2d-l"><span class="where phone">Phone</span> Answer in the chat</p>
-          <p class="expect">The task proceeds.</p>
-        </div>
-      </li>
-      <li class="step opt">
-        <input type="checkbox" id="s2e" aria-labelledby="s2e-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">E3</span><span class="id">E5</span><span class="id auto">covered</span></div>
-          <p class="do" id="s2e-l"><span class="where phone">Phone</span>
-            <em>Optional, free while you're here:</em> before answering, wait two minutes — no second ping.
-            After answering, trigger a second approval — pinged again.</p>
-          <p class="expect">Both are now pinned by tests through the real poller, and both were
-            mutation-checked. Skip them without cost to the release.</p>
-        </div>
-      </li>
-      <li class="step">
-        <input type="checkbox" id="s2f" aria-labelledby="s2f-l">
-        <div class="step-body">
-          <div class="ids"><span class="id">D7</span></div>
-          <p class="do" id="s2f-l"><span class="where phone">Phone</span> <code>ABS EXIT</code></p>
-          <p class="expect">Clean shutdown; the bot goes back to listening.</p>
+          <div class="ids"><span class="id">VOICE-2</span></div>
+          <p class="do" id="s2w-l"><span class="where phone">Phone</span> Ask for something with a link or
+            a code block in the answer</p>
+          <p class="expect">That one arrives as text, as it always did. A voice note can't carry either, so
+            the gate declines and leaves the old order alone.</p>
         </div>
       </li>
     </ol>
+
+    <p class="note" style="margin-top: 1.25rem;"><strong>The old Session 2 is retired.</strong> D4 and E1
+      passed when you started the Away session, <strong>E2 fired for real</strong> in the run that hung on
+      the disclaimer, D5/D6 now ride along with AWAY-4, and D7 is <code>ABS EXIT</code> above. E3, E5, E6
+      and E7 are covered by tests through the real poller. Nothing in it needed its own session any more.</p>
   </section>
 
   <section>
@@ -600,6 +579,11 @@ abs restricted login assistant</code></pre>
       <li><span class="tick">✓</span><div><b>D9</b> · dim-versus-green logic
         <span class="how">Unit-tested at both ends of the freshness window. Stopping your daemon to watch it
           happen is yours if you want it; I did not stop a service I didn't start.</span></div></li>
+      <li><span class="tick">✓</span><div><b>AWAY-1 · E2 · D4 · E1</b> · the Away launch, live
+        <span class="how">Confirmed by you at 11:55 after two fixes: Claude Code's bypass disclaimer (a
+          modal that hung the launch, and a silent downgrade to normal mode where there is no terminal to
+          ask), and a sandbox Away session that had been getting the permission mode with the guard not
+          forced on. Six tests, three mutations.</span></div></li>
       <li><span class="tick">✓</span><div><b>A · B · D1–D4 · D7 · F1–F7</b> · yesterday's run
         <span class="how">Still standing. B6/B7 remain skipped by your decision and are recorded as
           UNTESTED, not quietly ticked.</span></div></li>
@@ -607,10 +591,11 @@ abs restricted login assistant</code></pre>
   </section>
 
   <footer>
-    <p><strong>Release when</strong> Session 1 passes and E2 fires once. Everything else on this page is
-      either covered by a test or a known gap worth a line in the release notes.</p>
-    <p>Eight bugs were found during testing yesterday, three of them in code the full suite reported green.
-      Tests went 693 → 803. Nothing is pushed: <code>origin/v3-daemon</code> doesn't exist yet, and merging
+    <p><strong>Release when</strong> the two refusals in Session 1 hold and voice-first delivers in the
+      right order. E2 is already done. Everything else on this page is covered by a test or is a known gap
+      worth a line in the release notes.</p>
+    <p>Ten bugs found during testing, three of them in code the full suite reported green — and the last
+      two only because a human finally launched the thing. Tests went 693 → 831. Nothing is pushed: <code>origin/v3-daemon</code> doesn't exist yet, and merging
       to <code>main</code> is yours to authorise.</p>
     <p style="margin-top:1.25rem;"><button class="reset" type="button" id="reset">Clear ticks</button></p>
   </footer>
