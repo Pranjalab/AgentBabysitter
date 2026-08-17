@@ -240,6 +240,18 @@ since the thing that actually halts a session is a Bash approval, Away didn't
 deliver what its name promised. You'd come back to a session that had been
 waiting on a prompt for an hour.
 
+**The disclaimer, and why abs answers it for you.** Claude Code will not enter
+bypass mode on trust alone: in a terminal it shows a "1. No, exit / 2. Yes, I
+accept" dialog and waits, and non-interactively it downgrades the mode to the
+default instead. Both break Away — one hangs the session before it starts, the
+other silently takes the feature away.
+
+So an Away launch writes `skipDangerousModePermissionPrompt` into the settings
+file it already passes with `--settings`, and says so at launch. That is scoped to
+the one session: nothing is written to `~/.claude.json`, so every ordinary
+`claude` you run still asks. Choosing Away *is* the acceptance — and unlike the
+dialog, it comes with the guard below, which the dialog does not.
+
 **What stands in for the prompts.** The command guard, which in an Away session
 is not optional:
 

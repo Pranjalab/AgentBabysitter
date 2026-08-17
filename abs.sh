@@ -4097,7 +4097,23 @@ cmd_run() {
     pretool="$(jq -n --argjson p "$pretool" --arg g "$guard_cmd" \
       '$p + [{matcher:"mcp__plugin_telegram_telegram__reply", hooks:[{type:"command", command:$g, timeout:5}]}]')"
   fi
-  jq -n --arg c "$hook_cmd" --arg pm "$pt_matcher" --argjson pre "$pretool" --argjson sl "$status_json" '$sl + {
+  # An Away launch has to clear Claude Code's bypass disclaimer, or it stops on a
+  # "1. No, exit / 2. Yes, I accept" dialog and waits — the exact failure Away
+  # exists to prevent, and worse than the approval prompt it replaced, because it
+  # lands before the session is up and the phone only sees "waiting for input".
+  #
+  # `skipDangerousModePermissionPrompt` is the documented way past it, and Claude
+  # Code reads it from the `--settings` file among others, so it goes in HERE —
+  # scoped to this one session — rather than being stamped into the operator's
+  # global config where it would silently apply to every future `claude`.
+  #
+  # Non-interactively the dialog isn't shown at all: bypass is downgraded to the
+  # default mode instead, which is the same silent loss of Away that the acceptEdits
+  # version had. So this is not only about the prompt.
+  local away_json='{}'
+  [ "${ABS_AWAY:-0}" = "1" ] && away_json='{"skipDangerousModePermissionPrompt": true}'
+  jq -n --arg c "$hook_cmd" --arg pm "$pt_matcher" --argjson pre "$pretool" \
+        --argjson sl "$status_json" --argjson aw "$away_json" '$sl + $aw + {
     hooks: ({
       UserPromptSubmit: [ { hooks: [ { type: "command", command: $c, timeout: 5 } ] } ],
       PostToolUse: [ { matcher: $pm,
@@ -4118,7 +4134,7 @@ cmd_run() {
     # (measured, not assumed), so the guard remains the backstop for the small
     # set of irreversible things while ordinary work runs unattended.
     perm_args=(--permission-mode bypassPermissions)
-    warn "Away mode: nothing will prompt. Destructive commands are still blocked by the guard."
+    warn "Away mode: nothing will prompt — Claude Code's bypass disclaimer is accepted for THIS session only. Destructive commands are still blocked by the guard."
   fi
 
   # A stored default model, unless the caller already passed --model on the CLI.

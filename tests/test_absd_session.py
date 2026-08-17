@@ -212,6 +212,27 @@ def test_v4_away_maps_to_the_abs_flag(tmp_path: Path) -> None:
     assert _flag_value(argv2, "--permission-mode") == "plan"
 
 
+def test_v4_bypass_permissions_also_maps_to_the_abs_flag(tmp_path: Path) -> None:
+    """What the daemon sends for Away now, and it must NOT be a bare passthrough.
+
+    ``--away`` is not a synonym for the permission mode: it also forces the command
+    guard on, writes ``.session_away`` so the guard bites on every turn rather than
+    only Telegram-driven ones, and clears Claude Code's bypass disclaimer for the
+    session. Forwarding ``--permission-mode bypassPermissions`` instead buys the
+    auto-approval and none of the protection — an unattended box, auto-approving,
+    with the guard optional and a modal dialog waiting at startup.
+    """
+    argv, _ = _run_via_abs(tmp_path, ["p", "--permission-mode", "bypassPermissions"])
+    assert "--away" in argv
+    assert "--permission-mode" not in argv
+
+
+def test_v4_an_older_daemons_accept_edits_still_lands_on_away(tmp_path: Path) -> None:
+    """A pre-3.0 daemon against a 3.0 box: same path, not a passthrough."""
+    argv, _ = _run_via_abs(tmp_path, ["p", "--permission-mode", "acceptEdits"])
+    assert "--away" in argv
+
+
 def test_v4_extra_system_prompt_goes_through_the_env_seam(tmp_path: Path) -> None:
     # abs.sh builds its OWN --append-system-prompt (the ABS operating instructions).
     # A second --append-system-prompt would compete with it, so the restricted persona

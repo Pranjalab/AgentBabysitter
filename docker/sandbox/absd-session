@@ -115,9 +115,18 @@ if [ -f "$ABS_SH" ]; then
   [ "$resume" = "1" ] && abs_args+=(--continue)
   [ "$have_prompt" = "1" ] && abs_args+=(--prompt "$initial_prompt")
   # Claude passthrough — abs.sh forwards args it doesn't own straight to claude.
-  # --permission-mode acceptEdits is Away mode; abs.sh has its own --away flag that
-  # does the same thing plus the warning, so prefer it.
-  if [ "$perm_mode" = "acceptEdits" ]; then
+  #
+  # Both of these mean "this is an Away session", so both must become --away and
+  # not a bare passthrough. --away is not a synonym for the flag: it also forces
+  # the command guard on, writes .session_away so the guard bites on every turn
+  # rather than only Telegram ones, and clears the bypass disclaimer for the
+  # session. Passing --permission-mode straight through gets the permission mode
+  # and none of the protection — an auto-approving box with the guard optional.
+  #
+  # acceptEdits is what a pre-3.0 daemon sends; bypassPermissions is what this one
+  # sends. Accepting both means an older daemon against a newer box still lands on
+  # the same code path.
+  if [ "$perm_mode" = "acceptEdits" ] || [ "$perm_mode" = "bypassPermissions" ]; then
     abs_args+=(--away)
   elif [ -n "$perm_mode" ]; then
     abs_args+=(--permission-mode "$perm_mode")

@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [3.0.0] — 2026-08-10 — v3: the always-on daemon
 
+- **An Away session gets past Claude Code's bypass disclaimer instead of hanging
+  on it.** `bypassPermissions` is not granted on trust: in a terminal Claude Code
+  shows a "1. No, exit / 2. Yes, I accept" modal and waits, and non-interactively
+  it downgrades the mode to the default. Away hit the first — a session stalled
+  before it started, with the phone reporting only "waiting for input or
+  approval", which is *worse* than the approval prompt this release set out to
+  remove. An Away launch now writes `skipDangerousModePermissionPrompt` into the
+  settings file it already passes with `--settings`, and says so in the launch
+  warning. Scoped to that session: nothing is written to the operator's global
+  config, so every ordinary `claude` still asks. Choosing Away is the acceptance,
+  and it comes with the command guard, which the dialog does not.
+
+- **A sandbox Away session was auto-approving with the guard optional.** The
+  in-container launcher mapped `acceptEdits` to abs.sh's `--away` and forwarded
+  anything else straight through — so once the daemon started sending
+  `bypassPermissions`, an in-box Away session got the permission mode and none of
+  the protection: no forced guard, no `.session_away`, no cleared disclaimer.
+  `--away` is not a synonym for a permission mode, and both values now land on it.
+
 - **In reply mode `both`, the voice note now arrives before the text.** The old
   order came from where the work happened: the reply tool sent the text and a
   `PostToolUse` hook spoke it afterwards. On a phone that is backwards — by the

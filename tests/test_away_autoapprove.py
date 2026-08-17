@@ -172,3 +172,91 @@ def test_abs_exit_clears_the_away_flag(home):
     )
     rc = json.loads((home / "profiles" / PROFILE / "rc.json").read_text())
     assert "session_away" not in rc
+
+
+# ---- 4. the launch has to get PAST the bypass disclaimer ---------------------
+#
+# Claude Code will not enter bypassPermissions on trust alone. In a terminal it
+# shows a modal "1. No, exit / 2. Yes, I accept" and waits; non-interactively it
+# downgrades the mode to the default and says so. Either way an Away session that
+# does nothing about it is broken — the first is a session hung before it starts
+# (which is how Pranjal found it, with the phone reporting "waiting for input"),
+# the second is the silent loss of Away that the acceptEdits version already had.
+#
+# `skipDangerousModePermissionPrompt` is the documented way past it, and Claude
+# Code reads it from the --settings file among other scopes, so it belongs in the
+# per-session settings abs.sh already writes — NOT in the operator's global config,
+# where it would quietly apply to every future `claude` they ever run.
+
+_STUB_CLAUDE_LAUNCH = """#!/usr/bin/env bash
+case "${1:-}" in plugin) echo "telegram@claude-plugins-official"; exit 0 ;; esac
+exit 0
+"""
+_STUB_NOOP_LAUNCH = "#!/usr/bin/env bash\nexit 0\n"
+
+
+def _launch_settings(tmp_path, *extra_args):
+    """Run the real launch far enough to write its settings file, and read it back."""
+    from tests.conftest import write_profile
+
+    launch_home = tmp_path / "lhome"
+    launch_home.mkdir(exist_ok=True)
+    abs_home = tmp_path / "labs"
+    write_profile(abs_home, "default", allow_ids=[42])
+
+    bind = tmp_path / "lbin"
+    bind.mkdir(exist_ok=True)
+    for name, body in (
+        ("claude", _STUB_CLAUDE_LAUNCH),
+        ("curl", _STUB_NOOP_LAUNCH),
+        ("bun", _STUB_NOOP_LAUNCH),
+    ):
+        p = bind / name
+        p.write_text(body)
+        p.chmod(0o755)
+
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("ABS_") or key.startswith("TELEGRAM_") or key == "CLAUDERC_HOME":
+            env.pop(key, None)
+    env.update(
+        HOME=str(launch_home),
+        ABS_HOME=str(abs_home),
+        PATH=f"{bind}:{env.get('PATH', '')}",
+        ABS_REPO="http://127.0.0.1:1/never",
+    )
+    proc = subprocess.run(
+        ["bash", ABS_SH, "--profile", "default", "--daemon-start", *extra_args],
+        capture_output=True, text=True, env=env, timeout=60, cwd=str(tmp_path),
+    )
+    hooks = abs_home / "profiles" / "default" / "hooks.json"
+    assert hooks.exists(), proc.stdout + proc.stderr
+    return json.loads(hooks.read_text()), proc.stdout + proc.stderr
+
+
+def test_an_away_launch_clears_the_bypass_disclaimer(tmp_path):
+    settings, _ = _launch_settings(tmp_path, "--away")
+    assert settings.get("skipDangerousModePermissionPrompt") is True
+
+
+def test_a_normal_launch_leaves_the_disclaimer_alone(tmp_path):
+    """A normal session never asks for bypass, so it must not pre-accept anything —
+    the flag is scoped to the one launch that genuinely needs it."""
+    settings, _ = _launch_settings(tmp_path)
+    assert "skipDangerousModePermissionPrompt" not in settings
+
+
+def test_the_away_warning_says_the_disclaimer_was_accepted(tmp_path):
+    """Accepting a disclaimer on someone's behalf is not something to do quietly."""
+    _, output = _launch_settings(tmp_path, "--away")
+    assert "disclaimer" in output
+    assert "THIS session only" in output
+
+
+def test_the_away_settings_still_carry_the_guard(tmp_path):
+    """The disclaimer and the guard travel in the same file, so a mistake in the
+    merge could drop the hooks and leave an auto-approving session with nothing in
+    front of it."""
+    settings, _ = _launch_settings(tmp_path, "--away")
+    matchers = [e.get("matcher") for e in settings["hooks"]["PreToolUse"]]
+    assert "Bash" in matchers
