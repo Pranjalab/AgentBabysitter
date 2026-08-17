@@ -52,17 +52,18 @@ curl -fsSL https://agentbabysitter.com/install.sh | bash
 abs
 ```
 
-It asks one question — whether to clone the repository — and the answer decides what
-you get:
+It asks nothing. An installer should install, not interview — so it puts `abs` on
+your PATH and then fetches the v3 source (the daemon, sandboxes, `ABS START` from
+the phone) into `~/.abs/src` and builds its venv there. No git, no clone, no
+question.
 
-| | `abs` on your PATH | Daemon, `ABS START` from the phone, sandboxes | Updates by |
-| --- | --- | --- | --- |
-| **Yes** (default) | ✅ | ✅ | `git pull` |
-| No | ✅ | ❌ | re-running the installer |
+That step needs Python 3.11 or newer. Where there isn't one, the install still
+succeeds and you get the complete 2.x feature set — pairing, voice, reports, the
+kill ladder — with a line telling you what is missing. Add it later with:
 
-The daemon is Python that lives in the repository with its own venv, and sandboxes
-need the Dockerfile, so they genuinely cannot ship as one file. Say yes unless you
-only want the 2.x feature set.
+```sh
+abs src install     # and `abs src status` to see where it is
+```
 
 Piping to `bash` is your call to make — [read it first](https://agentbabysitter.com/install.sh)
 if you'd rather. Or clone it yourself and run the same script:
@@ -353,7 +354,7 @@ daemon (a systemd user service) that polls every one of your idle bots, so you c
   abs config label --clear   # back to abs:
   ```
 
-Setup (a checkout install):
+Setup:
 
 ```sh
 abs daemon install                    # render + install the systemd user unit
@@ -366,6 +367,7 @@ abs doctor                            # diagnose the whole stack
 
 | Command | What it does |
 | --- | --- |
+| 📦 `abs src install\|status` | Fetch the v3 source into `~/.abs/src` (no clone needed) |
 | 🛰 `abs daemon install\|start\|stop\|status\|logs` | Manage the always-on daemon |
 | 🩺 `abs doctor` | Diagnose the v2 deps + v3 daemon stack (read-only) |
 | 📂 `abs project add\|list\|rm <dir>` | Projects the ABS START flow offers |

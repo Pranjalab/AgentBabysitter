@@ -1,11 +1,12 @@
-# Start here — handoff after 3.0.2
+# Start here — handoff after 3.2.0
 
-Paste the block at the bottom into a fresh `abs` session. Everything above it is the
-context that block refers to.
+The four items that were queued behind the macOS crash are all done and released.
+This file says what changed, what is worth knowing before touching it, and what is
+actually left.
 
-## The live bug, and why it is first
+## What shipped
 
-**Every launch on macOS crashes.** 3.0.2 upgrades correctly now, then dies:
+**3.0.3 — the macOS crash.** Every launch on a Mac with voice installed died:
 
 ```
 /Users/pranjal/.local/bin/abs: line 1248: text: command not found
@@ -13,75 +14,87 @@ context that block refers to.
     command: voice_section="$(cat <<VOICEON
 ```
 
-It reproduces on the operator's Mac every time and **not at all on Linux** —
-`build_prompt` was driven directly with `reply_mode=both` on bash 5 and printed a
-clean prompt. So this is a **bash 3.2 incompatibility**, and 3.2 is what macOS ships.
+bash 3.2 — still `/bin/bash` on macOS — finds the closing `)` of `$( … )` with a
+scanner that has no idea here-documents exist, so it lexes the prose body as
+shell. The apostrophes in "it's" and "don't" ended the substitution early and the
+next line of prose ran as a command. The three prompt blocks live in their own
+functions now (`_prompt_reply_both`, `_prompt_voice_on`, `_prompt_voice_off`).
 
-Leading hypothesis, unverified: bash 3.2 misparses a **heredoc inside a command
-substitution** — `x="$(cat <<TAG … TAG)"`. `build_prompt` uses that shape three
-times (`voice_section` twice, `reply_mode_section` once as of 3.0.2). The reported
-line numbers land inside those bodies, and `text` / `release` being "not found" is
-what you would see if 3.2 evaluated parts of the body it should have treated as
-literal.
+Reproduced on Linux with `docker run --rm bash:3.2` before anything was changed,
+and confirmed byte-identical output afterwards. **It was not limited to reply mode
+`both`** — voice being installed at all was enough, in any mode.
 
-**Verify before fixing.** Do not refactor on the hypothesis alone:
+**The suite runs bash 3.2 now** (`tests/test_bash32.py`), and that is the part
+that matters. Three crashes in one week were invisible on bash 5, which was the
+only shell the tests had ever run on. Twelve tests: a static grep banning
+`$(cat <<TAG … TAG)` across every shipped shell script (no Docker needed — this is
+the rule that keeps the class dead), `build_prompt` driven under a real `bash:3.2`
+container across all five reply-mode/voice combinations, and the prompt compared
+byte for byte against bash 5's. Reverting the fix turns 7 of the 12 red.
 
-- Get a real bash 3.2. `docker run --rm -it bash:3.2` is the cheapest route, or ask
-  the operator to run one command on the Mac.
-- Minimal repro first: a two-line script with `x="$(cat <<T` … `T)"` containing a
-  backtick and a double quote. Confirm 3.2 breaks and 5 does not.
-- Only then choose the fix. The obvious candidates, in order of preference:
-  1. Assemble those sections without a heredoc at all — a plain single-quoted string
-     with `printf '%s\n'`, which has no expansion surface to get wrong.
-  2. Write the prompt to a temp file and pass `--append-system-prompt "$(cat file)"`.
-- Whatever you choose, **add a bash-3.2 check to CI or the suite**. Both of tonight's
-  crashes were invisible on bash 5, which is the only shell the tests run on. That
-  gap is the real defect; the parse bug is just what fell through it.
+**3.1.0 — the three prompt-adjacent items.**
 
-## Also queued, in the order the operator asked for them
+- Voice on by default where `voice_can_speak`. Never `voice`, only `both`: an
+  unattended default must not be the one mode that suppresses the written record.
+- The status bar shows the Claude account name, seeded once at launch and stored.
+- Emoji stripped before the speech engine, as UTF-8 byte ranges under `LC_ALL=C`.
+- The context percentage is colour-graded, and the usage footer is appended by
+  abs rather than left to the model to remember. Both asked for mid-session.
 
-1. **Voice on by default** where the machine can speak. One line in `reply_mode()`,
-   marked `TODO(3.0.3)`. It flips a contract ~18 tests assert (they leave
-   `reply_mode` unset and expect `text`), so update those deliberately.
-2. **The bar label defaults to the Claude account name**, not the literal `abs`.
-   Same shape, marked in `bar_label()`, same test caveat.
-3. **Strip emoji before the speech engine.** It reads them aloud as invented words.
-   The obvious fix — a `perl -CSD` hop — was reverted on purpose: it puts a new
-   external dependency inside the one path that must never fail, and with `pipefail`
-   a machine without perl would break *every* voice reply. Needs a portable answer.
-4. **The daemon without cloning.** The operator does not want a clone step; the
-   installer no longer offers one, so a `curl` install currently has no daemon.
-   Unpack the release tarball into `~/.abs/src` and install from there — no git, no
-   prompt, full v3.
+**3.2.0 — `abs src install`.** The v3 source arrives as a tarball in `~/.abs/src`,
+so a `curl … | bash` install gets the daemon, sandboxes and the start menu with no
+git and no question. `abs_src_root()` is the single place that decides where the
+source is.
 
-## State as of this handoff
+## Traps worth knowing before you touch any of this
 
-- Released: `main` = 3.0.2, tags `v3.0.1` and `v3.0.2`, GitHub release for v3.0.1.
-- 896 tests pass on Linux. Working tree clean. `agentbabysitter.com` serves the
-  matching installer (`a3e99f57`).
-- **Not announced.** `docs/ANNOUNCE-3.0.1.md` is written and unsent — do not send it
-  while macOS launches are broken.
-- Deferred feature: `restricted-assistant` branch, dormant and labelled experimental.
+**A default that is "whatever the machine can do" makes deleting a key dangerous.**
+`text` used to be stored by DELETING `.reply_mode`, because unset meant text. With
+unset now meaning "voice if this box can speak", deleting would hand back `both`
+and make `abs config reply text` look ignored. Both `text` and `reply-voice off`
+write the value explicitly now, and `abs config reply auto` is the way back to the
+default. The same trap applies to `bar_label --clear`, which is why
+`.bar_label_seeded` exists.
 
-## The prompt to paste
+**`ABS_VOICE_ROOT` and `ABS_SRC_ROOT` exist so tests can pin the machine.** Once a
+default depends on what is installed, a test that leaves the setting unset is
+asserting something about the developer's laptop. Pin both branches explicitly.
 
-> Read `docs/NEXT-SESSION.md` first.
->
-> Priority one: `abs` launches fine on Linux but dies on macOS with `line 1248:
-> text: command not found` at `voice_section="$(cat <<VOICEON`. It is a bash 3.2
-> parsing problem — macOS ships 3.2, our tests only ever run bash 5. Reproduce it on
-> a real bash 3.2 (`docker run --rm -it bash:3.2`) with a minimal case before
-> changing anything, then fix `build_prompt` so it does not depend on that
-> construct, and add a bash-3.2 check to the suite so this class cannot come back.
-> Two crashes shipped this week that were invisible on bash 5; the missing 3.2
-> coverage is the actual bug.
->
-> Then, in order: voice on by default where the machine can speak; the Claude
-> account name as the default status-bar label; emoji stripped before the speech
-> engine without adding a runtime dependency; and installing the daemon by
-> unpacking the release tarball into `~/.abs/src` so no clone is ever needed. The
-> first two are marked `TODO(3.0.3)` in `abs.sh` and each flips a contract about
-> eighteen tests assert — rewrite those tests deliberately rather than quickly.
->
-> Ship as 3.0.3. Do not send the announcement in `docs/ANNOUNCE-3.0.1.md` until
-> macOS launches cleanly.
+**The usage footer must never reach the speech engine**, and must never push a
+message past Telegram's 4096-character ceiling — Telegram rejects rather than
+truncates, and the retry fails identically. Both are enforced by ordering inside
+`cmd_voice_then_text` and by a length check in `with_usage_footer`. Both have
+tests; neither is obvious from reading the call site.
+
+## What is actually left
+
+1. **BSD sed is unverified.** The emoji strip is confirmed identical under GNU sed
+   and busybox sed, on bash 5 and bash 3.2. macOS ships BSD sed and there is no
+   copy of it on the Linux box. The construct is plain POSIX and should be fine,
+   but "should be" is not "is" — check a report with an emoji in it on the Mac.
+
+2. **The announcement is still unsent.** `docs/ANNOUNCE-3.0.1.md` is written and
+   was held back while macOS launches were broken. They are not broken any more,
+   so the only reason left is that it needs a read-through for the version numbers.
+
+3. **Nothing is tagged.** The operator's call: tags are for versions he has been
+   satisfied with, and 3.0.3 / 3.1.0 / 3.2.0 all went out untagged so he could
+   test on the Mac. `main` carries them; `v3.0.1` and `v3.0.2` are the newest tags.
+
+4. **The restricted assistant is still dormant.** `restricted-assistant` branch,
+   labelled experimental, blocked since July on a third @BotFather token. Nothing
+   changed here.
+
+5. **`abs src install` fetches `main` when there is no tag.** That is deliberate —
+   a version can ship before anyone tags it, and "no tag yet" must not mean "no
+   daemon". Once tagging resumes it will prefer the tag. Worth remembering that
+   until then, a `--force` reinstall tracks main rather than a fixed release.
+
+## State
+
+- `main` and `v3-daemon` both at 3.2.0. `agentbabysitter.com` serves the matching
+  installer.
+- 979 tests pass on Linux, including the bash 3.2 container tests. Working tree
+  clean.
+- The installer needs Python 3.11+ for the v3 source step, and says so without
+  failing when it is absent.

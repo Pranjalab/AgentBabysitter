@@ -25,6 +25,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.2.0] — 2026-08-18 — the daemon, without a clone
+
+The last of the four items queued behind the macOS crash, and the one that made a
+`curl … | bash` install a second-class one.
+
+- **`abs src install`.** The v3 layer — the daemon, sandboxes, the start menu's
+  registry and recents — is the `absd` Python package plus a venv, and until now
+  the only way to have them was a git checkout with `abs.sh` living inside it. So
+  the installer asked "clone the repository?", which is exactly the interview an
+  installer should not conduct. The prompt went in 3.0.2; this is what replaces
+  it. The release tarball is unpacked into `~/.abs/src` and the venv is built
+  there. No git, no question.
+
+  The installer runs it automatically and does **not** fail if it can't: the step
+  needs Python 3.11+, and losing a working v2 over an optional layer would be the
+  wrong trade. It says what happened and moves on.
+
+  Staged and swapped rather than written in place, so an interrupted download or
+  a failed venv build leaves the working copy alone. Success is claimed only
+  after `import absd` actually succeeds in the new venv — a venv that exists but
+  cannot import is the failure this command exists to stop happening later, at
+  launch, in a pane nobody is watching.
+
+- **One place decides where the v3 source is.** `abs_src_root()`, shaped exactly
+  like `voice_root()`: a checkout beside `abs.sh` always wins, so working on the
+  repo can never pick up a stale copy from `~/.abs/src`; anything else looks
+  under `$ABS_HOME/src`, which `abs uninstall` already wipes. Nineteen separate
+  `dirname "$SCRIPT_PATH"` resolutions collapsed into it.
+
+- **Every v3 command names the one command that fixes it.** They used to say
+  "needs the full checkout" and point at a `git clone` the installer had
+  deliberately stopped offering — a dead end. They say `abs src install` now, and
+  `abs doctor` reports where the source is and whether it matches `abs`.
+
 ## [3.1.0] — 2026-08-18 — voice by default, and the numbers you were promised
 
 Everything held back from 3.0.2 as `TODO(3.0.3)`, plus two things the operator
