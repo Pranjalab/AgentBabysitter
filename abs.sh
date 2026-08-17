@@ -1419,18 +1419,20 @@ decision of theirs goes first. If nothing is outstanding, say exactly that —
 
     Left: · merge and push (yours) · web installer (mine, ~20m) · restricted (parked)
 
-LAST: the numbers, on their own line and verbatim from:
-
-    bash "${SCRIPT_PATH}" --profile ${PROFILE} usage-glance
+LAST: the numbers. DO NOT WRITE THEM. ABS appends this line to every reply it
+sends, because relying on you to remember meant they were usually missing:
 
     📊 Fable 0% · Week 43% (resets on Tue) · 5H 62% (resets in 1h 10m) · ctx 68%
 
-Do not retype, reorder, abbreviate or "summarise" that line, and do not replace it
-with your own numbers like a test count — those belong in the body. It is one shell
-call, it costs no tokens, and it is the same line every time so it can be read at a
-glance. \`ctx\` is how much of THIS conversation's context window is left; if it is
-getting low, say so in words in the body too, because that decides whether a long
-task can finish in this session. Skip the line only if the command prints nothing.
+Adding your own copy just produces two. If you want to see the current values —
+to talk about them in the body — the command is
+
+    bash "${SCRIPT_PATH}" --profile ${PROFILE} usage-glance
+
+\`ctx\` is how much of THIS conversation's context window is left. When it is
+getting low, say so in words in the body as well: the appended line is a number,
+and what the operator needs is your judgement on whether a long task can still
+finish in this session.
 
 COMMAND MENU
 The chat's "/" menu offers exactly one command: /usage. Take that literally —
@@ -2290,6 +2292,11 @@ cmd_voice_then_text() {
 
   { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
   [ -n "${BOT_TOKEN:-}" ] || load_token 2>/dev/null || return 0
+  # The numbers, appended here rather than left to the model to remember. AFTER
+  # the speech above, deliberately: the note reads `lead`, which came from the
+  # original text, so the footer is never read aloud as "chart increasing, five
+  # H sixty two percent".
+  text="$(with_usage_footer "$text")"
   # One retry: a single dropped packet must not cost the operator the message.
   tg_send "$chat" "$text" >/dev/null 2>&1 && return 0
   sleep 2
@@ -3028,6 +3035,17 @@ cmd_config() {
             ok "Status-bar label: $c — the bar reads ${c}:@$(state_get '.bot')."
           fi ;;
       esac ;;
+    footer)
+      case "$val" in
+        on|true)   state_set 'del(.no_usage_footer)'
+                   ok "Usage footer ON — every reply abs sends carries the limits and the context left." ;;
+        off|false) state_set '.no_usage_footer = true'
+                   ok "Usage footer OFF — replies go out with nothing appended." ;;
+        "")        info "Usage footer: $([ "$(state_get '.no_usage_footer')" = "true" ] && echo off || echo on)"
+                   local _f; _f="$(usage_footer_line)"
+                   [ -n "$_f" ] && info "  Right now: ${_f}" ;;
+        *)         die "Usage: abs config footer on|off" ;;
+      esac ;;
     usage-refresh)
       case "$val" in
         "")       info "Usage refresh: $(state_get '.usage_refresh' | sed 's/^null$/5 (default)/') min" ;;
@@ -3190,6 +3208,7 @@ cmd_config() {
       info "  start menu     $([ "$(state_get '.no_start_menu')" = "true" ] && echo off || echo on)"
       info "  reply text     $(reply_text_on && echo on || echo off)"
       info "  reply voice    $(reply_voice_on && echo on || echo off)"
+      info "  usage footer   $([ "$(state_get '.no_usage_footer')" = "true" ] && echo off || echo on)"
       info "  voice first    $(voice_first_on && echo on || echo off)$([ "$(reply_mode)" = both ] || echo " (mode '$(reply_mode)' — no effect)")"
       info "  auto-silent    $([ "$(state_get '.no_auto_silent')" = "true" ] && echo off || echo on)"
       info "  voice engine   $(state_get '.tts_engine' | sed 's/^null$/auto/')"
@@ -3197,7 +3216,7 @@ cmd_config() {
       info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
       info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice  |  voice-first on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice|auto  |  footer on|off  |  voice-first on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 
@@ -3702,6 +3721,52 @@ usage_glance_str() {
 cmd_usage_glance() {
   local g; g="$(usage_glance_str)"
   [ -n "$g" ] && printf '📊 %s' "$g"
+  return 0
+}
+
+# --- the usage footer, enforced rather than remembered ------------------------
+#
+# The numbers used to reach Telegram only if the model remembered to run
+# `usage-glance` and paste the output. It forgot, and the operator noticed: he was
+# not seeing the limits or the context percentage on his phone at all.
+#
+# This is the same lesson as reply mode. An instruction in the prompt is a wish; a
+# hook is a guarantee. So abs appends the line itself, on every reply it sends,
+# and the prompt now tells the model NOT to add its own.
+#
+# The caveat, stated plainly because it is a real hole: abs can only append to a
+# message abs is sending. In voice-first `both` — the default on a machine that
+# can speak, and what the operator runs — the gate blocks the tool and abs does
+# the send, so the footer is guaranteed. In plain `text` mode the plugin does the
+# send and abs never touches the bytes; there the prompt is still the mechanism.
+#
+# `abs config footer off` turns it off.
+usage_footer_line() {
+  [ "$(state_get '.no_usage_footer')" = "true" ] && return 0
+  local g; g="$(usage_glance_str 2>/dev/null || true)"
+  [ -n "$g" ] || return 0
+  printf '📊 %s' "$g"
+  return 0
+}
+
+# Append it, separated by a blank line so it reads as a footer rather than as the
+# last sentence. Never fails: a message with no footer beats no message.
+with_usage_footer() {
+  local text="$1" f=""
+  f="$(usage_footer_line 2>/dev/null || true)"
+  [ -n "$f" ] || { printf '%s' "$text"; return 0; }
+  # Already there — the model pasted one despite being told not to, or this is a
+  # retry of a send that got the footer on the first attempt. Don't stack them.
+  # The LAST line specifically, not anywhere in the body: a report is perfectly
+  # entitled to mention 📊 in a sentence, and skipping the footer because of that
+  # is the failure this whole function exists to prevent.
+  local last; last="$(printf '%s' "$text" | tail -n 1)"
+  case "$last" in "📊 "*) printf '%s' "$text"; return 0 ;; esac
+  # Telegram's ceiling is 4096 characters and it REJECTS the message rather than
+  # truncating it. A footer that pushes a long report over the line would cost the
+  # whole report to add a status line — so near the limit, the report wins.
+  if [ "$(( ${#text} + ${#f} + 2 ))" -gt 4096 ]; then printf '%s' "$text"; return 0; fi
+  printf '%s\n\n%s' "$text" "$f"
   return 0
 }
 
