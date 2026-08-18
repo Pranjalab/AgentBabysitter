@@ -1,5 +1,14 @@
 # Documentation audit — README, docs/, and the website, against 3.3.0
 
+**Status: partly fixed on 18 Aug.** Everything under A (the false statements) and
+B (the stale ones) is corrected in the README and on the website. What remains is
+C — commands that shipped and are still undocumented in `docs/GUIDE.md` and on the
+website — and D, the four decisions, which need the operator rather than an edit.
+
+The original survey follows, kept intact so the reasoning is not lost.
+
+---
+
 Eight releases shipped on 18 Aug and none of the prose moved with them. This is
 the list of what is now **wrong**, what is merely **stale**, and what is
 **missing**, so the next session can fix it in one pass instead of discovering it

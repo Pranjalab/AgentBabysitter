@@ -151,7 +151,8 @@ Two switches, one per channel:
 
 ```sh
 abs config reply-text on|off     # send replies as text  (default on)
-abs config reply-voice on|off    # send replies as a voice note (default off)
+abs config reply-voice on|off    # send replies as a voice note
+                                 # (on by default wherever the machine can speak)
 ```
 
 Both on and **every finished result goes out as a voice note first, then the same
@@ -291,17 +292,21 @@ abs --model opus        # any claude flag is passed straight through
 | ⚙️ `abs config label <name>` | Name before the colon in the bar — `auto` takes your Claude one |
 | ⚙️ `abs config usage-refresh <min>` | How often the usage glance refreshes (default 5) |
 | ⚙️ `abs config guard on` / `off` | Block destructive commands on Telegram turns (default on) |
-| ⚙️ `abs config voice standard` / `turbo` | Default TTS model — expressive vs. ~1.8× faster |
-| ⚙️ `abs config voice-sample <file>` | Clone a voice for spoken replies (both models) |
+| ⚙️ `abs config footer on` / `off` | Attach your usage and context to replies (default on) |
+| 🎧 `abs voice samples` | Send one voice note per voice, and choose by ear |
+| ⚙️ `abs config kokoro-voice <id>` | Which voice speaks (`--clear` for the default, `af_heart`) |
+| ⚙️ `abs config voice standard` / `turbo` | Chatterbox only — expressive vs. ~1.8× faster |
+| ⚙️ `abs config voice-sample <file>` | Clone a voice — needs `abs voice setup --chatterbox` |
 | ⚙️ `abs config reply-text on` / `off` | Send replies as text (default on) |
-| ⚙️ `abs config reply-voice on` / `off` | Send replies as a voice note (default off) |
+| ⚙️ `abs config reply text\|both\|voice\|auto` | The mode directly — `auto` hands it back to the machine |
+| ⚙️ `abs config reply-voice on` / `off` | Send replies as a voice note — **on by default** where the machine can speak |
 | ⚙️ `abs config voice-first on` / `off` | In mode `both`: note first, then text (default on) |
 | ⚙️ `abs config auto-silent on` / `off` | Pause reports while you're driving the terminal (default on) |
 | 🔕 `abs quiet on` / `off` | Mute / unmute reports (inbound still works) |
 | 🛑 `abs off` / `on` | Drop / re-enable all inbound + outbound Telegram |
 | 🚪 `abs exit` | End the running session (restart with `abs`) |
 | 💬 `abs send "text"` | Send plain text to your chat — works even if the Telegram plugin is down (`abs send -` reads stdin) |
-| 🎤 `abs say [--turbo] "text"` | Speak it and send as a voice note (`--audio-prompt` to clone) |
+| 🎤 `abs say "text"` | Speak it and send as a voice note |
 | ♻️ `abs reset` | Remove this profile's token, allowlist, and state |
 | ❓ `abs help` | The full list |
 
@@ -335,7 +340,7 @@ daemon (a systemd user service) that polls every one of your idle bots, so you c
 - **The status bar tells you what will happen next.**
 
   ```
-  Pran:@yourbot · ● Text · ● Voice · Week 43% (resets on Tue) · 5H 62% (resets in 1h 10m) · ctx 68% · v3.0.0
+  Pran:@yourbot · ● Text · ● Voice · Week 43% (resets on Tue) · 5H 62% (resets in 1h 10m) · ctx 68% · v3.3.0
   ```
 
   Both dots read the same way — green means *this is live right now*:
@@ -350,17 +355,22 @@ daemon (a systemd user service) that polls every one of your idle bots, so you c
 
   The percentages come from Claude Code's own render payload, so they cost nothing
   and are never stale: your weekly and five-hour limits with their resets, then
-  `ctx` — how much of *this conversation's* context window is left — dim and last,
-  because a limit at 90% stops your work while a long conversation merely means a
-  long conversation. The version is there so you can see which `abs` is rendering
-  without running anything.
+  `ctx` — how much of *this conversation's* context window is left.
 
-  The name before the colon is yours to set:
+  Both scales are coloured, in opposite directions. The limits grade on percent
+  **used**, so they climb green → amber → coral → brick as they fill. `ctx` grades
+  on percent **left**, so it falls the same way as it empties: green above 50,
+  amber to 20, coral to 10, brick below. Running out of context ends a session as
+  firmly as hitting a limit does. The version is last so you can see which `abs` is
+  rendering without running anything.
+
+  The name before the colon is your Claude account name, picked up once on first
+  launch. Override it whenever you like:
 
   ```sh
-  abs config label auto      # → Pran:@yourbot   (from your Claude display name)
-  abs config label Pran      # or say it directly
-  abs config label --clear   # back to abs:
+  abs config label Pran      # say it directly
+  abs config label auto      # re-read it from your Claude account
+  abs config label --clear   # back to the plain abs:
   ```
 
 Setup:
@@ -385,7 +395,7 @@ abs doctor                            # diagnose the whole stack
 | 🖥 `abs sessions` / `abs attach [profile]` | List / attach engine sessions |
 | ▶️ `abs --resume` / `abs --new` | Skip the terminal start menu (resume top / fresh) |
 | 🏖 `abs sandbox build\|create\|list\|start\|stop\|destroy` | Docker sandboxes ([below](#-sandboxes--let-it-build-without-letting-it-near-your-machine)) |
-| 🤖 `abs restricted create\|login\|list\|start\|stop\|destroy` | The restricted assistant bot — **experimental, not in 3.0.0** |
+| 🤖 `abs restricted create\|login\|list\|start\|stop\|destroy` | The restricted assistant bot — **experimental, not enabled** |
 
 From **Telegram** (daemon-mode grammar, whole-message):
 `ABS START` · `ABS STATUS` · `ABS POOL` · `ABS CLEAR POOL` · `ABS OFF` · `ABS BLOCK`
@@ -414,7 +424,7 @@ the box stays in the box.
 
 ### 🤖 The restricted assistant — coming in a later release
 
-> **Not part of 3.0.0.** The code is here and unit-tested, but nobody has ever
+> **Not enabled in any release.** The code is here and unit-tested, but nobody has ever
 > provisioned one end to end, so it ships dormant and unadvertised rather than as a
 > feature. Development continues on the `restricted-assistant` branch, with the
 > checklist it needs in `docs/v3/manual-tests/restricted.md`. Running
