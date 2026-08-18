@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.2.4"
+readonly ABS_VERSION="3.3.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1287,6 +1287,36 @@ garbling. On tone you are guessing; say so rather than claiming it sounds good.
 VOICEON
 }
 
+# Offered once, on a machine that can speak, to someone who has never chosen.
+#
+# The operator's ask, and his reasoning: a voice you did not choose is a voice you
+# put up with. But he was equally clear it must not become a chore — the default
+# is good, and "it sounds fine, leave it" has to be a one-word answer that is
+# never asked again.
+#
+# So: mentioned once, early, in a sentence; the samples are only synthesised if
+# he says yes, because six voice notes nobody asked for is worse than no offer.
+_prompt_voice_offer() {
+  cat <<'VOICEOFFER'
+
+PICK A VOICE — ONCE, THEN NEVER AGAIN
+This machine can speak, and nobody has chosen which voice it uses. Early in this
+session, in one sentence, offer the choice: the default is a warm American female
+voice, and you can send samples of the others to listen to.
+
+    bash SCRIPT_PATH_HERE --profile PROFILE_HERE voice samples
+
+Only run that if they say yes — it sends six voice notes and takes a couple of
+minutes. When they name one, or say the default is fine, store it:
+
+    bash SCRIPT_PATH_HERE --profile PROFILE_HERE config kokoro-voice af_bella
+
+Either answer ends this for good; the offer is not made again. If they ignore it,
+drop it — mention it once and never bring it up unprompted a second time. It is a
+preference, not a task, and it must never delay the actual work they came for.
+VOICEOFFER
+}
+
 _prompt_voice_off() {
   cat <<VOICEOFF
 Voice is an optional add-on and is NOT set up on this machine. Do not run
@@ -1334,6 +1364,21 @@ note cannot carry them; put anything they need to copy or tap in one of those.
     voice_section="$(_prompt_voice_on)"
   else
     voice_section="$(_prompt_voice_off)"
+  fi
+
+  # The one-time voice-preference offer. Gated on the machine being able to speak
+  # at all — offering a choice of voices to a box with no engine is noise — and on
+  # never having been offered before, which `abs voice samples` and
+  # `abs config kokoro-voice` both set.
+  if voice_can_speak && [ "$(state_get '.voice_offer_done')" != "true" ]; then
+    local offer; offer="$(_prompt_voice_offer)"
+    # The paths are substituted here rather than expanded inside the here-doc,
+    # which is quoted on purpose: everything else in that block is prose, and an
+    # unquoted here-doc would try to expand any $ that ever appears in it.
+    offer="${offer//SCRIPT_PATH_HERE/$SCRIPT_PATH}"
+    offer="${offer//PROFILE_HERE/$PROFILE}"
+    voice_section="${voice_section}
+${offer}"
   fi
 
   cat <<EOF
@@ -3203,6 +3248,13 @@ cmd_config() {
             ok "Status-bar label: $c — the bar reads ${c}:@$(state_get '.bot')."
           fi ;;
       esac ;;
+    voice-offer)
+      case "$val" in
+        done|off)   state_set '.voice_offer_done = true'; ok "Voice-preference offer: done — it won't be raised again." ;;
+        reset|on)   state_set 'del(.voice_offer_done)'; ok "Voice-preference offer: will be made once more." ;;
+        "")         info "Voice-preference offer: $([ "$(state_get '.voice_offer_done')" = "true" ] && echo done || echo pending)" ;;
+        *)          die "Usage: abs config voice-offer done|reset" ;;
+      esac ;;
     footer)
       case "$val" in
         on|true)   state_set 'del(.no_usage_footer)'
@@ -3339,7 +3391,8 @@ cmd_config() {
       case "$val" in
         --clear|clear) state_set 'del(.kokoro_voice)'; ok "Kokoro voice: af_heart (default)." ;;
         "")            info "Kokoro voice: $(state_get '.kokoro_voice' | sed 's/^null$/af_heart (default)/')" ;;
-        *)             state_set --arg v "$val" '.kokoro_voice = $v'; ok "Kokoro voice: $val" ;;
+        *)             state_set --arg v "$val" '.kokoro_voice = $v | .voice_offer_done = true'
+                       ok "Kokoro voice: $val" ;;
       esac ;;
     voice-sample)
       # A reference clip to clone the voice from, applied to every `abs say` (both
@@ -4491,19 +4544,90 @@ voice_setup() {
   return 0
 }
 
+# The curated voices, in the order they are sent. Kept in step with SUGGESTED in
+# speak_kokoro.py — that file is the catalogue, this is what a person is actually
+# offered. Six is enough to choose from and few enough to sit through: each note
+# costs a synthesis and a notification.
+VOICE_SAMPLES="af_heart|American female, warm (the default)
+af_bella|American female, brighter
+bf_emma|British female
+am_michael|American male, even
+am_adam|American male, deeper
+bm_george|British male"
+
+# `abs voice samples` — send one short voice note per voice, so the choice is
+# made by EAR.
+#
+# The operator asked for this after picking a voice he liked by accident. A list
+# of identifiers is not a choice anybody can make: `af_bella` and `bm_george` mean
+# nothing until you have heard them, and this is a tool whose whole premise is
+# that he would rather listen than read.
+voice_samples() {
+  voice_can_speak || die "Nothing here can speak yet. Run: abs voice setup"
+  require_setup
+  load_token || die "No bot token at $TG_ENV. Run: abs setup"
+  local cid; cid="$(state_get '.chat_id')"
+  { [ -n "$cid" ] && [ "$cid" != null ]; } || die "No chat_id in $ABS_STATE."
+
+  local r; r="$(voice_root)"
+  local py="$r/.venv-kokoro/bin/python" script="$r/speak_kokoro.py"
+  { [ -x "$py" ] && [ -f "$script" ]; } \
+    || die "Voice samples need the kokoro engine. Run: abs voice setup"
+
+  local current; current="$(state_get '.kokoro_voice')"
+  case "$current" in ''|null) current="af_heart" ;; esac
+
+  info "${c_bold}Sending voice samples${c_reset} — one note per voice, ~15s each."
+  tg_send "$cid" "🎧 Voice samples. Reply with the name of the one you want, or say 'keep the default'." \
+    >/dev/null 2>&1 || true
+
+  local line vid vdesc out sent=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    vid="${line%%|*}"; vdesc="${line#*|}"
+    out="$(mktemp -t abs-sample.XXXXXX 2>/dev/null)" || continue
+    info "  ${c_dim}${vid} — ${vdesc}…${c_reset}"
+    # The sample says its own name, so the note is self-labelling even if the
+    # caption scrolls away. Bounded like every other synthesis: a stuck sample
+    # must not hold the rest of the list hostage.
+    if printf '%s' "This is ${vdesc}. If you like this voice, reply with ${vid}." \
+       | with_timeout "$VOICE_SYNTH_TIMEOUT" \
+         "$py" "$script" --voice "$vid" - "$out.ogg" >/dev/null 2>&1 \
+       && [ -s "$out.ogg" ]; then
+      local mark=""; [ "$vid" = "$current" ] && mark="  ← current"
+      tg_send_voice "$cid" "$out.ogg" >/dev/null 2>&1 \
+        && { tg_send "$cid" "${vid} — ${vdesc}${mark}" >/dev/null 2>&1 || true; sent=$((sent + 1)); }
+    else
+      warn "  $vid did not synthesise — skipped."
+    fi
+    _voice_probe_clean "$out"
+  done <<SAMPLES
+$VOICE_SAMPLES
+SAMPLES
+
+  [ "$sent" -gt 0 ] || die "No samples could be produced. Try: abs voice setup --force"
+  tg_send "$cid" "Set one with:  abs config kokoro-voice <name>" >/dev/null 2>&1 || true
+  ok "Sent $sent samples. Choose with: ${c_bold}abs config kokoro-voice <name>${c_reset}"
+  # Asked and answered: whatever they pick, they have now been offered.
+  state_set '.voice_offer_done = true' 2>/dev/null || true
+  return 0
+}
+
 cmd_voice() {
   local sub="${1:-status}"; shift 2>/dev/null || true
   case "$sub" in
     status|show|"") voice_status ;;
     setup|install)  voice_setup "$@" ;;
+    samples|voices) voice_samples ;;
     -h|--help)
-      info "Usage: abs voice [status|setup]"
+      info "Usage: abs voice [status|setup|samples]"
       info "  status   show which voice pieces are installed (default)"
+      info "  samples  send one voice note per voice, so you can choose by ear"
       info "  setup    build the local voice engines — Whisper in, Kokoro out"
       info "           --force       rebuild even if they already exist"
       info "           --chatterbox  also build the slow GPU engine, the only one"
       info "                         that can clone a voice from a sample" ;;
-    *) die "Usage: abs voice [status|setup]" ;;
+    *) die "Usage: abs voice [status|setup|samples]" ;;
   esac
 }
 

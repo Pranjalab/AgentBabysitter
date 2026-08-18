@@ -25,6 +25,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.3.0] — 2026-08-18 — choose a voice by ear
+
+- **`abs voice samples`** sends one short voice note per voice — six of them, each
+  saying its own name so the note is self-labelling when the caption scrolls away.
+  A list of identifiers is not a choice anybody can make: `af_bella` and
+  `bm_george` mean nothing until you have heard them.
+
+- **The choice is offered once, and then never again.** It appears in the injected
+  prompt only where the machine can actually speak and nobody has chosen — raised
+  in a sentence, early, with the samples synthesised only if the answer is yes.
+  Picking a voice and keeping the default both end it for good;
+  `abs config voice-offer reset` brings it back.
+
+- The default is unchanged: `af_heart`, the warm American female voice. It is what
+  the operator picked out of the six, which is a fair argument for it having been
+  the right default all along.
+
 ## [3.2.4] — 2026-08-18 — a green status page on an install that could not speak
 
 - **Kokoro's English phoneme model is installed at setup.** It was not, and
