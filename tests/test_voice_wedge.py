@@ -128,10 +128,10 @@ def test_a_wedged_engine_is_abandoned_rather_than_waited_on(box):
     """The whole bug in one assertion. Without a timeout this call never returns."""
     box.hangs_for(600)
     started = time.time()
-    out = box.call('_voice_mirror "the suite is green and the daemon came back"',
+    out = box.call('_voice_mirror "the suite is green and the daemon came back" || echo GAVEUP',
                    timeout=60, ABS_VOICE_TIMEOUT="3")
     elapsed = time.time() - started
-    assert out.returncode == 0, out.stderr
+    assert "GAVEUP" in out.stdout, "it reported success for a note that never happened"
     assert elapsed < 40, f"took {elapsed:.0f}s — it waited on the hung engine"
     assert "START" in " ".join(box.tags()), "the engine was never invoked at all"
     assert "DONE" not in " ".join(box.tags()), "the stub cannot have finished"
@@ -293,9 +293,61 @@ def test_in_voice_first_mode_a_wedged_engine_still_delivers_the_text(box):
     script.write_text(f"{body}\nuse_profile {PROFILE}\ncmd_voice_then_text\n")
     started = time.time()
     subprocess.run(["bash", str(script)], input=payload, capture_output=True,
-                   text=True, env=box.env(ABS_VOICE_TIMEOUT="3"), timeout=90)
+                   text=True, env=box.env(ABS_VOICE_FIRST_TIMEOUT="3"), timeout=90)
     assert time.time() - started < 60
 
     sent = [l for l in box.events() if l.startswith("TEXT ")]
     assert sent, f"the text never went out: {box.events()}"
     assert "daemon came back up" in sent[-1]
+
+
+# ---- saying so when the note did not make it ---------------------------------
+#
+# The operator waited five minutes on a Mac running the slow engine, got text,
+# and had no way to tell whether voice had failed, was still coming, or had never
+# been switched on. Silence about a failure is what turns "degraded" into "broken"
+# in the only opinion that matters — the person holding the phone.
+
+
+def _worker(box, tmp_path, text, **env):
+    body = "".join(l for l in open(ABS_SH) if l.strip() != 'main "$@"')
+    script = box.rc.parent / "vftworker.sh"
+    script.write_text(f"{body}\nuse_profile {PROFILE}\ncmd_voice_then_text\n")
+    payload = json.dumps({"text": text, "chat": "42", "lead": text})
+    return subprocess.run(["bash", str(script)], input=payload, capture_output=True,
+                          text=True, env=box.env(**env), timeout=120)
+
+
+def test_a_failed_note_says_so_in_the_text(box, tmp_path):
+    box.hangs_for(600)
+    _worker(box, tmp_path, "the deploy finished and the migration ran clean",
+            ABS_VOICE_FIRST_TIMEOUT="3")
+    sent = [l for l in box.events() if l.startswith("TEXT ")]
+    assert sent, box.events()
+    assert "voice note didn" in sent[-1], sent[-1]
+    assert "migration ran clean" in sent[-1]
+
+
+def test_a_note_that_worked_adds_no_apology(box, tmp_path):
+    """The line has to be rare enough to mean something. On the happy path it
+    must not appear at all."""
+    box.hangs_for(0)
+    _worker(box, tmp_path, "the deploy finished and the migration ran clean",
+            ABS_VOICE_FIRST_TIMEOUT="60")
+    sent = [l for l in box.events() if l.startswith("TEXT ")]
+    assert sent, box.events()
+    assert "voice note didn" not in sent[-1], sent[-1]
+
+
+def test_the_text_is_not_held_for_the_full_synthesis_ceiling(box, tmp_path):
+    """Voice-first holds the words until the note is made. The ceiling that stops
+    a wedged engine hanging forever is far too long to be the ceiling on how long
+    a written answer waits — those are different questions with different answers.
+    """
+    box.hangs_for(600)
+    started = time.time()
+    _worker(box, tmp_path, "the deploy finished and the migration ran clean",
+            ABS_VOICE_FIRST_TIMEOUT="3", ABS_VOICE_TIMEOUT="600")
+    elapsed = time.time() - started
+    assert elapsed < 40, f"the text waited {elapsed:.0f}s — it used the wrong budget"
+    assert [l for l in box.events() if l.startswith("TEXT ")]

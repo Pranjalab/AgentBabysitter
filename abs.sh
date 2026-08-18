@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.2.3"
+readonly ABS_VERSION="3.2.4"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -2198,6 +2198,11 @@ readonly VOICE_SYNTH_TIMEOUT="${ABS_VOICE_TIMEOUT:-300}"
 # How long to wait for someone else's note before giving up on ours. Longer than
 # one synthesis, so a queue of two is served rather than dropped.
 readonly VOICE_LOCK_WAIT="${ABS_VOICE_LOCK_WAIT:-420}"
+# How long voice-first will hold the TEXT waiting for the note. Much shorter than
+# the synthesis ceiling on purpose: that ceiling exists so a wedged engine cannot
+# hang forever, while this one is simply how long a written answer should ever
+# wait for audio. Five minutes of nothing reads as a broken tool.
+readonly VOICE_FIRST_TIMEOUT="${ABS_VOICE_FIRST_TIMEOUT:-120}"
 # Grace on top of the timeout before a held lock is declared abandoned. The
 # holder should already have given up by then; this only covers the gap between
 # with_timeout killing it and the release running.
@@ -2264,8 +2269,17 @@ _voice_lock_acquire() {
 
 _voice_lock_release() { rm -rf "$(_voice_lock_dir)" 2>/dev/null || true; }
 
+# $3 is the synthesis budget in seconds, because the two callers want very
+# different ones. The PostToolUse mirror runs after the text has already gone, so
+# it can afford the full ceiling. Voice-first cannot: there the words are held
+# until the note has been produced, and waiting five minutes for audio that is
+# not coming is worse than any ordering guarantee is worth.
+#
+# Returns 0 when a note actually went out, 1 when it did not. That return value
+# is not decoration — voice-first uses it to tell the operator why he waited.
 _voice_mirror() {
-  local original="$1" ceiling="${2:-$VOICE_MIRROR_MAX}" prepped hash last_hash last_ts now rc=0
+  local original="$1" ceiling="${2:-$VOICE_MIRROR_MAX}" budget="${3:-$VOICE_SYNTH_TIMEOUT}"
+  local prepped hash last_hash last_ts now rc=0
   prepped="$(_voice_prep "$original")"
   _voice_worth_saying "$prepped" || return 0
   # The ceiling is a PARAMETER because two callers want different ones, and the
@@ -2301,7 +2315,7 @@ _voice_mirror() {
   # lock is not flock any more, and with_timeout for why synthesis is bounded.
   if _voice_lock_acquire; then
     printf '%s' "$prepped" \
-      | with_timeout "$VOICE_SYNTH_TIMEOUT" bash -c "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
+      | with_timeout "$budget" bash -c "$(_voice_say_cmd) -" >/dev/null 2>&1 || rc=$?
     _voice_lock_release
   else
     # Another note has been synthesising for longer than anyone should wait.
@@ -2324,7 +2338,7 @@ _voice_mirror() {
   # promise that audio would arrive, so send the words rather than let the message
   # vanish. In the other modes the text is already on their phone.
   if [ "$(reply_mode)" = "voice" ]; then _voice_fallback_text "$original"; fi
-  return 0
+  return 1
 }
 
 # Last resort when the voice note could not be produced: deliver the words as
@@ -2385,7 +2399,11 @@ _voice_announce() {
 # _voice_spawn calls it.
 cmd_voice_mirror() {
   local text; text="$(cat)"
-  _voice_mirror "$text"
+  # `|| true` because _voice_mirror returns 1 when no note went out, and here
+  # that is information nobody is waiting for: this runs detached, after the text
+  # has already been delivered. Letting it through would trip the ERR trap and
+  # print "Unexpected failure" into a log for a condition that is expected.
+  _voice_mirror "$text" || true
 }
 
 # Same idea, but this one owns BOTH halves of the delivery and their order: speak
@@ -2418,19 +2436,31 @@ cmd_voice_then_text() {
   load_token 2>/dev/null || true
 
   # Tell them a note is coming before the silence starts, then speak it.
-  # _voice_mirror is silent about failure by design and, in mode `both`, deliberately
-  # does not fall back to text — that is this function's job below, and doing it in
-  # both places would send the message twice.
+  # _voice_mirror in mode `both` deliberately does not fall back to text — that is
+  # this function's job below, and doing it in both places would send it twice.
   _voice_announce "$lead" "$chat"
   # VOICE_LEAD_MAX, not the mirror's own default: the lead is already bounded, and
   # letting the mirror re-trim it at 1200 is what made a long answer stop early.
   # A little headroom over VOICE_LEAD_MAX: _voice_lead may have appended its own
   # closing line, which pushes it just past the budget, and trimming at exactly the
   # budget made the note end with BOTH markers stacked on each other.
-  _voice_mirror "$lead" "$((VOICE_LEAD_MAX + 200))" || true
+  #
+  # VOICE_FIRST_TIMEOUT, not the full synthesis ceiling. Here the words are HELD
+  # until the note is produced, so the ceiling is not a safety rail — it is how
+  # long the operator sits looking at nothing. He waited five minutes on a Mac
+  # running the slow engine and then got text with no explanation. Two minutes is
+  # the most a written answer should ever wait for audio.
+  local spoke=0
+  _voice_mirror "$lead" "$((VOICE_LEAD_MAX + 200))" "$VOICE_FIRST_TIMEOUT" && spoke=1
 
   { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
   [ -n "${BOT_TOKEN:-}" ] || load_token 2>/dev/null || return 0
+  # Say so when the note did not make it. Silence here is what made this look
+  # broken rather than degraded: the operator waited, got text, and had no way to
+  # tell whether voice had failed, was still coming, or had never been on.
+  if [ "$spoke" = 0 ] && _voice_worth_saying "$(_voice_prep "$lead")"; then
+    text="🔇 (the voice note didn't make it — here it is as text)"$'\n\n'"$text"
+  fi
   # The numbers, appended here rather than left to the model to remember. AFTER
   # the speech above, deliberately: the note reads `lead`, which came from the
   # original text, so the footer is never read aloud as "chart increasing, five
@@ -4269,6 +4299,16 @@ voice_status() {
 }
 
 # `abs voice setup` — the one place voice gets built. Idempotent; safe to re-run.
+# Tidy up after the synthesis probe. Its own function so the paths are written
+# once: three of them, all derived from one mktemp name, and a stray .ogg left in
+# /tmp after every setup is exactly the kind of litter nobody notices for months.
+_voice_probe_clean() {
+  local base="$1"
+  [ -n "$base" ] || return 0
+  rm -f "$base" "$base.ogg" "$base.err" 2>/dev/null || true
+  return 0
+}
+
 # Since 3.2.3 this builds KOKORO, not chatterbox.
 #
 # Chatterbox was the original engine and it was the wrong default for almost
@@ -4344,6 +4384,25 @@ voice_setup() {
 
   mkdir -p "$r" || die "Could not create $r"
 
+  # espeak-ng, which kokoro uses to phonemise anything its dictionary misses,
+  # holds its data path in a fixed 160-byte buffer. Overflow it and espeak
+  # silently falls back to the path compiled into the wheel at BUILD time —
+  # somebody else's CI checkout — and every synthesis dies with
+  # "Error processing file '/home/runner/work/.../phontab': No such file".
+  #
+  # That error names a directory on a machine you have never seen, so it reads as
+  # a corrupt install rather than as "your path is too long". It cost an hour of
+  # chasing a phantom dependency bug; one line of warning is cheap.
+  #
+  # The engine's data lands at <root>/.venv-kokoro/lib/pythonX.Y/site-packages/
+  # espeakng_loader/espeak-ng-data — about 90 characters past the root.
+  if [ "${#r}" -gt 60 ]; then
+    warn "The voice directory path is ${#r} characters, which is long."
+    info "  espeak-ng truncates a data path past ~160 and then cannot find its own"
+    info "  phoneme tables. If synthesis fails below with a '/home/runner/...' path,"
+    info "  that is what happened — install voice somewhere shorter."
+  fi
+
   # The CLI scripts. In a dev checkout they already sit beside abs (r is the
   # checkout, nothing to fetch); for an installed abs, pull them into ~/.abs/voice.
   # speak.py comes down only with chatterbox — no point shipping the driver for
@@ -4369,6 +4428,21 @@ voice_setup() {
     info "  ${c_dim}Building text-to-speech engine (.venv-kokoro, Python 3.12)…${c_reset}"
     uv venv "$r/.venv-kokoro" --python 3.12 || die "Could not create the kokoro venv (uv venv --python 3.12)."
     VIRTUAL_ENV="$r/.venv-kokoro" uv pip install kokoro soundfile || die "Could not install kokoro."
+    # The English model kokoro's grapheme-to-phoneme step needs, installed HERE
+    # rather than left to be fetched on first use.
+    #
+    # This is the bug the operator hit on his Mac. Kokoro tries to download it
+    # itself the first time you ask it to speak — and it cannot, because `uv venv`
+    # builds an environment with no package installer inside it. What surfaced was
+    # "error: No virtual environment found; run uv venv..." at the moment he asked
+    # for a voice note, on an install whose status page was entirely green.
+    #
+    # Pinned to the spacy 3.8 line, which is what kokoro resolves to. It is not on
+    # PyPI - spacy publishes its models as release assets - hence the URL.
+    info "  ${c_dim}Installing the English phoneme model…${c_reset}"
+    VIRTUAL_ENV="$r/.venv-kokoro" uv pip install \
+      "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" \
+      || die "Could not install the English phoneme model (en_core_web_sm)."
     ok "Text-to-speech ready (kokoro)."
   fi
 
@@ -4381,6 +4455,30 @@ voice_setup() {
     uv venv "$r/.venv-tts" --python 3.11 || die "Could not create the chatterbox venv (uv venv --python 3.11)."
     VIRTUAL_ENV="$r/.venv-tts" uv pip install chatterbox-tts "setuptools<81" || die "Could not install chatterbox-tts."
     ok "Voice cloning ready (chatterbox)."
+  fi
+
+  # Prove it. Every voice bug in this project has been found by the operator on a
+  # machine whose status page was entirely green, because the checks counted files
+  # instead of producing sound. Setup now synthesises one short phrase and fails
+  # loudly if it cannot - which is the only claim worth making at the end of an
+  # install that just downloaded several gigabytes.
+  #
+  # It costs the one-off model download, which is the right place to pay it: at
+  # setup, where someone is watching, rather than at the first real reply.
+  if [ "$want_kokoro" = 1 ]; then
+    info "  ${c_dim}Testing synthesis (first run downloads the model weights)…${c_reset}"
+    local probe; probe="$(mktemp -t abs-voice-probe.XXXXXX 2>/dev/null)" || probe="$r/.probe"
+    if printf '%s' "the voice engine is working" \
+       | "$r/.venv-kokoro/bin/python" "$r/speak_kokoro.py" - "$probe.ogg" >/dev/null 2>"$probe.err" \
+       && [ -s "$probe.ogg" ]; then
+      ok "Synthesis works."
+    else
+      warn "Kokoro installed, but it could not actually speak. The engine said:"
+      tail -n 8 "$probe.err" 2>/dev/null | sed 's/^/    /' >&2 || true
+      _voice_probe_clean "$probe"
+      die "Voice is not usable yet. Send that error along - a green install that cannot speak is the bug worth reporting."
+    fi
+    _voice_probe_clean "$probe"
   fi
 
   info ""
