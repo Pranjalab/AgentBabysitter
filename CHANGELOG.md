@@ -25,6 +25,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.5.2] — 2026-08-19 — the voice threshold was set too high
+
+- **150 words, not 300.** 300 was a guess and it was wrong by a lot: a four-item
+  status report came out at 273 words and stayed silent, which is exactly the
+  message worth hearing rather than reading on a phone.
+- **`abs config voice-words <n>`** stores it, so the number can be tuned by feel
+  instead of by release. `--clear` returns to the default, and
+  `ABS_VOICE_MIN_WORDS` still wins for a single run.
+
 ## [3.5.1] — 2026-08-19 — a picker that scrolls and searches
 
 - **Ten rows at a time**, with a window that follows the selection and ↑/↓ markers
