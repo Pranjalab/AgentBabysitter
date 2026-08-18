@@ -107,7 +107,11 @@ def spoken(tmp_path):
 
 
 def _env(abs_home, spoken=None, **extra):
-    env = dict(os.environ, ABS_HOME=str(abs_home))
+    # The word-count floor that decides whether a reply is spoken at all lives in
+    # test_voice_wedge.py. These tests are about what the engine is handed and
+    # what it does with it, so they use short fixtures on purpose; leaving the
+    # floor live here would mean none of them reached the engine.
+    env = dict(os.environ, ABS_HOME=str(abs_home), ABS_VOICE_MIN_WORDS="1")
     env.pop("TELEGRAM_STATE_DIR", None)
     if spoken is not None:
         env["ABS_VOICE_CMD"] = spoken.cmd
