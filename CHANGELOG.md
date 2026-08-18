@@ -25,6 +25,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.2.4] — 2026-08-18 — a green status page on an install that could not speak
+
+- **Kokoro's English phoneme model is installed at setup.** It was not, and
+  kokoro tried to fetch it at the moment you first asked for a voice note — which
+  it cannot, because `uv venv` builds an environment with no package installer in
+  it. What surfaced was `error: No virtual environment found` at synthesis time,
+  on an install whose `abs voice status` was entirely green.
+
+- **Setup now synthesises a phrase and fails loudly if it cannot.** This is the
+  fix that matters. Every voice bug in this project has been found by the operator
+  on a machine reporting itself healthy, because the checks counted files instead
+  of producing sound. It caught the bug above, and it caught a second one.
+
+- **A warning when the voice path is long.** espeak-ng keeps its data path in a
+  fixed 160-byte buffer and, past that, silently falls back to the path compiled
+  into the wheel at build time — somebody else's CI checkout. The error names a
+  directory on a machine you have never seen, so it reads as a corrupt install
+  rather than as "your path is too long". It is not a bug at any normal path.
+
 ## [3.2.3] — 2026-08-18 — Kokoro is the voice engine everyone gets
 
 `abs voice setup` built chatterbox and never built kokoro at all — which is how
