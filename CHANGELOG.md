@@ -25,6 +25,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.5.0] — 2026-08-19 — start a new project from the start menu
+
+- **`➕ Create a new project…`**, at the top level and as the last row of the
+  project picker. "Another project…" used to print a warning and launch you where
+  you already were when nothing was registered — a dead end arriving exactly when
+  a new user has least idea what to do.
+
+  Pick a location (your workspace root, or home when none is set, or anywhere),
+  type a name, confirm. It creates the folder, registers it so it is in the list
+  next time, and starts the session there.
+
+- **The name is refused, not sanitised.** It feeds `mkdir`, so a slash, `.`, `..`,
+  a leading dash or a control character gets a reason rather than a quiet
+  rewrite — somebody who typed a slash meant a path.
+
+- **Nothing is overwritten.** An existing folder is offered as it is, and there is
+  no removal anywhere in the flow.
+
+- The start menu now appears when you have registered projects or a workspace
+  root, not only recents. A first run had neither, so the person who most needed
+  this could not reach it.
+
+Terminal-only, as the registry has required since 5.3/D6: a compromised phone must
+never be able to name a path on your machine, let alone create one.
+
 ## [3.4.0] — 2026-08-18 — voice is earned by length
 
 - **A short reply goes as text only.** Below 300 words, no voice note; at or above,

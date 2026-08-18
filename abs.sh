@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.4.0"
+readonly ABS_VERSION="3.5.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -4331,6 +4331,16 @@ voice_can_speak() {
   command -v ffmpeg >/dev/null 2>&1
 }
 
+# Same, but pressing enter means YES. For the one action the whole flow exists to
+# perform: a prompt written "[Y/n]" that then treats enter as "no" is a small
+# betrayal, and the person who just typed a folder name and a location has
+# already said what they want twice.
+ask_default_yes() {
+  local reply=""
+  read -rp "  $1 " reply < /dev/tty 2>/dev/null || return 1
+  case "$reply" in ""|[yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+
 # yes/no on the human's terminal. abs prompts on /dev/tty everywhere, which is
 # also what lets `curl install.sh | bash` hand off to `abs voice setup` — that
 # child's stdin is the piped installer, but /dev/tty is still the person.
@@ -4969,17 +4979,22 @@ _start_menu_project() {
   local mroot="$1" mpy="$2" tj tcount i label c p
   tj="$(env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.registry targets --json 2>/dev/null || echo '[]')"
   tcount="$(printf '%s' "$tj" | jq 'length' 2>/dev/null || echo 0)"
-  if [ "${tcount:-0}" -eq 0 ] 2>/dev/null; then
-    warn "No registered projects or workspace-root children. Launching here."
-    return 0
-  fi
+  case "$tcount" in ''|*[!0-9]*) tcount=0 ;; esac
   local rows=()
-  for i in $(seq 0 $((tcount - 1))); do
-    label="$(printf '%s' "$tj" | jq -r ".[$i].label")"
+  for i in $(seq 1 "$tcount"); do
+    label="$(printf '%s' "$tj" | jq -r ".[$((i - 1))].label")"
     rows+=("$label")
   done
+  # Always last, and present even when the list above is empty. An empty registry
+  # used to warn and launch you where you already were, which left a first-time
+  # user with no way forward at all.
+  rows+=("➕ Create a new project…")
   if ! menu_select "Which project?" 0 "${rows[@]}"; then
     warn "Nothing picked — launching here."
+    return 0
+  fi
+  if [ "$MENU_INDEX" -eq "$tcount" ]; then
+    _start_menu_new_project "$mroot" "$mpy"
     return 0
   fi
   c="$MENU_INDEX"
@@ -4990,6 +5005,141 @@ _start_menu_project() {
   else
     warn "That folder no longer exists. Launching here."
   fi
+}
+
+# --- creating a project from the start menu ----------------------------------
+#
+# "Another project…" used to be a dead end: with nothing registered it warned and
+# launched you where you already were, which is exactly the moment a new user
+# needs help most. This is the way out of it.
+#
+# TERMINAL ONLY, and not by accident. The registry has said so since 5.3/D6 — a
+# compromised phone must never be able to name a path on this machine, let alone
+# create one. Nothing here is reachable from Telegram.
+
+# A line of text from the person at the keyboard. /dev/tty rather than stdin for
+# the same reason voice_ask uses it: stdin may be a pipe (the installer hands off
+# to abs), and the human is still on the terminal either way.
+menu_ask_text() {   # <prompt>  -> answer on stdout, 1 if cancelled
+  local reply=""
+  printf '%s' "  $1 " > /dev/tty 2>/dev/null || return 1
+  IFS= read -r reply < /dev/tty 2>/dev/null || return 1
+  # One empty line is swallowed rather than treated as a cancel, because it is
+  # usually not one. menu_select acts on a digit the instant it is typed, so
+  # somebody who picks a row by typing "2" and then presses enter out of habit
+  # leaves that enter sitting in the buffer — and this prompt is the next thing
+  # to read it. Cancelling their answer because they pressed a key the menu had
+  # already finished with would be baffling.
+  if [ -z "$reply" ]; then
+    IFS= read -r reply < /dev/tty 2>/dev/null || return 1
+  fi
+  [ -n "$reply" ] || return 1
+  printf '%s' "$reply"
+}
+
+# Is this usable as a folder name? A NAME, not a path.
+#
+# Refused rather than sanitised, deliberately. Every other cleaner in this script
+# strips and carries on, because a label that loses a character is still a label.
+# This one goes straight to mkdir: someone who typed a slash meant a path, and
+# quietly turning "a/b" into "ab" would create a folder they did not ask for and
+# then start a session in it. Say no and let them retype.
+_project_name_problem() {   # prints the reason, or nothing when the name is fine
+  local n="$1"
+  case "$n" in
+    "")            printf 'a name is required' ; return 0 ;;
+    .|..)          printf "'%s' is a directory reference, not a name" "$n"; return 0 ;;
+    */*)           printf 'no slashes — this is a folder name, not a path (pick the location above)'; return 0 ;;
+    -*)            printf 'cannot start with a dash — it would look like a command flag'; return 0 ;;
+    *[[:cntrl:]]*) printf 'no control characters'; return 0 ;;
+  esac
+  [ "${#n}" -le 64 ] || { printf 'too long (%s characters, max 64)' "${#n}"; return 0; }
+  return 0
+}
+
+# Where a new project can go. The workspace root first when one is set, then the
+# current directory, then anywhere.
+_start_menu_new_project() {
+  local mroot="$1" mpy="$2"
+  local ws home_root chosen dir name problem full
+
+  # `|| true` inside the substitution, not outside it. Under `set -e` with an ERR
+  # trap, a registry that is missing or broken would otherwise take the whole
+  # start menu down — and a menu that dies is worse than a menu with one fewer
+  # suggested location.
+  ws="$(env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.registry workspace-root 2>/dev/null | tr -d '\r' || true)"
+  case "$ws" in ''|None|null) ws="" ;; esac
+  home_root="$HOME"
+
+  local rows=() paths=()
+  if [ -n "$ws" ] && [ -d "$ws" ]; then
+    rows+=("$ws   (your workspace root)"); paths+=("$ws")
+  else
+    # No workspace root set. Home is the default, and it is worth offering to
+    # remember the answer — otherwise this question is asked forever.
+    rows+=("$home_root   (your home folder)"); paths+=("$home_root")
+  fi
+  if [ "$PWD" != "$ws" ] && [ "$PWD" != "$home_root" ]; then
+    rows+=("$PWD   (here)"); paths+=("$PWD")
+  fi
+  rows+=("✏️  Somewhere else…"); paths+=("")
+
+  if ! menu_select "Where should it live?" 0 "${rows[@]}"; then
+    warn "Nothing picked — launching here."
+    return 0
+  fi
+  dir="${paths[$MENU_INDEX]}"
+
+  if [ -z "$dir" ]; then
+    dir="$(menu_ask_text 'Folder to create it in:')" || { warn "Cancelled — launching here."; return 0; }
+    # Expand a leading ~ ourselves; read does not do it, and a literal "~/x" is
+    # a folder called "~" sitting in the current directory.
+    case "$dir" in "~") dir="$HOME" ;; "~/"*) dir="$HOME/${dir#\~/}" ;; esac
+    case "$dir" in /*) : ;; *) dir="$PWD/$dir" ;; esac
+    [ -d "$dir" ] || { warn "No such folder: $dir"; return 0; }
+  fi
+
+  # The name, retried until it is usable or they give up.
+  local tries=0
+  while :; do
+    tries=$((tries + 1))
+    [ "$tries" -gt 5 ] && { warn "Giving up on the name — launching here."; return 0; }
+    name="$(menu_ask_text 'Project name:')" || { warn "Cancelled — launching here."; return 0; }
+    problem="$(_project_name_problem "$name")"
+    [ -z "$problem" ] && break
+    warn "$problem"
+  done
+
+  full="$dir/$name"
+  if [ -d "$full" ]; then
+    # Already there. Offer it as-is rather than erroring, and never touch what is
+    # inside it — this is a path a person just typed.
+    info "${c_dim}$full already exists.${c_reset}"
+    voice_ask "Start a session in it as it is? [y/N]" || { warn "Left alone — launching here."; return 0; }
+  else
+    info "${c_dim}→ $full${c_reset}"
+    ask_default_yes "Create it and start here? [Y/n]" || { warn "Not created — launching here."; return 0; }
+    mkdir -p "$full" || { warn "Could not create $full — launching here."; return 0; }
+    ok "Created $full"
+  fi
+
+  # Register it so it is in the list next time, and so ABS START can offer it.
+  env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.registry project add "$full" >/dev/null 2>&1 \
+    || warn "Created, but could not register it. Add it later with: abs project add $full"
+
+  # Offer to remember the location as the workspace root, once, when there is
+  # none — so the next new project skips the "where" question entirely.
+  if [ -z "$ws" ] && [ "$dir" != "$HOME" ]; then
+    if voice_ask "Use $dir as your workspace root from now on? [y/N]"; then
+      env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.registry workspace-root "$dir" >/dev/null 2>&1 \
+        && ok "Workspace root: $dir" \
+        || warn "Could not save the workspace root. Set it later: abs config workspace-root $dir"
+    fi
+  fi
+
+  START_CWD="$full"; MENU_CONTINUE=0
+  info "${c_dim}New session in $full${c_reset}"
+  return 0
 }
 
 # The terminal resume-first start menu. Shown ONLY for an interactive `abs` (stdin
@@ -5022,7 +5172,16 @@ _start_menu() {
   local recents_json count
   recents_json="$(env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.recents list --profile "$PROFILE" --json 2>/dev/null || echo '[]')"
   count="$(printf '%s' "$recents_json" | jq 'length' 2>/dev/null || echo 0)"
-  [ "${count:-0}" -gt 0 ] 2>/dev/null || return 0       # no recents → straight launch
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  # A first run has no recents, and used to get no menu at all — which meant the
+  # one person who most needs "create a project" was the one person who could not
+  # reach it. Show the menu when there is anything to offer: a recent, a
+  # registered project, or a workspace root.
+  if [ "$count" -eq 0 ]; then
+    local any
+    any="$(env PYTHONPATH="$mroot" ABS_HOME="$ABS_HOME" "$mpy" -m absd.registry targets --json 2>/dev/null || echo '[]')"
+    [ "$(printf '%s' "$any" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ] 2>/dev/null || return 0
+  fi
   [ "$count" -gt 3 ] && count=3                         # same cap as the Telegram flow
 
   local i label age agestr rows=()
@@ -5032,9 +5191,13 @@ _start_menu() {
     if [ "$age" = "just now" ]; then agestr="just now"; else agestr="$age ago"; fi
     rows+=("▶ Resume $label ($agestr)")
   done
-  local new_n=$count proj_n=$((count + 1))
+  local new_n=$count proj_n=$((count + 1)) create_n=$((count + 2))
   rows+=("🆕 New session in this folder ($PWD)")
   rows+=("📁 Another project…")
+  # Also at the top level, not only one layer down. The whole point is the person
+  # who has nothing yet, and asking them to guess that "create" hides inside
+  # "another project" is the same dead end wearing a different hat.
+  rows+=("➕ Create a new project…")
 
   if ! menu_select "Start a session — profile '$PROFILE':" 0 "${rows[@]}"; then
     warn "Nothing picked — launching a new session here."
@@ -5042,6 +5205,8 @@ _start_menu() {
   fi
   if [ "$MENU_INDEX" -eq "$new_n" ]; then
     return 0                                            # fresh in cwd (today's behavior)
+  elif [ "$MENU_INDEX" -eq "$create_n" ]; then
+    _start_menu_new_project "$mroot" "$mpy"
   elif [ "$MENU_INDEX" -eq "$proj_n" ]; then
     _start_menu_project "$mroot" "$mpy"
   else
