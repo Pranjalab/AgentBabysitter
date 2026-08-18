@@ -25,6 +25,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.4.0] — 2026-08-18 — voice is earned by length
+
+- **A short reply goes as text only.** Below 300 words, no voice note; at or above,
+  both. The reasoning, and it is not arbitrary: a short answer is faster to *read*
+  than to listen to, while a long one is the opposite — reading it on a phone is
+  work, hearing it is not. `ABS_VOICE_MIN_WORDS` moves the line.
+
+  Judged on the whole reply rather than on the part that would be spoken, applied
+  in both the voice-first gate and the PostToolUse mirror so the two paths agree,
+  and exempt in mode `voice` — there the note *replaces* the text, so a length
+  floor would mean a short reply is never delivered at all.
+
+- The injected prompt promised a voice note on every reply. It now says which
+  replies are spoken and why, which is useful rather than merely accurate: a long
+  answer will be heard, so its opening has to stand alone.
+
 ## [3.3.0] — 2026-08-18 — choose a voice by ear
 
 - **`abs voice samples`** sends one short voice note per voice — six of them, each

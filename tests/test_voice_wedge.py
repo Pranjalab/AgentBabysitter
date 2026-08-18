@@ -121,6 +121,23 @@ def box(tmp_path):
     return Box()
 
 
+def _hook_gate(box, text):
+    """Run the PreToolUse guard on a reply and return its exit code.
+
+    2 means the gate took the message (blocked the tool, will speak it); 0 means
+    it declined and the plugin sends text as normal.
+    """
+    payload = json.dumps({
+        "tool_name": "mcp__plugin_telegram_telegram__reply",
+        "session_id": "s-1",
+        "tool_input": {"chat_id": "42", "text": text},
+    })
+    return subprocess.run(
+        ["bash", str(ABS_SH), "--profile", PROFILE, "__guard-hook"],
+        input=payload, capture_output=True, text=True, env=box.env(), timeout=90,
+    ).returncode
+
+
 # ---- the timeout --------------------------------------------------------------
 
 
@@ -351,3 +368,69 @@ def test_the_text_is_not_held_for_the_full_synthesis_ceiling(box, tmp_path):
     elapsed = time.time() - started
     assert elapsed < 40, f"the text waited {elapsed:.0f}s — it used the wrong budget"
     assert [l for l in box.events() if l.startswith("TEXT ")]
+
+
+# ---- voice earns its place by length -----------------------------------------
+#
+# The operator's rule, and his reasoning: "the user doesn't want to read more, but
+# hearing everything is easier." A short answer is faster to read than to listen
+# to; a long one is the opposite. So in mode `both`, only a long reply is spoken.
+#
+# The two paths have to agree. The voice-first gate and the PostToolUse mirror
+# both send notes, by different routes, and a rule applied to one of them is not a
+# rule — it is a coin toss decided by whether voice-first happens to be on.
+
+SHORT = "Pushed and green. Nothing left on my side."
+LONG = " ".join(["the deploy finished and the migration ran clean"] * 60)   # ~480 words
+
+
+def test_a_short_reply_is_not_spoken(box, tmp_path):
+    box.hangs_for(0)
+    assert _hook_gate(box, SHORT) == 0, "the gate should decline and let text through"
+    assert "VOICE" not in " ".join(box.tags()), box.events()
+
+
+def test_a_long_reply_is_spoken(box, tmp_path):
+    """Exit 2 means the gate took the message: it blocked the tool's own send and
+    handed the reply to the worker that speaks it and then sends the text.
+
+    That decision IS the length rule, and it is what this test is about. Whether
+    the detached worker then reaches the engine is covered above, by the tests
+    that drive `cmd_voice_then_text` directly rather than through a `setsid`.
+    """
+    box.hangs_for(0)
+    assert _hook_gate(box, LONG) == 2, "the gate should take a long reply"
+
+
+def test_the_mirror_applies_the_same_rule(box, tmp_path):
+    """Without this the setting does nothing: the gate declines a short reply and
+    the PostToolUse mirror speaks it anyway, so whether you hear it depends on
+    whether voice-first happens to be on."""
+    box.hangs_for(0)
+    out = box.call(f'_voice_long_enough {SHORT!r} && echo SPEAK || echo QUIET')
+    assert "QUIET" in out.stdout, out.stdout
+    out = box.call(f'_voice_long_enough {LONG!r} && echo SPEAK || echo QUIET')
+    assert "SPEAK" in out.stdout, out.stdout
+
+
+def test_voice_only_mode_ignores_the_length_rule(box, tmp_path):
+    """The important exemption. In mode `voice` the note REPLACES the text, so a
+    length floor would mean a short reply is never delivered at all. Silence is
+    not a shorter message."""
+    box.set(reply_mode="voice")
+    out = box.call(f'_voice_long_enough {SHORT!r} && echo SPEAK || echo QUIET')
+    assert "SPEAK" in out.stdout, out.stdout
+
+
+def test_the_threshold_is_tunable(box, tmp_path):
+    out = box.call(f'_voice_long_enough {SHORT!r} && echo SPEAK || echo QUIET',
+                   ABS_VOICE_MIN_WORDS="3")
+    assert "SPEAK" in out.stdout, out.stdout
+
+
+def test_length_is_judged_on_the_whole_reply_not_the_spoken_part(box, tmp_path):
+    """A long report whose first paragraph is brisk is still a long report. It is
+    the length of the thing you would otherwise have to READ that decides this."""
+    text = "Done.\n\n" + LONG
+    out = box.call(f'_voice_long_enough {text!r} && echo SPEAK || echo QUIET')
+    assert "SPEAK" in out.stdout, out.stdout

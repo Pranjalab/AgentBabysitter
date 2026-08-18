@@ -152,6 +152,11 @@ def _hook(box, tool_input, tool=REPLY_TOOL, **extra):
         ABS_HOME=str(box.abs_home),
         ABS_VOICE_CMD=box.tts_cmd,
         PATH=box.path,
+        # Every test here is about the ORDER the note and the text arrive in, not
+        # about how long a reply has to be before it is spoken at all. That rule
+        # has its own file; leaving it live here would mean a change to the word
+        # count silently turned this entire suite into a no-op.
+        ABS_VOICE_MIN_WORDS="1",
     )
     env.pop("TELEGRAM_STATE_DIR", None)
     env.update(extra)

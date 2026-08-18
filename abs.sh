@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.3.0"
+readonly ABS_VERSION="3.4.0"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1215,11 +1215,16 @@ Send \"abs quiet\" to mute reports, \"abs status\" to check state." \
 # outright: the substitution then contains nothing but a function name.
 _prompt_reply_both() {
   cat <<'REPLYBOTH'
-Reply mode is 'both' (abs config reply). Every `reply` you send is delivered as a
-voice note FIRST and then as the same text, automatically, from a hook. You do not
-have to remember it and you must NOT run `abs say` for a reply as well, or they get
-it twice. The tool may come back BLOCKED with a note saying it was delivered as
-audio plus text — that is success. Do not resend.
+Reply mode is 'both' (abs config reply). A LONG reply is delivered as a voice note
+first and then as the same text, automatically, from a hook. A short one — under
+about 300 words — is sent as text only, because a short answer is quicker to read
+than to listen to. The hook decides; you do not, and you must NOT run `abs say`
+for a reply as well, or they get it twice. The tool may come back BLOCKED with a
+note saying it was delivered as audio plus text — that is success. Do not resend.
+
+This is worth knowing when you write: a substantial answer WILL be heard, so the
+first paragraph has to stand on its own as described below. A brief one will only
+be read, so it can be terse without losing anything.
 
 THE VOICE NOTE IS THE ANSWER. THE TEXT IS THE RECORD.
 
@@ -2129,6 +2134,30 @@ _voice_worth_saying() {
   [ "${#1}" -ge 8 ]
 }
 
+# How long a reply has to be before it is also spoken, in mode `both`.
+#
+# The operator's rule, and his reasoning: "the user doesn't want to read more, but
+# hearing everything is easier." A short answer is faster to read than to listen
+# to — you take it in at a glance, and a voice note for it is thirty seconds of
+# synthesis, a notification, and a bubble you have to tap. A long answer is the
+# opposite: reading it on a phone is work, and hearing it is not.
+#
+# So voice earns its place by length. Below the line, text alone.
+readonly VOICE_MIN_WORDS="${ABS_VOICE_MIN_WORDS:-300}"
+
+# Judged on the WHOLE reply, not on the part that would be spoken. A long report
+# whose first paragraph is brisk is still a long report, and it is the length of
+# the thing you would otherwise have to read that decides this.
+_voice_long_enough() {
+  # Mode `voice` is exempt, and this is the important exemption: there the note
+  # REPLACES the text, so applying a length floor would mean a short reply is
+  # never sent at all. Silence is not a shorter message.
+  [ "$(reply_mode)" = "voice" ] && return 0
+  local words; words="$(printf '%s' "$1" | wc -w 2>/dev/null | tr -cd '0-9')"
+  case "$words" in ''|*[!0-9]*) return 0 ;; esac   # cannot count → speak, as before
+  [ "$words" -ge "$VOICE_MIN_WORDS" ]
+}
+
 # How much of a long message voice-first reads out before the text follows.
 #
 # 4000 characters is around 90 seconds of speech, and it is a safety rail rather than
@@ -2586,6 +2615,11 @@ _reply_voice_first_gate() {
   text="$(printf '%s' "$input" | jq -r '.tool_input.text // ""' 2>/dev/null)"
   [ -n "$text" ] || return 0
 
+  # Short enough to read at a glance: let the plugin send it as text and do not
+  # speak it. The PostToolUse mirror asks the same question, so a reply that
+  # declines here does not get spoken there either.
+  _voice_long_enough "$text" || return 0
+
   # What gets SPOKEN is the summary half — the first paragraph — whatever the total
   # length. Speaking the whole message was wrong twice over: past the ceiling it gave
   # up and went text-first, and under the ceiling it read the tables, paths and
@@ -2817,8 +2851,11 @@ cmd_silent_hook() {
           # Reply mode `both`, and `voice` when the message was let through as
           # text anyway (a link, a code block): the text has already gone out, so
           # the voice note is a mirror of it, not a replacement.
+          # Same length rule as the gate. Without it, every short reply that the
+          # gate correctly declined to speak would be spoken here instead — the
+          # two paths have to agree or the setting does nothing.
           case "$(reply_mode)" in
-            both|voice) _voice_spawn "$rtext" ;;
+            both|voice) _voice_long_enough "$rtext" && _voice_spawn "$rtext" ;;
           esac ;;
         *telegram*react*|*telegram*edit_message*) : ;;  # reactions/edits are noise
         "") : ;;
