@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.5.1"
+readonly ABS_VERSION="3.5.2"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1306,9 +1306,8 @@ Send \"abs quiet\" to mute reports, \"abs status\" to check state." \
 _prompt_reply_both() {
   cat <<'REPLYBOTH'
 Reply mode is 'both' (abs config reply). A LONG reply is delivered as a voice note
-first and then as the same text, automatically, from a hook. A short one — under
-about 300 words — is sent as text only, because a short answer is quicker to read
-than to listen to. The hook decides; you do not, and you must NOT run `abs say`
+first and then as the same text, automatically, from a hook. A short one is sent as
+text only, because a short answer is quicker to read than to listen to. The hook decides; you do not, and you must NOT run `abs say`
 for a reply as well, or they get it twice. The tool may come back BLOCKED with a
 note saying it was delivered as audio plus text — that is success. Do not resend.
 
@@ -2233,7 +2232,20 @@ _voice_worth_saying() {
 # opposite: reading it on a phone is work, and hearing it is not.
 #
 # So voice earns its place by length. Below the line, text alone.
-readonly VOICE_MIN_WORDS="${ABS_VOICE_MIN_WORDS:-300}"
+#
+# 150, not the 300 this shipped with. 300 was picked by guessing and it was wrong
+# by a lot: a four-item status report came out at 273 words and stayed silent,
+# which is exactly the message the operator would rather have heard. Measured
+# against real replies, 150 is about where "a paragraph you glance at" turns into
+# "something you would rather listen to than read on a phone".
+#
+# Stored, so it can be tuned by feel without a release — `abs config voice-words`.
+readonly VOICE_MIN_WORDS_DEFAULT=150
+_voice_min_words() {
+  local n; n="${ABS_VOICE_MIN_WORDS:-$(state_get '.voice_min_words')}"
+  case "$n" in ''|null|*[!0-9]*) n="$VOICE_MIN_WORDS_DEFAULT" ;; esac
+  printf '%s' "$n"
+}
 
 # Judged on the WHOLE reply, not on the part that would be spoken. A long report
 # whose first paragraph is brisk is still a long report, and it is the length of
@@ -2245,7 +2257,7 @@ _voice_long_enough() {
   [ "$(reply_mode)" = "voice" ] && return 0
   local words; words="$(printf '%s' "$1" | wc -w 2>/dev/null | tr -cd '0-9')"
   case "$words" in ''|*[!0-9]*) return 0 ;; esac   # cannot count → speak, as before
-  [ "$words" -ge "$VOICE_MIN_WORDS" ]
+  [ "$words" -ge "$(_voice_min_words)" ]
 }
 
 # How much of a long message voice-first reads out before the text follows.
@@ -3375,6 +3387,16 @@ cmd_config() {
             ok "Status-bar label: $c — the bar reads ${c}:@$(state_get '.bot')."
           fi ;;
       esac ;;
+    voice-words)
+      case "$val" in
+        ""|show)   info "Voice from: $(_voice_min_words) words up (default $VOICE_MIN_WORDS_DEFAULT)" ;;
+        --clear|clear|default)
+                   state_set 'del(.voice_min_words)'
+                   ok "Voice from: $VOICE_MIN_WORDS_DEFAULT words up (the default)." ;;
+        *[!0-9]*)  die "Usage: abs config voice-words <number>|--clear" ;;
+        *)         state_set --argjson n "$val" '.voice_min_words = $n'
+                   ok "Voice from: $val words up. Shorter replies go as text only." ;;
+      esac ;;
     voice-offer)
       case "$val" in
         done|off)   state_set '.voice_offer_done = true'; ok "Voice-preference offer: done — it won't be raised again." ;;
@@ -3557,6 +3579,7 @@ cmd_config() {
       info "  reply text     $(reply_text_on && echo on || echo off)"
       info "  reply voice    $(reply_voice_on && echo on || echo off)"
       info "  usage footer   $([ "$(state_get '.no_usage_footer')" = "true" ] && echo off || echo on)"
+      info "  voice from     $(_voice_min_words) words up"
       info "  voice first    $(voice_first_on && echo on || echo off)$([ "$(reply_mode)" = both ] || echo " (mode '$(reply_mode)' — no effect)")"
       info "  auto-silent    $([ "$(state_get '.no_auto_silent')" = "true" ] && echo off || echo on)"
       info "  voice engine   $(state_get '.tts_engine' | sed 's/^null$/auto/')"
@@ -3564,7 +3587,7 @@ cmd_config() {
       info "  voice model    $(state_get '.tts_model' | sed 's/^null$/standard/')"
       info "  voice sample   $(state_get '.voice_sample' | sed 's#^null$#(model default)#')" ;;
     *)
-      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice|auto  |  footer on|off  |  voice-first on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
+      die "Usage: abs config model <name>|--clear  |  silent on|off  |  auto-silent on|off  |  statusline on|off  |  start-menu on|off  |  usage-refresh <min>  |  update-check on|off  |  reply-text on|off  |  reply-voice on|off  |  reply text|both|voice|auto  |  footer on|off  |  voice-words <n>  |  voice-first on|off  |  engine kokoro|chatterbox|auto  |  kokoro-voice <id>|--clear  |  voice standard|turbo  |  voice-sample <file>|--clear" ;;
   esac
 }
 

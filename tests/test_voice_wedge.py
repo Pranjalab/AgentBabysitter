@@ -110,6 +110,12 @@ def box(tmp_path):
             e.update(extra)
             return e
 
+        def run(self, *args, **extra):
+            """Any abs subcommand against this throwaway profile."""
+            return subprocess.run(
+                ["bash", str(ABS_SH), "--profile", PROFILE, *args],
+                capture_output=True, text=True, env=self.env(**extra), timeout=60)
+
         def call(self, snippet, timeout=120, **extra):
             """Run a function inside abs.sh with `main` never running."""
             body = "".join(l for l in open(ABS_SH) if l.strip() != 'main "$@"')
@@ -434,3 +440,48 @@ def test_length_is_judged_on_the_whole_reply_not_the_spoken_part(box, tmp_path):
     text = "Done.\n\n" + LONG
     out = box.call(f'_voice_long_enough {text!r} && echo SPEAK || echo QUIET')
     assert "SPEAK" in out.stdout, out.stdout
+
+
+# ---- the threshold is a guess, so it has to be tunable -----------------------
+#
+# It shipped at 300 words and that was wrong by a lot: a four-item status report
+# came out at 273 and stayed silent, which was exactly the message the operator
+# wanted to hear. The number is stored now rather than compiled in, because the
+# right value is a matter of feel and finding it should not cost a release.
+
+MEDIUM = " ".join(["word"] * 200)
+
+
+def test_the_default_speaks_a_two_hundred_word_report(box):
+    """273 words is a status report. If that is silent the feature is not doing
+    the job it was asked to do."""
+    out = box.call(f'_voice_long_enough {MEDIUM!r} && echo SPEAK || echo QUIET')
+    assert "SPEAK" in out.stdout, out.stdout
+
+
+def test_the_threshold_can_be_stored_without_a_release(box):
+    assert box.run("config", "voice-words", "500").returncode == 0
+    out = box.call(f'_voice_long_enough {MEDIUM!r} && echo SPEAK || echo QUIET')
+    assert "QUIET" in out.stdout, out.stdout
+
+
+def test_clearing_it_returns_to_the_default(box):
+    box.run("config", "voice-words", "500")
+    assert box.run("config", "voice-words", "--clear").returncode == 0
+    out = box.call(f'_voice_long_enough {MEDIUM!r} && echo SPEAK || echo QUIET')
+    assert "SPEAK" in out.stdout, out.stdout
+
+
+def test_the_env_override_still_wins(box):
+    """The env var is what the tests use to pin this off; a stored value must not
+    be able to break them."""
+    box.run("config", "voice-words", "1")
+    out = box.call(f'_voice_long_enough {MEDIUM!r} && echo SPEAK || echo QUIET',
+                   ABS_VOICE_MIN_WORDS="5000")
+    assert "QUIET" in out.stdout, out.stdout
+
+
+def test_a_non_number_is_refused(box):
+    out = box.run("config", "voice-words", "lots")
+    assert out.returncode != 0
+    assert "voice-words" in out.stderr
