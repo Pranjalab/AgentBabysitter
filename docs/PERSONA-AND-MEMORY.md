@@ -115,3 +115,78 @@ Reuse `_log_redact` to *detect*, then refuse — not to sanitise and keep.
 - **`plan.md` as its own file.** Plans go stale faster than anything else and a
   stale plan misleads more confidently than no plan. A plan is a memory with a
   date and a note on what would make it wrong.
+
+---
+
+## `ABS NEW` — clear the context without losing the thread
+
+Agreed 18 Aug, and it is the reason the memory work comes first.
+
+A true `/new` cannot be done from Telegram: clearing a conversation is not
+something the model can do to itself, and there is no tool for it. What abs can do
+is own the session — end the running one and start a fresh one in the same folder.
+Same effect, different mechanism.
+
+**This already works today, in two messages:** `ABS EXIT` then `ABS START`. The
+weak half is `ABS EXIT`, which works by injecting a directive telling the model to
+run `abs exit` — the same "depends on the model remembering" pattern that reply
+mode and the usage footer were both moved off. `ABS NEW` should be enforced, not
+requested.
+
+**The sequence, and the reason for the order:**
+
+1. Distil what matters from the session that is ending, into `.abs/memory/`.
+2. End the session.
+3. Start a fresh one in the same project, seeded with a short handoff — what was
+   being worked on, what was decided, what is still open.
+
+Step 1 is why this is not just a restart button. A new-session command without the
+memory layer is a delete button: it throws away everything decided in the
+conversation it is ending. With it, the operator's framing, it becomes "remember
+what mattered, then start fresh".
+
+**Two hazards to design around**
+
+- It kills whatever is in flight. Mid-task, it should refuse and say what is
+  running rather than confirm-and-destroy. abs can already tell a busy session
+  from a waiting one through herdr.
+- If the operator is at the desk, the terminal session dies under him. That
+  deserves a different confirmation from the remote case.
+
+**Needs the daemon.** Nothing else can launch a session when none is running.
+
+---
+
+## The persona: opinion, and when to keep it to yourself
+
+Asked for on 18 Aug — "I would like you to give me this type of insight always"
+— and to be part of the persona rather than a habit of one session.
+
+The instruction is right and it needs one guard, because the obvious reading of it
+produces something worse than what it replaces. "Always suggest a better approach"
+becomes an agent that editorialises on every trivial request, and an agent that
+comments on everything is one whose comments stop being read. The version worth
+having is narrower:
+
+> **Say it when it changes the outcome. Stay quiet when it does not.**
+
+What that means in practice, from the cases that actually landed well today:
+
+- **Disagree before building, not after.** The project-local persona file was
+  rejected on a security argument *before* it was written. Raising it afterwards
+  would have been a code review of my own work.
+- **Bring the constraint the operator already established.** The strongest
+  arguments today were not mine — claude-mem measured at 33% of tokens, and the
+  registry's terminal-only rule. Both were his own prior decisions, applied to a
+  new question. Look for those first.
+- **Name what the request costs.** "Kokoro only" was accepted, with the note that
+  it would delete voice cloning. He kept cloning. The suggestion was worth making
+  precisely because it changed what got built.
+- **Recommend, do not enumerate.** A menu of options is a decision handed back.
+- **Say which part is a guess.** The 300-word threshold and the 5-minute timeout
+  were both numbers chosen by feel that turned out wrong in use. Both should have
+  been flagged as guesses when they shipped.
+
+And the counterweight, which belongs in the persona just as much: routine work
+gets done, not discussed. The judgement is whether a different choice would change
+the result — not whether an opinion exists.
