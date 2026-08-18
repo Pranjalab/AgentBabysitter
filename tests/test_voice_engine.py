@@ -155,3 +155,97 @@ def test_an_unknown_setup_flag_is_refused(box):
     out = box.run("voice", "setup", "--gpu")
     assert out.returncode != 0
     assert "Usage: abs voice setup" in out.stderr
+
+
+# ---- choosing a voice by ear -------------------------------------------------
+#
+# The operator picked the voice he liked by accident, then asked to be offered a
+# choice. A list of identifiers is not a choice anybody can make — `af_bella` and
+# `bm_george` mean nothing until you have heard them — and this is a tool whose
+# premise is that he would rather listen than read. So the samples are sent as
+# real voice notes, and the offer is made once and then never again.
+
+
+def test_samples_refuses_on_a_machine_that_cannot_speak(box):
+    box.install(stt=True)
+    out = box.run("voice", "samples")
+    assert out.returncode != 0
+    assert "abs voice setup" in out.stderr
+
+
+def test_samples_needs_kokoro_specifically(box):
+    """Chatterbox has no voice list to choose from — the sample set is kokoro's."""
+    box.install(chatterbox=True)
+    out = box.run("voice", "samples")
+    assert out.returncode != 0
+
+
+def test_samples_is_in_the_help(box):
+    out = box.run("voice", "--help")
+    assert "samples" in out.stderr
+
+
+# ---- the one-time offer ------------------------------------------------------
+
+
+def _prompt(box, **overrides):
+    body = "".join(l for l in open(ABS_SH) if l.strip() != 'main "$@"')
+    script = box.abs_home.parent / "prompt.sh"
+    lines = [body, f"use_profile {PROFILE}"]
+    for fn, ret in overrides.items():
+        lines.append(f"{fn}() {{ return {ret}; }}")
+    lines.append("build_prompt 42")
+    script.write_text("\n".join(lines) + "\n")
+    env = dict(os.environ, ABS_HOME=str(box.abs_home), ABS_VOICE_ROOT=str(box.root))
+    env.pop("TELEGRAM_STATE_DIR", None)
+    return subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                          env=env).stdout
+
+
+def test_the_offer_appears_for_someone_who_has_never_chosen(box):
+    box.install(kokoro=True)
+    assert "PICK A VOICE" in _prompt(box, voice_have=0, voice_can_speak=0)
+
+
+def test_the_offer_is_absent_once_a_voice_has_been_chosen(box):
+    """Whatever they pick, they have been asked. Asking again is nagging."""
+    box.install(kokoro=True)
+    assert box.run("config", "kokoro-voice", "bf_emma").returncode == 0
+    assert "PICK A VOICE" not in _prompt(box, voice_have=0, voice_can_speak=0)
+
+
+def test_the_offer_is_absent_on_a_machine_that_cannot_speak(box):
+    """Offering a choice of voices to a box with no engine is pure noise."""
+    box.install(stt=True)
+    assert "PICK A VOICE" not in _prompt(box, voice_have=1, voice_can_speak=1)
+
+
+def test_the_offer_can_be_dismissed_without_choosing(box):
+    """"It sounds fine, leave it" has to end this as firmly as picking one."""
+    box.install(kokoro=True)
+    assert box.run("config", "voice-offer", "done").returncode == 0
+    assert "PICK A VOICE" not in _prompt(box, voice_have=0, voice_can_speak=0)
+
+
+def test_the_offer_can_be_brought_back(box):
+    box.install(kokoro=True)
+    box.run("config", "voice-offer", "done")
+    assert box.run("config", "voice-offer", "reset").returncode == 0
+    assert "PICK A VOICE" in _prompt(box, voice_have=0, voice_can_speak=0)
+
+
+def test_the_offer_state_can_be_read(box):
+    box.install(kokoro=True)
+    assert "pending" in box.run("config", "voice-offer").stderr
+    box.run("config", "voice-offer", "done")
+    assert "done" in box.run("config", "voice-offer").stderr
+
+
+def test_the_offer_carries_real_runnable_paths(box):
+    """A prompt that tells the model to run `SCRIPT_PATH_HERE` is worse than no
+    prompt: it looks like an instruction and cannot be followed."""
+    box.install(kokoro=True)
+    text = _prompt(box, voice_have=0, voice_can_speak=0)
+    assert "SCRIPT_PATH_HERE" not in text
+    assert "PROFILE_HERE" not in text
+    assert f"--profile {PROFILE} voice samples" in text
