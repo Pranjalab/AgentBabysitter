@@ -9,7 +9,18 @@
 
 set -euo pipefail
 
-readonly REPO="${ABS_REPO:-https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main}"
+# Which release to install. `main` is the current one; a tag pins an older
+# release, which is the whole point of the escape hatch:
+#
+#   ABS_REF=v2.5.1 curl -fsSL https://agentbabysitter.com/install.sh | bash
+#
+# The operator asked for this after a week in which three releases crashed on his
+# Mac. His first instinct was a second install button on the landing page; that
+# would tell every new visitor the software might break their machine. The person
+# who needs an old version has already installed and already hit trouble, so the
+# route belongs on a releases page, not beside the install command.
+readonly ABS_REF="${ABS_REF:-main}"
+readonly REPO="${ABS_REPO:-https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/$ABS_REF}"
 readonly PREFIX="${PREFIX:-$HOME/.local/bin}"
 readonly TARGET="$PREFIX/abs"
 
@@ -281,6 +292,12 @@ fi
 
 info ""
 ver="$(grep -m1 '^readonly ABS_VERSION=' "$src" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')"
+if [ "$ABS_REF" != "main" ]; then
+  warn "This is a PINNED install of $ABS_REF, not the current release."
+  info "  It will not update itself past this version. Back to current:"
+  info "    ${c_bold}curl -fsSL https://agentbabysitter.com/install.sh | bash${c_reset}"
+  info ""
+fi
 if [ -n "$ver" ]; then
   ok "Agent Babysitter $ver installed."
 else
@@ -317,6 +334,12 @@ fi
 # machine has, so this is NOT fatal — failing here would mean losing a working v2
 # over an optional layer. It says what happened and moves on.
 if [ -z "$here" ] || [ ! -d "$here/absd" ]; then
+  if ! grep -q '^cmd_src()' "$src" 2>/dev/null; then
+    # A pinned release from before `abs src` existed. Nothing to fetch, and
+    # saying so beats a failure that looks like a broken install.
+    info ""
+    info "${c_dim}This release predates the bundled v3 source — v2 features only.${c_reset}"
+  else
   info ""
   info "${c_bold}Fetching the v3 source${c_reset} — the daemon, sandboxes and the start menu."
   if "$TARGET" src install >&2; then
@@ -324,6 +347,7 @@ if [ -z "$here" ] || [ ! -d "$here/absd" ]; then
   else
     warn "The v3 source didn't install — abs still works as v2 (pairing, voice, reports)."
     info "  Try again any time with: ${c_bold}abs src install${c_reset}"
+  fi
   fi
 fi
 
