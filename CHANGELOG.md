@@ -25,6 +25,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.5.1] — 2026-08-19 — a picker that scrolls and searches
+
+- **Ten rows at a time**, with a window that follows the selection and ↑/↓ markers
+  on the edge rows so a truncated list does not look like the whole list.
+  `ABS_MENU_ROWS` moves the number.
+- **`/` opens a search.** Not type-to-filter: `j`, `k` and `q` are already down, up
+  and cancel, so typing "jesse" would have walked the cursor down and then quit
+  the menu. While a search is open those letters type instead of moving.
+- A search matching nothing keeps the previous set rather than emptying the menu.
+- `MENU_INDEX` is always an index into the full list, never the filtered one — a
+  filtered menu returning a filtered position would quietly open the wrong project.
+
+Short menus are unchanged: no window, no search, digits still jump.
+
 ## [3.5.0] — 2026-08-19 — start a new project from the start menu
 
 - **`➕ Create a new project…`**, at the top level and as the last row of the
