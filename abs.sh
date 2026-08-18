@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.5.0"
+readonly ABS_VERSION="3.5.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -263,9 +263,9 @@ _menu_read_key() {
         '[F'|'OF') printf 'end' ;;
         *)         printf 'other' ;;
       esac ;;
-    k|K) printf 'up' ;;
-    j|J) printf 'down' ;;
-    q|Q) printf 'quit' ;;
+    k|K) [ "${_MENU_SEARCHING:-0}" = 1 ] && printf 'char:%s' "$k" || printf 'up' ;;
+    j|J) [ "${_MENU_SEARCHING:-0}" = 1 ] && printf 'char:%s' "$k" || printf 'down' ;;
+    q|Q) [ "${_MENU_SEARCHING:-0}" = 1 ] && printf 'char:%s' "$k" || printf 'quit' ;;
     *)   printf 'char:%s' "$k" ;;
   esac
 }
@@ -275,16 +275,65 @@ _menu_on_int()      { _menu_show_cursor; exit 130; }
 
 # Paint the item block. Every line is cleared first so a shorter row can never
 # leave the tail of a longer one behind.
+# Paints exactly _MENU_VIEW rows plus one hint line, ALWAYS — short lists are
+# padded with blanks. The block has to be a constant height because every cursor
+# movement around it is arithmetic on that number; a painter that sometimes emits
+# fewer lines leaves the previous menu's tail on screen and then scrolls the
+# transcript by a different amount each time.
+#
+# `sel` is a position within _MENU_MAP (what is currently shown), not an index
+# into _MENU_ITEMS (everything). Those are the same list until a search narrows
+# it, and telling them apart is the whole reason the mapping exists.
 _menu_paint() {
-  local sel="$1" i
-  for i in $(seq 0 $((_MENU_N - 1))); do
-    if [ "$i" -eq "$sel" ]; then
-      printf '\033[2K%s❯%s %s%s%s\n' "$c_cyan" "$c_reset" "$c_bold" "${_MENU_ITEMS[$i]}" "$c_reset" >&2
+  local sel="$1" i row n="${#_MENU_MAP[@]}" mark
+  # Keep the selection inside the window, scrolling by the minimum needed.
+  [ "$sel" -lt "$_MENU_TOP" ] && _MENU_TOP="$sel"
+  [ "$sel" -ge "$((_MENU_TOP + _MENU_VIEW))" ] && _MENU_TOP="$((sel - _MENU_VIEW + 1))"
+  [ "$_MENU_TOP" -lt 0 ] && _MENU_TOP=0
+
+  for i in $(seq 0 $((_MENU_VIEW - 1))); do
+    row="$((_MENU_TOP + i))"
+    if [ "$row" -ge "$n" ]; then
+      printf '\033[2K\n' >&2                       # pad, so the height is constant
+      continue
+    fi
+    # A hint that there is more above or below, on the edge rows only. Without it
+    # a ten-row window over twenty-six projects looks like all there is.
+    mark=" "
+    { [ "$i" -eq 0 ] && [ "$_MENU_TOP" -gt 0 ]; } && mark="↑"
+    { [ "$i" -eq "$((_MENU_VIEW - 1))" ] && [ "$((_MENU_TOP + _MENU_VIEW))" -lt "$n" ]; } && mark="↓"
+    if [ "$row" -eq "$sel" ]; then
+      printf '\033[2K%s❯%s %s%s%s%s\n' "$c_cyan" "$c_reset" "$c_bold" "${_MENU_ITEMS[${_MENU_MAP[$row]}]}" "$c_reset" "$c_dim$mark$c_reset" >&2
     else
-      printf '\033[2K  %s\n' "${_MENU_ITEMS[$i]}" >&2
+      printf '\033[2K  %s%s%s%s\n' "${_MENU_ITEMS[${_MENU_MAP[$row]}]}" "$c_dim" "$mark" "$c_reset" >&2
     fi
   done
-  printf '\033[2K  %s%s%s\n' "$c_dim" "$_MENU_HINT" "$c_reset" >&2
+  if [ -n "$_MENU_FILTER" ]; then
+    printf '\033[2K  %s/%s%s  %s(%s of %s)%s\n' \
+      "$c_cyan" "$_MENU_FILTER" "$c_reset" "$c_dim" "$n" "$_MENU_N" "$c_reset" >&2
+  else
+    printf '\033[2K  %s%s%s\n' "$c_dim" "$_MENU_HINT" "$c_reset" >&2
+  fi
+}
+
+# Rebuild the shown set from the filter. Case-insensitive substring — the point
+# is to find "jesse" in "InvestHours-jesse", not to write patterns.
+_menu_refilter() {
+  local i hay needle
+  _MENU_MAP=()
+  if [ -z "$_MENU_FILTER" ]; then
+    for i in $(seq 0 $((_MENU_N - 1))); do _MENU_MAP+=("$i"); done
+    return 0
+  fi
+  needle="$(printf '%s' "$_MENU_FILTER" | tr '[:upper:]' '[:lower:]')"
+  for i in $(seq 0 $((_MENU_N - 1))); do
+    hay="$(printf '%s' "${_MENU_ITEMS[$i]}" | tr '[:upper:]' '[:lower:]')"
+    case "$hay" in *"$needle"*) _MENU_MAP+=("$i") ;; esac
+  done
+  # A search that matches nothing keeps the last good set rather than emptying
+  # the menu — an empty list has nothing to press enter on and looks broken.
+  [ "${#_MENU_MAP[@]}" -gt 0 ] || { _MENU_FILTER="${_MENU_FILTER%?}"; _menu_refilter; }
+  return 0
 }
 
 # The old prompt, kept whole for every non-terminal caller.
@@ -311,6 +360,10 @@ menu_select() {
   local title="$1" default="$2"; shift 2
   _MENU_ITEMS=("$@")
   _MENU_N=${#_MENU_ITEMS[@]}
+  _MENU_MAP=()
+  _MENU_TOP=0
+  _MENU_FILTER=""
+  _MENU_SEARCHING=0
   MENU_INDEX=-1
   [ "$_MENU_N" -gt 0 ] || return 1
   local k
@@ -332,26 +385,63 @@ menu_select() {
   for i in $(seq 0 $((_MENU_N - 1))); do
     _MENU_ITEMS[$i]="$(_menu_fit "${_MENU_ITEMS[$i]}" "$((cols - 4))")"
   done
-  _MENU_HINT="↑↓ move · enter select · 1-9 jump · q cancel"
+  # Ten rows at a time. The operator's project list is twenty-six folders deep and
+  # a menu that tall pushes everything else off the screen; ten fits any terminal
+  # worth the name and still shows enough to recognise what you want.
+  _MENU_VIEW="${ABS_MENU_ROWS:-10}"
+  [ "$_MENU_VIEW" -gt "$_MENU_N" ] && _MENU_VIEW="$_MENU_N"
+  [ "$_MENU_VIEW" -lt 1 ] && _MENU_VIEW=1
+  _MENU_TOP=0
+  _MENU_FILTER=""
+  _menu_refilter
+
+  if [ "$_MENU_N" -gt "$_MENU_VIEW" ]; then
+    _MENU_HINT="↑↓ move · / search · enter select · q cancel"
+  else
+    _MENU_HINT="↑↓ move · enter select · 1-9 jump · q cancel"
+  fi
   _MENU_HINT="$(_menu_fit "$_MENU_HINT" "$((cols - 4))")"
 
-  local sel="$default" first=1 key d
+  local sel="$default" first=1 key d n
   printf '\033[?25l' >&2
   trap '_menu_on_int' INT
   while :; do
-    if [ "$first" = 1 ]; then first=0; else printf '\033[%dA' "$((_MENU_N + 1))" >&2; fi
+    n="${#_MENU_MAP[@]}"
+    [ "$sel" -ge "$n" ] && sel=$((n - 1))
+    [ "$sel" -lt 0 ] && sel=0
+    if [ "$first" = 1 ]; then first=0; else printf '\033[%dA' "$((_MENU_VIEW + 1))" >&2; fi
     _menu_paint "$sel"
     key="$(_menu_read_key)"
     case "$key" in
-      up)    sel=$(( (sel - 1 + _MENU_N) % _MENU_N )) ;;
-      down)  sel=$(( (sel + 1) % _MENU_N )) ;;
+      up)    sel=$(( (sel - 1 + n) % n )) ;;
+      down)  sel=$(( (sel + 1) % n )) ;;
       home)  sel=0 ;;
-      end)   sel=$((_MENU_N - 1)) ;;
-      enter) MENU_INDEX=$sel; break ;;
+      end)   sel=$((n - 1)) ;;
+      enter) MENU_INDEX="${_MENU_MAP[$sel]}"; break ;;
       quit)  MENU_INDEX=-1; break ;;
+      # Backspace and delete, while a search is open.
+      char:$'\177'|char:$'\010')
+        if [ -n "$_MENU_FILTER" ]; then
+          _MENU_FILTER="${_MENU_FILTER%?}"; _menu_refilter; sel=0; _MENU_TOP=0
+        fi ;;
+      char:/)
+        # `/` opens the search rather than letters doing it directly: j, k and q
+        # are already movement and cancel, so typing a project name would
+        # otherwise walk the cursor around instead of finding anything.
+        _MENU_FILTER=" "; _MENU_FILTER=""; sel=0; _MENU_TOP=0
+        _MENU_SEARCHING=1 ;;
       char:[1-9])
         d="${key#char:}"
-        if [ "$d" -le "$_MENU_N" ]; then MENU_INDEX=$((d - 1)); break; fi ;;
+        if [ "$_MENU_SEARCHING" = 1 ]; then
+          _MENU_FILTER="$_MENU_FILTER$d"; _menu_refilter; sel=0; _MENU_TOP=0
+        elif [ "$d" -le "$n" ]; then
+          MENU_INDEX="${_MENU_MAP[$((d - 1))]}"; break
+        fi ;;
+      char:*)
+        # Any other printable character extends the search once it is open.
+        if [ "$_MENU_SEARCHING" = 1 ]; then
+          _MENU_FILTER="$_MENU_FILTER${key#char:}"; _menu_refilter; sel=0; _MENU_TOP=0
+        fi ;;
       *) : ;;
     esac
   done
@@ -360,9 +450,9 @@ menu_select() {
 
   # Collapse the block to a single line: the transcript keeps what was chosen
   # without keeping the whole menu.
-  printf '\033[%dA' "$((_MENU_N + 1))" >&2
-  for i in $(seq 0 "$_MENU_N"); do printf '\033[2K\n' >&2; done
-  printf '\033[%dA' "$((_MENU_N + 1))" >&2
+  printf '\033[%dA' "$((_MENU_VIEW + 1))" >&2
+  for i in $(seq 0 "$_MENU_VIEW"); do printf '\033[2K\n' >&2; done
+  printf '\033[%dA' "$((_MENU_VIEW + 1))" >&2
   if [ "$MENU_INDEX" -ge 0 ]; then
     printf '  %s❯%s %s\n' "$c_cyan" "$c_reset" "${_MENU_ITEMS[$MENU_INDEX]}" >&2
     return 0

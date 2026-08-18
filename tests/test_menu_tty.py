@@ -409,3 +409,61 @@ def test_a_lone_profile_is_taken_without_asking(tmp_path):
     result, screen = _drive_callsite(tmp_path, [], PICK, [("solo", "solobot")])
     assert result == "solo"
     assert "Which bot?" not in screen
+
+
+# ---- a long list: a window, and a search -------------------------------------
+#
+# The operator's project list is twenty-six folders deep, because it shows every
+# child of his workspace root. A menu that tall pushes everything else off the
+# screen, and scrolling past twenty-six rows to reach one is not a choice anyone
+# enjoys making twice.
+
+LONG_ITEMS = tuple(f"proj-{i:02d}-{n}" for i, n in enumerate(
+    ["airllm", "bash", "bizz", "chat", "cheetah", "cldx", "dash", "enc", "hagent",
+     "hostllm", "invest", "jesse", "llm", "lucy", "nemo", "ornith", "panda",
+     "research", "rtsp", "sandbox"]))
+
+
+def test_a_long_list_paints_a_window_not_the_whole_thing(tmp_path):
+    _, screen = _drive(tmp_path, [ENTER], items=LONG_ITEMS)
+    shown = [i for i in LONG_ITEMS if i in screen]
+    assert len(shown) <= 10, f"painted {len(shown)} rows: {shown}"
+
+
+def test_scrolling_reaches_past_the_window(tmp_path):
+    """Twelve downs from the top lands on index 12 — only reachable if the window
+    moved, since it starts showing 0-9."""
+    result, screen = _drive(tmp_path, [DOWN] * 12 + [ENTER], items=LONG_ITEMS)
+    assert result == "RESULT=12", screen[-400:]
+
+
+def test_search_narrows_and_returns_the_original_index(tmp_path):
+    """The index that comes back has to point into the FULL list. A filtered menu
+    returning a filtered position is the bug this mapping exists to prevent — it
+    would silently open the wrong project."""
+    result, screen = _drive(tmp_path, ["/", "j", "e", "s", "s", "e", ENTER],
+                            items=LONG_ITEMS)
+    assert result == "RESULT=11", screen[-400:]
+
+
+def test_letters_that_are_movement_keys_still_type_into_a_search(tmp_path):
+    """`j`, `k` and `q` are down, up and cancel. Without the guard, searching for
+    "jesse" would walk the cursor down and then quit — which is why the search
+    opens with `/` rather than on the first letter typed."""
+    result, screen = _drive(tmp_path, ["/", "j", ENTER], items=LONG_ITEMS)
+    assert result != "CANCELLED=-1", screen[-400:]
+
+
+def test_a_search_matching_nothing_keeps_the_last_good_set(tmp_path):
+    """An empty menu has nothing to press enter on and reads as a crash."""
+    result, screen = _drive(tmp_path, ["/", "j", "e", "z", "z", ENTER],
+                            items=LONG_ITEMS)
+    assert result.startswith("RESULT="), screen[-400:]
+
+
+def test_a_short_list_keeps_its_digit_jump(tmp_path):
+    """Everything above is new behaviour for long lists only. A short menu still
+    jumps on a digit, with no search and no window."""
+    result, screen = _drive(tmp_path, ["2"])
+    assert result == "RESULT=1", screen[-400:]
+    assert "search" not in screen
