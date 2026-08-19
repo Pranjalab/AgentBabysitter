@@ -364,12 +364,16 @@ daemon (a systemd user service) that polls every one of your idle bots, so you c
   firmly as hitting a limit does. The version is last so you can see which `abs` is
   rendering without running anything.
 
-  The name before the colon is your Claude account name, picked up once on first
-  launch. Override it whenever you like:
+  The name before the colon is your Claude account name, and it **follows that
+  account** — re-checked as the session runs, so logging into a different one
+  changes the bar within a minute rather than at the next restart. That is the
+  point of it: the bar is there to tell you which account this session is
+  spending, and a name from an account you logged out of yesterday answers that
+  question wrongly while looking certain.
 
   ```sh
-  abs config label Pran      # say it directly
-  abs config label auto      # re-read it from your Claude account
+  abs config label Pran      # pin one; it stops following the account
+  abs config label auto      # hand it back to the account
   abs config label --clear   # back to the plain abs:
   ```
 

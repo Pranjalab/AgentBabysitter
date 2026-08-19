@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.5.3"
+readonly ABS_VERSION="3.6.0-beta.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1836,58 +1836,72 @@ bar_label_clean() {
     | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
 }
 
-# The default label is the name on the Claude account, not the literal "abs" —
-# but it is resolved ONCE, at session launch, and stored. It is deliberately not
-# resolved here: bar_label runs on every status-bar render, and ~/.claude.json is
-# a large file that also holds account tokens. Reading it per frame would be the
-# wrong cost in the wrong place.
+# The label on the bar is generated, not typed: it names the Claude account this
+# session is spending. That makes a stale one worse than a missing one — the bar
+# exists so the operator can see WHICH account, WHICH bot and how much budget is
+# left, and a name from an account he logged out of two days ago answers the first
+# of those wrongly while looking authoritative.
 #
-# Called from cmd_run before the settings file is written. `.bar_label_seeded`
-# records that we tried, so `abs config label --clear` means "back to abs" and
-# stays that way rather than being re-seeded on the next launch.
-bar_label_seed() {
-  local n c auto
-  # `--clear` means "the plain abs:, and stay that way". Without an explicit
-  # marker the next launch sees an empty label, decides nothing is set, and
-  # helpfully fills the account name straight back in — which makes clearing
-  # look broken rather than deliberate.
-  [ "$(state_get '.bar_label_cleared')" = "true" ] && return 0
-  # WHICH account the current label came from, when it came from one at all.
-  # Storing the source rather than a "done" flag is what lets this tell an
-  # auto-filled label from a hand-picked one — and that distinction is the whole
-  # feature. Log into a different Claude account and the bar followed the old
-  # name forever, because a boolean cannot answer "is this still yours?".
-  auto="$(state_get '.bar_label_auto')"
-  case "$auto" in null) auto="" ;; esac
+# So it follows the account, always, and re-checks as the session runs. Exactly two
+# operator choices outrank it:
+#
+#   abs config label <name>    -> .bar_label_manual, kept until changed
+#   abs config label --clear   -> .bar_label_cleared, plain "abs" and stays there
+#
+# Anything else is ours to correct — including a label written by an older abs
+# that recorded nothing about where it came from. That is the deliberate reversal
+# of the previous rule, which left unattributed labels alone in case the operator
+# had typed one, and so could never fix the very case it was written for.
 
-  n="$(claude_display_name 2>/dev/null || true)"
+# How stale the name may get, in seconds. ~/.claude.json holds the account name —
+# and account tokens, and a project history Claude Code rewrites constantly — so
+# it is read at most once a minute, never per frame.
+#
+# An mtime check was tried here and removed: that file changes so often that the
+# gate almost never fired, while its one-second granularity meant a login in the
+# same second as the last check was invisible. A clock alone is both cheaper to
+# reason about and strictly more correct.
+BAR_LABEL_TTL=60
+
+# Re-resolve the label from the logged-in account. Silent in every failure path: a
+# bar that errors is worse than a bar carrying a name a minute out of date.
+# bar_label_sync force  skips the throttle (launch, and `config label auto`).
+bar_label_sync() {
+  local force="${1:-}" flags manual cleared last n c now
+  flags="$(state_get '[(.bar_label_manual//false),(.bar_label_cleared//false),(.bar_label_at//0)]|@tsv')"
+  [ -n "$flags" ] || return 0
+  manual="$(printf '%s' "$flags" | cut -f1)"
+  cleared="$(printf '%s' "$flags" | cut -f2)"
+  last="$(printf '%s' "$flags" | cut -f3)"
+  [ "$manual" = "true" ] && return 0
+  [ "$cleared" = "true" ] && return 0
+
+  now="$(date +%s 2>/dev/null || echo 0)"
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ -z "$force" ] && [ "$(( now - last ))" -lt "$BAR_LABEL_TTL" ] && return 0
+
+  n="$(with_timeout 2 jq -r '.oauthAccount.displayName // empty' "$HOME/.claude.json" 2>/dev/null || true)"
   if [ -z "$n" ]; then
-    # No account name to read. Leave whatever is there — including a label the
-    # operator typed — rather than reverting to "abs" because ~/.claude.json was
-    # briefly unreadable mid-login.
-    state_set '.bar_label_seeded = true' 2>/dev/null || true
+    # No name to read — mid-login, or a file we could not parse in time. Keep what
+    # is there rather than falling back to "abs", and try again after the TTL.
+    state_set --argjson t "$now" '.bar_label_at = $t' 2>/dev/null || true
     return 0
   fi
   c="$(bar_label_clean "$n")"
-  [ -n "$c" ] || { state_set '.bar_label_seeded = true' 2>/dev/null || true; return 0; }
-
-  local v; v="$(state_get '.bar_label')"
-  case "$v" in null) v="" ;; esac
-
-  if [ -n "$v" ] && [ -z "$auto" ]; then
-    # A label with no recorded source is one the operator set by hand, or one
-    # seeded by a version before this. Never overwrite it: guessing wrong here
-    # replaces a deliberate choice with a name from a file.
-    state_set '.bar_label_seeded = true' 2>/dev/null || true
+  if [ -z "$c" ]; then
+    state_set --argjson t "$now" '.bar_label_at = $t' 2>/dev/null || true
     return 0
   fi
-  if [ "$v" = "$c" ]; then
-    state_set --arg a "$n" '.bar_label_auto = $a | .bar_label_seeded = true' 2>/dev/null || true
-    return 0
-  fi
-  # Either nothing is set, or the account behind it has changed.
-  state_set --arg l "$c" --arg a "$n" \
-    '.bar_label = $l | .bar_label_auto = $a | .bar_label_seeded = true' 2>/dev/null || true
+  state_set --arg l "$c" --argjson t "$now" \
+    '.bar_label = $l | .bar_label_at = $t | .bar_label_seeded = true
+     | del(.bar_label_auto) | del(.bar_label_nudged)' 2>/dev/null || true
+  return 0
+}
+
+# Called from cmd_run before the settings file is written, so a session always
+# opens with the account it is actually running as.
+bar_label_seed() {
+  bar_label_sync force
   return 0
 }
 
@@ -1998,6 +2012,9 @@ cmd_statusline() {
   fi
   # No state file: nothing to read a label out of, so the built-in name it is.
   [ -f "$ABS_STATE" ] || { printf '%s:%s' "$BAR_LABEL_DEFAULT" "$PROFILE"; return 0; }
+  # Live, within a minute: the operator can /login to another account mid-session
+  # and the bar has to say so. Throttled and mtime-gated inside; never fatal.
+  bar_label_sync 2>/dev/null || true
   local bot label name; name="$(bar_label)"
   bot="$(state_get '.bot')"
   if [ -n "$bot" ] && [ "$bot" != "null" ]; then
@@ -3394,19 +3411,32 @@ cmd_config() {
       case "$val" in
         "")
           info "Status-bar label: $(bar_label)$([ "$(bar_label)" = "$BAR_LABEL_DEFAULT" ] && echo " (default)")"
-          info "  Set yours:  ${c_bold}abs config label <name>${c_reset}   or   ${c_bold}abs config label auto${c_reset}" ;;
+          if [ "$(state_get '.bar_label_manual')" = "true" ]; then
+            info "  ${c_dim}Set by you — it will not follow a change of Claude account.${c_reset}"
+            info "  Back to following it:  ${c_bold}abs config label auto${c_reset}"
+          elif [ "$(state_get '.bar_label_cleared')" = "true" ]; then
+            info "  ${c_dim}Cleared — the bar shows the plain default.${c_reset}"
+            info "  Your account name:  ${c_bold}abs config label auto${c_reset}"
+          else
+            info "  ${c_dim}Follows your Claude account, rechecked as the session runs.${c_reset}"
+            info "  Pin your own:  ${c_bold}abs config label <name>${c_reset}"
+          fi ;;
         --clear|clear)
           # Marked seeded, or the next launch would helpfully put the account
           # name back and clearing would look broken.
-          state_set 'del(.bar_label) | del(.bar_label_auto) | .bar_label_cleared = true | .bar_label_seeded = true'
+          state_set 'del(.bar_label) | del(.bar_label_auto) | del(.bar_label_manual)
+            | del(.bar_label_at)
+            | .bar_label_cleared = true | .bar_label_seeded = true'
           ok "Status-bar label back to '$BAR_LABEL_DEFAULT' — the bar reads ${BAR_LABEL_DEFAULT}:@$(state_get '.bot'). Your account name: ${c_bold}abs config label auto${c_reset}" ;;
         auto)
           local n; n="$(claude_display_name)" \
             || die "No display name on the Claude account here. Set one directly: abs config label <name>"
           local c; c="$(bar_label_clean "$n")"
           [ -n "$c" ] || die "The Claude display name ('$n') has nothing usable in it. Set one directly: abs config label <name>"
-          state_set --arg l "$c" --arg a "$n" '.bar_label = $l | .bar_label_auto = $a | del(.bar_label_cleared)'
-          ok "Status-bar label: $c — from your Claude account. The bar reads ${c}:@$(state_get '.bot')." ;;
+          # Hands the name back to the account: drop both overrides, then sync.
+          state_set 'del(.bar_label_manual) | del(.bar_label_cleared)' 2>/dev/null || true
+          bar_label_sync force
+          ok "Status-bar label: $(bar_label) — following your Claude account. The bar reads $(bar_label):@$(state_get '.bot')." ;;
         *)
           local c; c="$(bar_label_clean "$val")"
           # Chosen by hand from here on: clearing the source stops the next
@@ -3415,7 +3445,8 @@ cmd_config() {
           # label should be told it won't render, not left wondering why the bar
           # still says abs.
           [ -n "$c" ] || die "Nothing usable in that label. Letters, digits, . _ @ - and spaces, up to $BAR_LABEL_MAX characters."
-          state_set --arg l "$c" '.bar_label = $l | del(.bar_label_auto) | del(.bar_label_cleared)'
+          state_set --arg l "$c" '.bar_label = $l | .bar_label_manual = true
+            | del(.bar_label_auto) | del(.bar_label_cleared)'
           if [ "$c" != "$val" ]; then
             ok "Status-bar label: $c  ${c_dim}(trimmed from '$val' — max $BAR_LABEL_MAX chars, printable only)${c_reset}"
           else
@@ -3735,7 +3766,16 @@ with_timeout() {
   # command would have finished anyway — a timeout that times nothing out. This
   # is what GNU timeout does for you.
   set -m
-  "$@" &
+  # `0<&0` is not a no-op, and leaving it out is what kept the status bar blind on
+  # every Mac. Bash redirects an asynchronous command's stdin from /dev/null unless
+  # the command carries an explicit redirection — so `with_timeout 1 cat` read
+  # /dev/null and returned nothing, and Claude Code's render payload (the only
+  # source of the context percentage, and the cheap source of the limits) was
+  # dropped on every frame. Linux never saw it because GNU timeout(1) was there and
+  # this fallback never ran. Naming fd 0 explicitly is what suppresses the
+  # substitution, and it restores the one behaviour a stand-in for timeout(1) must
+  # have: the child gets the caller's stdin.
+  "$@" 0<&0 &
   cmd_pid=$!
   set +m
   # `exec >/dev/null` in the watchdog is load-bearing, not hygiene. This runs
@@ -3816,12 +3856,68 @@ norm_stamp() {
   esac
 }
 
-# "Jul 16, 5:29pm" -> "in 16h 26m". Falls back to the raw stamp if date(1)
-# can't parse it, so a format change degrades instead of breaking.
+# A normalised stamp -> epoch seconds, or empty. Never touches date(1) for the
+# common case.
+#
+# There are two date(1) dialects and no overlap between them: GNU parses free text
+# with `-d`, BSD refuses it outright and wants `-j -f <exact format>`. macOS ships
+# only BSD, so every `date -d` here failed there — which is why the Mac bar showed
+# "(resets Aug 19 at 5:49pm)" where Linux showed "(resets in 4h 38m)", and why the
+# weekly "(resets on Thu)" was missing altogether rather than wrong.
+#
+# The stamp that actually matters is already an epoch: Claude Code's render payload
+# delivers `resets_at` as one. That case is arithmetic, identical everywhere, and
+# needs no date(1) at all — so the dialect problem stops applying to the live path
+# entirely, and the parsing below is only for the legacy `/usage` text.
+stamp_epoch() {
+  local s="$1" e fmt
+  case "$s" in
+    '') return 0 ;;
+    @*) printf '%s' "${s#@}"; return 0 ;;
+  esac
+  e="$(date -d "$s" +%s 2>/dev/null || true)"          # GNU
+  case "$e" in ''|*[!0-9]*) ;; *) printf '%s' "$e"; return 0 ;; esac
+  # BSD. Only the shapes Claude emits, after norm_stamp has taken out the commas
+  # and the word "at". Neither carries a year; BSD date fills in the current one,
+  # which is right for every window shorter than a year — and the year-wrap guard
+  # below is what covers the rest.
+  for fmt in '%b %d %I:%M%p' '%b %d %H:%M' '%Y-%m-%dT%H:%M:%S'; do
+    e="$(date -j -f "$fmt" "$s" +%s 2>/dev/null || true)"
+    case "$e" in ''|*[!0-9]*) ;; *) printf '%s' "$e"; return 0 ;; esac
+  done
+  return 0
+}
+
+# Epoch -> "Thu", in local time, without date(1). `date +%z` is the one thing both
+# dialects spell the same way, so the offset comes from there and the rest is
+# arithmetic: 1970-01-01 was a Thursday, hence the table's rotation.
+epoch_weekday() {
+  local e="$1" off sign hh mm secs day
+  case "$e" in ''|*[!0-9-]*) return 0 ;; esac
+  off="$(date +%z 2>/dev/null || printf '+0000')"
+  case "$off" in
+    [+-][0-9][0-9][0-9][0-9]) ;;
+    *) off="+0000" ;;
+  esac
+  sign="${off%????}"; hh="${off#?}"; hh="${hh%??}"; mm="${off#???}"
+  secs=$(( 10#$hh * 3600 + 10#$mm * 60 ))
+  [ "$sign" = "-" ] && secs=$(( -secs ))
+  day=$(( (e + secs) / 86400 ))
+  # Negative epochs would floor the wrong way; nothing here produces one, but a
+  # corrupt cache could, and a status bar must not print a blank where a day goes.
+  [ "$day" -lt 0 ] && return 0
+  case $(( day % 7 )) in
+    0) printf 'Thu' ;; 1) printf 'Fri' ;; 2) printf 'Sat' ;; 3) printf 'Sun' ;;
+    4) printf 'Mon' ;; 5) printf 'Tue' ;; *) printf 'Wed' ;;
+  esac
+}
+
+# "Jul 16, 5:29pm" -> "in 16h 26m". Falls back to the raw stamp if it can't be
+# read, so a format change degrades instead of breaking.
 until_reset() {
   local stamp="$1" norm target now delta h m
   norm="$(norm_stamp "$stamp")"
-  target="$(date -d "$norm" +%s 2>/dev/null || true)"
+  target="$(stamp_epoch "$norm")"
   [ -n "$target" ] || { printf '%s' "$stamp"; return; }
   now="$(date +%s)"
   # A reset that parses as past has two causes, told apart by how far past:
@@ -3832,22 +3928,26 @@ until_reset() {
   #    past. The reset already happened: say "now" — do NOT add a year (that's the
   #    "resets in 8755h" bug). No real reset window exceeds a week, so anything
   #    less than ~300 days past cannot be a legitimate future stamp we mis-rolled.
-  if [ "$target" -lt "$now" ]; then
-    if [ "$(( now - target ))" -gt 25920000 ]; then   # > 300 days past → year wrap
-      target=$(date -d "$norm +1 year" +%s 2>/dev/null || echo "$target")
-    fi
-  fi
+  # An epoch is unambiguous, so it can never be the year-wrap case — only a
+  # monthless text stamp can, and re-reading it a year on is the only honest way
+  # to land on the right day.
+  case "$norm" in
+    @*) ;;
+    *)  if [ "$target" -lt "$now" ] && [ "$(( now - target ))" -gt 25920000 ]; then
+          target="$(stamp_epoch "$(printf '%s +1 year' "$norm")")"
+          case "$target" in ''|*[!0-9]*) target=$(( now - 25920000 )) ;; esac
+        fi ;;
+  esac
   delta=$(( target - now ))
   [ "$delta" -lt 0 ] && { printf 'now'; return; }
   h=$(( delta / 3600 )); m=$(( (delta % 3600) / 60 ))
   if [ "$h" -gt 0 ]; then printf 'in %dh %dm' "$h" "$m"; else printf 'in %dm' "$m"; fi
 }
 
-# "Jul 23, 5:29pm" -> "Tue" (weekday abbreviation). Best-effort: empty on a macOS
-# without GNU date, so the caller just omits the "(resets on …)" note there.
+# "Jul 23, 5:29pm" -> "Tue" (weekday abbreviation). Empty when the stamp cannot
+# be read at all, so the caller just omits the "(resets on …)" note.
 reset_weekday() {
-  local norm; norm="$(norm_stamp "$1")"
-  date -d "$norm" +%a 2>/dev/null || true
+  epoch_weekday "$(stamp_epoch "$(norm_stamp "$1")")"
 }
 
 bar() {
@@ -3914,8 +4014,8 @@ SPECS
     if [ -z "$reset" ]; then
       out+="$(printf '%s\n  %s %s%%' "$label" "$(bar "$pct")" "$pct")"$'\n\n'
     elif [ "$rel" = "$reset" ]; then
-      # until_reset echoes the stamp back when date(1) can't parse it — which is
-      # every macOS without GNU coreutils, since it needs `date -d`. Printing
+      # until_reset echoes the stamp back when the stamp cannot be read at all.
+      # Printing
       # "resets Jul 18, 5:29pm (Jul 18, 5:29pm)" reads like the tool is broken.
       # Say it once.
       out+="$(printf '%s\n  %s %s%%  · resets %s' \
@@ -4112,10 +4212,18 @@ usage_glance_str() {
   case "$ctx" in ''|*[!0-9]*) ctx="" ;; esac
   # Order: Fable · Week · 5-hour. Each limit carries its own reset in parens — the
   # weekly one as a weekday (resets on Tue), the 5-hour one as a countdown
-  # (resets in 2h 23m). Both are best-effort: on macOS without GNU date the note
-  # is simply omitted rather than showing a raw stamp. Fable shows at 0% too.
+  # (resets in 2h 23m). Both are computed from the epoch the render payload
+  # carries, so they read the same on every platform; a stamp that cannot be read
+  # at all drops its note rather than printing a raw one. Fable shows at 0% too.
   local out="" rel="" wday=""
-  [ -n "$sr" ] && rel="$(until_reset "$sr")"
+  if [ -n "$sr" ]; then
+    rel="$(until_reset "$sr")"
+    # until_reset echoes the stamp back when it cannot read it. On the bar that
+    # was the macOS symptom — "(resets Aug 19 at 5:49pm)" wedged between two
+    # percentages — so drop the note instead of printing the thing we failed to
+    # convert. `abs usage` has room to show the raw stamp; ten columns do not.
+    case "$rel" in in\ *|now) ;; *) rel="" ;; esac
+  fi
   [ -n "$wr" ] && wday="$(reset_weekday "$wr")"
   local off=$'\033[0m' dim=$'\033[38;5;244m' sep=" · "
   [ "$color" = 1 ] && sep="${dim} · ${off}"
@@ -6021,15 +6129,29 @@ _src_pythons() {
   done
 }
 
+# Whether this build is a pre-release — 3.6.0-beta.1 rather than 3.6.0. The
+# suffix is the whole signal, and it decides one thing: a beta may not silently
+# fall back to main (see below).
+abs_is_prerelease() {
+  case "$ABS_VERSION" in *[!0-9.]*) return 0 ;; *) return 1 ;; esac
+}
+
 # Where a given ref's tarball lives. The tag first, because a release should
 # install the release; main as the fallback, because a version can be shipped
 # before anyone tags it and "no tag yet" must not mean "no daemon".
+#
+# That fallback is right for a release and wrong for a beta. A beta exists to be
+# a known quantity: pairing a 3.6.0-beta.1 abs.sh with main's 3.5.3 daemon source
+# produces a build nobody wrote, and the tester spends the cycle on a mixture
+# instead of on the thing being tested. So a pre-release fails loudly on a missing
+# tag rather than quietly installing something else.
 _src_fetch() {   # <destination .tar.gz>
   local dst="$1" url
   url="$ABS_TARBALL_BASE/tags/v${ABS_VERSION}.tar.gz"
   if curl -fsSL --max-time 300 -o "$dst" "$url" 2>/dev/null; then
     printf '%s' "v$ABS_VERSION"; return 0
   fi
+  abs_is_prerelease && return 1
   url="$ABS_TARBALL_BASE/heads/main.tar.gz"
   if curl -fsSL --max-time 300 -o "$dst" "$url" 2>/dev/null; then
     printf '%s' "main"; return 0
@@ -6105,7 +6227,13 @@ cmd_src() {
 
   local ref
   info "${c_dim}Downloading…${c_reset}"
-  ref="$(_src_fetch "$tarball")" || { rm -rf "$stage"; die "Could not download the source tarball."; }
+  if ! ref="$(_src_fetch "$tarball")"; then
+    rm -rf "$stage"
+    if abs_is_prerelease; then
+      die "No tarball for v$ABS_VERSION, and a pre-release will not fall back to main — that would pair this abs with a different version's daemon. Push the tag, or install a released version."
+    fi
+    die "Could not download the source tarball."
+  fi
   info "${c_dim}Got $ref.${c_reset}"
 
   # GitHub wraps everything in one top-level directory whose name carries the

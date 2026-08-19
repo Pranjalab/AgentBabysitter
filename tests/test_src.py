@@ -227,7 +227,10 @@ def test_a_failed_download_leaves_the_existing_source_alone(lone, abs_home, tmp_
     empty.mkdir()
     out = run(lone, abs_home, "src", "install", ABS_TARBALL_BASE=f"file://{empty}")
     assert out.returncode != 0
-    assert "Could not download" in out.stderr
+    # Two wordings, because a pre-release refuses the fall back to main and says
+    # so specifically. What this test is actually about is the line below.
+    assert ("Could not download" in out.stderr
+            or "will not fall back to main" in out.stderr), out.stderr
     assert keep.exists(), "the working source was destroyed by a failed update"
 
 

@@ -63,6 +63,11 @@ def bar(tmp_path):
     """
     home = tmp_path / "abshome"
     (home / "profiles" / PROFILE).mkdir(parents=True)
+    # HOME too, not just ABS_HOME. The bar re-reads ~/.claude.json to keep the
+    # account name current, so a test that only faked ABS_HOME would render THIS
+    # machine's Claude account over whatever label it had just set.
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
     lone = tmp_path / "elsewhere"
     lone.mkdir()
     shutil.copy(ABS_SH, lone / "abs")
@@ -115,7 +120,7 @@ def bar(tmp_path):
             an environment override. They are separate arguments because the bar now
             *reads* stdin, and a payload smuggled in as an env var would silently do
             nothing."""
-            env = dict(os.environ, ABS_HOME=str(home))
+            env = dict(os.environ, ABS_HOME=str(home), HOME=str(fake_home))
             for k in ("TELEGRAM_STATE_DIR", "ABS_SESSION_PROFILE"):
                 env.pop(k, None)
             env.update(extra)
@@ -132,7 +137,7 @@ def bar(tmp_path):
 
         def run(self, *args, **extra):
             """Any other abs subcommand against the same throwaway home."""
-            env = dict(os.environ, ABS_HOME=str(home))
+            env = dict(os.environ, ABS_HOME=str(home), HOME=str(fake_home))
             for k in ("TELEGRAM_STATE_DIR", "ABS_SESSION_PROFILE"):
                 env.pop(k, None)
             env.update(extra)
