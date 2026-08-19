@@ -25,19 +25,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
-## [3.6.0-beta.1] — 2026-08-19 — macOS parity (beta)
+## [3.6.0] — 2026-08-19 — macOS parity
 
-**A beta, on purpose.** Everything here was found by putting the Mac bar and the
-Linux bar side by side, and everything here is verified on Linux by tests that take
-the GNU tools away — which is as close to a Mac as CI gets, and not the same thing
-as a Mac. It wants a real one before it is called a release. Install it pinned:
+Everything here was found by putting the Mac bar and the Linux bar side by side,
+and fixed against tests that take the GNU tools away — which is as close to a Mac
+as CI gets, and not the same thing as a Mac. So it shipped as `3.6.0-beta.1` first
+and was run on a real one: no `timeout`, no `gtimeout`, `date -d` unsupported,
+BSD `date -j -f` working. All three fixes confirmed there before this tag existed.
 
-```sh
-curl -fsSL https://agentbabysitter.com/install.sh | ABS_REF=v3.6.0-beta.1 bash
-```
-
-A pinned install says so on the way in and does not update itself past that tag;
-the plain installer with no `ABS_REF` puts you back on the current release.
+If you use abs on a Mac, this is the release where the status bar starts telling
+you the truth.
 
 - **The status bar was blind on every Mac, on every frame.** Claude Code's render
   payload is read through `with_timeout 1 cat`, and `with_timeout` only falls back
@@ -73,6 +70,26 @@ the plain installer with no `ABS_REF` puts you back on the current release.
   `abs config label <name>` (recorded explicitly now) and `--clear` outrank the
   account. Re-checked at most once a minute, so `~/.claude.json` is never read per
   frame.
+
+- **The documented way to install an old version has never worked.** `ABS_REF=v2.5.1
+  curl … | bash` puts the variable in *curl's* environment. The two sides of a
+  pipeline are separate processes, so the bash that does the installing never sees
+  it, and every "pinned" install silently installed the current release instead.
+
+  The wrong form was in `install.sh`'s own header and on the releases page, which
+  means the rollback route has never worked either — and that is the worst possible
+  place for a silent failure, because the person running a rollback has already had
+  something break and the escape hatch quietly reinstalls the thing that broke.
+  Found the only way it could be: a pinned beta install reported the current
+  release back. The variable goes after the pipe:
+
+  ```sh
+  curl -fsSL https://agentbabysitter.com/install.sh | ABS_REF=v2.5.1 bash
+  ```
+
+  A lost pin cannot be detected — nothing in the installer knows what you meant —
+  so the last line now names the ref every time, pinned or not: `Agent Babysitter
+  3.6.0 installed (from main)`. A mistake is visible in a second instead of an hour.
 
 - **A pre-release will not fall back to main for its v3 source.** `abs src install`
   tries the version's tag and then main, because a version can ship before anyone
