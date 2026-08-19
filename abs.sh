@@ -6576,8 +6576,18 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} config model <name>  Default model for new sessions (--clear to unset)
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
   ${c_bold}abs${c_reset} config reply-text on|off   Send replies as text (default on)
-  ${c_bold}abs${c_reset} config reply-voice on|off  Send replies as a voice note (default off)
+  ${c_bold}abs${c_reset} config reply-voice on|off  Send replies as a voice note (ON by default
+                          wherever the machine can speak)
+  ${c_bold}abs${c_reset} config reply text|both|voice|auto  The mode directly ('auto' = let the
+                          machine decide from what is installed)
   ${c_bold}abs${c_reset} config voice-first on|off  In mode 'both': note first, then text (default on)
+  ${c_bold}abs${c_reset} config voice-words <n>   How long a reply must be before it is spoken
+                          (default 150; --clear restores it)
+  ${c_bold}abs${c_reset} config kokoro-voice <id>  Which voice speaks ('abs voice samples' to choose by ear)
+  ${c_bold}abs${c_reset} config voice-offer done|reset  The one-time "pick a voice" offer
+  ${c_bold}abs${c_reset} config engine kokoro|chatterbox  Which speech engine backs 'abs say'
+  ${c_bold}abs${c_reset} config voice-sample <file>  Clone a voice (chatterbox only)
+  ${c_bold}abs${c_reset} config footer on|off  Attach your usage and context to replies (default on)
   ${c_bold}abs${c_reset} config auto-silent on|off  Pause reports while you drive the terminal (default on)
   ${c_bold}abs${c_reset} config statusline on|off  Bottom-bar mute/active dot + usage (default on)
   ${c_bold}abs${c_reset} config label <name>  Name before the colon in the bar ('auto' = your Claude name)
@@ -6603,7 +6613,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
                           Docker sandbox sessions — one dedicated host folder, isolated (v3)
   ${c_bold}abs${c_reset} start sandbox [name]  Run a Claude session INSIDE a sandbox container (v3)
   ${c_bold}abs${c_reset} start new-bot        Provision a brand-new bot + profile, then launch it (v3)
-  ${c_bold}abs${c_reset} restricted create <name>  ${c_dim}EXPERIMENTAL, not part of 3.0.0${c_reset} — locked-down
+  ${c_bold}abs${c_reset} restricted create <name>  ${c_dim}EXPERIMENTAL, unreleased${c_reset} — locked-down
                           assistant: own box, separate login, Haiku, no
                           code-writing. Never driven by hand; see
                           docs/v3/manual-tests/restricted.md

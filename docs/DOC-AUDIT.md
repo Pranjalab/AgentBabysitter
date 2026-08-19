@@ -14,10 +14,50 @@ the list of what is now **wrong**, what is merely **stale**, and what is
 **missing**, so the next session can fix it in one pass instead of discovering it
 piecemeal.
 
-Nothing here is fixed yet. That was the ask: find it, write it down, fix it next
-round.
+Everything in A, B and C is fixed as of 19 Aug — see the status block below. D is
+still open, because those are decisions rather than corrections.
 
 Ordered by how much damage it does, not by where it lives.
+
+---
+
+## Status — 19 Aug 2026, after 3.6.0
+
+**A and B: closed.** All five false statements and all three stale markers fixed.
+
+**C: closed.** Every `abs` command and every `abs config` subcommand now appears in
+`abs help`, the README, and the website's command table — checked by extracting the
+dispatch table out of `abs.sh` and diffing it against all three, not by reading.
+The website went from 18 documented commands to the full surface; it had none of
+v3 at all — no daemon, no `abs src`, no sandboxes, no `abs project`.
+
+Also fixed in the same pass, found the same way:
+
+- `abs help` said `reply-voice … (default off)`. It has been **on** by default
+  wherever the machine can speak since 3.5.x. The tool's own help was the last
+  place still saying otherwise.
+- The README claimed **"No daemon, no webhook"** two hundred lines above a section
+  headed **"Always-on daemon (v3)"**. It contradicted itself.
+- `GUIDE.md` documented chatterbox as *the* TTS and built "both venvs". Kokoro has
+  been the default since 3.2 and there are three venvs.
+- `docs.html` told you `abs` calls `speak.py`. It calls `speak_kokoro.py` unless
+  you have opted into cloning.
+- `CONTRIBUTING.md` did not mention the test suite, the bash 3.2 rule, or the
+  absence of GNU coreutils on macOS — the three things a shell PR is most likely
+  to break.
+- The voice timeout knobs (`ABS_VOICE_TIMEOUT` and friends) were undocumented
+  anywhere.
+
+**D: still open.** Four structural decisions that want the operator, not a fix:
+the stale `ANNOUNCE-3.0.1.md`, one-shot files at the top of `docs/`, whether to
+split `VOICE.md` out of a 560-line README, and which of README/GUIDE is canonical
+where they overlap.
+
+**The method, since it is the part worth repeating.** Every claim above was found
+by generating the list of real commands from `abs.sh` and diffing it against the
+docs, and by running the commands rather than reading them. Reading the docs
+against each other only finds disagreements, never the things all three get
+equally wrong.
 
 ---
 

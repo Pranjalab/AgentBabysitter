@@ -19,7 +19,10 @@ usage — all from Telegram.
 
 Claude Code already does the work. Agent Babysitter is the piece that lets you
 walk away from it — a thin bash script wrapped around Anthropic's official
-Telegram plugin. No daemon, no webhook, no second copy of your session.
+Telegram plugin. No server, no webhook, no open port, and no second copy of your
+session. There is an [optional always-on daemon](#-always-on-daemon-v3), and it
+runs on your own machine as a user service — it is what lets you start a session
+from your phone when nothing is running.
 
 <div align="center">
 
@@ -271,8 +274,9 @@ Three ordinary frustrations, all from using Claude Code every day:
 3. **Handing Claude a screenshot was a pain.** Pasting into the terminal is
    awkward, and the image was usually on my phone anyway.
 
-Agent Babysitter fixes all three — and it's stayed a single bash script the whole
-way, because the point was to remove friction, not add a platform.
+Agent Babysitter fixes all three. Everything you type at is still one bash script,
+because the point was to remove friction, not add a platform — the always-on
+daemon that arrived in v3 is optional, opt-in, and the only part that isn't.
 
 ## ⌨️ Commands
 
@@ -308,7 +312,38 @@ abs --model opus        # any claude flag is passed straight through
 | 💬 `abs send "text"` | Send plain text to your chat — works even if the Telegram plugin is down (`abs send -` reads stdin) |
 | 🎤 `abs say "text"` | Speak it and send as a voice note |
 | ♻️ `abs reset` | Remove this profile's token, allowlist, and state |
+| 🔄 `abs update` | Update abs in place to the latest release, and verify it landed |
+| 🩺 `abs doctor` | Diagnose the install — v2 dependencies and the v3 daemon stack, read-only |
+| 📜 `abs log` | Your local conversation backup — `--list` for the days kept, `--date <YYYY-MM-DD>` for one, `--clear` to delete |
 | ❓ `abs help` | The full list |
+
+**The rest of the settings:**
+
+| Command | What it does |
+| --- | --- |
+| ⚙️ `abs config voice-words <n>` | How long a reply must be before it's spoken (default 150; `--clear` restores it) |
+| ⚙️ `abs config voice-offer done` / `reset` | The one-time "pick a voice" offer — mark it answered, or ask again |
+| ⚙️ `abs config engine kokoro` / `chatterbox` | Which speech engine backs `abs say`. Absent = whichever is installed |
+| ⚙️ `abs config update-check on` / `off` | The on-launch "update now?" prompt (default on) |
+| ⚙️ `abs config ack on` / `off` | 👀 on your Telegram message the moment it lands (default on) |
+| ⚙️ `abs config log on` / `off` | Back up the conversation locally under `~/.abs` (default on) |
+| ⚙️ `abs config start-menu on` / `off` | The resume-first picker on interactive launch (default on) |
+
+### v3 — the parts that need the source installed
+
+`curl | bash` fetches these for you. `abs src status` says whether they're there.
+
+| Command | What it does |
+| --- | --- |
+| 📦 `abs src install` / `status` / `path` | Fetch the v3 source into `~/.abs/src` — no git clone needed |
+| 🛰 `abs daemon install` / `start` / `stop` / `status` / `logs` | The always-on daemon: polls idle bots so `ABS START` works with nothing running |
+| 🗒 `abs sessions` | List engine sessions (`--json` for scripts) |
+| 🔗 `abs attach [profile]` | Attach to a running session |
+| 🗂 `abs project add` / `list` / `rm <dir>` | Register the projects the `ABS START` flow offers |
+| 📁 `abs config workspace-root <dir>` | Where a remote "New folder" start creates it |
+| 🤖 `abs start new-bot` | Provision a brand-new bot and profile, then launch it |
+| 📦 `abs sandbox build` / `create` / `list` / `start` / `stop` / `destroy` | Docker sandbox sessions — one dedicated host folder, isolated |
+| 🧪 `abs start sandbox [name]` | Run a Claude session inside a sandbox container |
 
 From **Telegram**, the hook-enforced kill ladder — sent as a whole message —
 `ABS MUTE` / `ABS UNMUTE` · `ABS OFF` · `ABS STOP` · `ABS EXIT` · `ABS BLOCK`

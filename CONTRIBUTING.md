@@ -21,7 +21,21 @@ to grow into a framework.
 ```sh
 bash -n abs.sh install.sh        # syntax check
 shellcheck abs.sh install.sh     # if you have shellcheck installed
+python3 -m pytest tests/ -q      # the suite: ~1,100 tests, about five minutes
 ```
+
+**Shell changes have to survive bash 3.2.** That is what macOS ships, and it is
+old enough to parse things differently from bash 5 — three releases in a row
+crashed on macOS at launch before this rule existed. `tests/test_bash32.py` runs
+the real thing in a container, so you can check locally:
+
+```sh
+docker run --rm -v "$PWD:/w:ro" bash:3.2 bash -n /w/abs.sh
+```
+
+There is no GNU coreutils on macOS either. `date -d`, `timeout(1)` and friends are
+absent, so anything reaching for them needs a fallback — see
+`tests/test_portable_macos.py`, which tests by taking those tools away.
 
 Then exercise the real flow in isolation — nothing touches your live setup:
 

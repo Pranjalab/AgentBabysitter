@@ -89,9 +89,10 @@ Send a voice note and Claude transcribes it. Ask for a reply in voice and it
 speaks back. Both run locally — no audio leaves the machine.
 
 ```sh
-abs say "text"                                # speak it AND send it (the usual way)
-.venv/bin/python transcribe.py <file.oga>     # speech → text (faster-whisper)
-.venv-tts/bin/python speak.py "text" out.ogg  # text → speech (chatterbox), file only
+abs say "text"                                        # speak it AND send it (the usual way)
+.venv/bin/python transcribe.py <file.oga>             # speech → text (faster-whisper)
+.venv-kokoro/bin/python speak_kokoro.py "text" out.ogg  # text → speech (the default), file only
+.venv-tts/bin/python speak.py "text" out.ogg          # text → speech (chatterbox), file only
 ```
 
 **Inbound.** A voice note arrives with `attachment_file_id` on the `<channel>`
@@ -124,22 +125,55 @@ It's two switches, one per channel:
 
 ```sh
 abs config reply-text on|off      # text replies (default on)
-abs config reply-voice on|off     # voice-note replies (default off)
+abs config reply-voice on|off     # voice-note replies — ON by default wherever
+                                  # the machine can speak
 abs config                        # shows both, and the mode they add up to
 ```
 
 | text | voice | What arrives |
 | --- | --- | --- |
-| on | off | text only — the default |
-| on | on | **both**, on every finished result |
+| on | off | text only — the default on a machine that can't speak |
+| on | on | **both** — the default once voice is installed |
 | off | on | the voice note *is* the reply |
 | off | off | refused — see below |
 
 The three-way shorthand still works if you prefer it:
 
 ```sh
-abs config reply text | both | voice
+abs config reply text | both | voice | auto
 ```
+
+`auto` is not a fourth mode — it clears your stored choice and hands the decision
+back to the machine, which is `both` where it can speak and `text` where it can't.
+Use it to undo a setting rather than to pin one.
+
+**A short reply arrives as text alone.** Below the word threshold, synthesising a
+note costs you a wait for something quicker to read than to hear:
+
+```sh
+abs config voice-words <n>        # default 150; --clear restores it
+```
+
+That number was originally a guess at 300 and turned out to be wrong in use — a
+273-word message went silent. If yours feels wrong, move it; that is what the
+setting is for.
+
+### When the machine is slow — the voice timeouts
+
+Synthesis is bounded, always. A note that never arrives is worse than a note that
+arrives late, but a *wedged* engine that holds every reply behind it is worse than
+both — so each of these is a ceiling, not a target. Override them in the
+environment if your machine is slower than the defaults assume (a CPU-only box
+running chatterbox is the case they exist for):
+
+| Variable | Default | What it bounds |
+| --- | --- | --- |
+| `ABS_VOICE_TIMEOUT` | 300s | One synthesis, before the note is abandoned and the text goes out instead |
+| `ABS_VOICE_FIRST_TIMEOUT` | 120s | How long voice-first holds the **text** waiting for the note. Deliberately much shorter — five minutes of silence reads as a broken tool |
+| `ABS_VOICE_LOCK_WAIT` | 420s | How long to wait for someone else's note before giving up on yours. Longer than one synthesis, so a queue of two is served rather than dropped |
+| `ABS_VOICE_LOCK_STALE_MARGIN` | 60s | Grace before a held lock is declared abandoned |
+
+The fallback is always text, never silence.
 
 **Why both-off is refused.** It isn't a delivery mode, it's silence — and it's the
 one state where something you were waiting for never arrives and nothing says why.
@@ -227,27 +261,40 @@ Voice is optional — everything else works without it. The installer offers to
 set it up, and you can (re)run it any time:
 
 ```sh
-abs voice setup      # installs uv if needed, builds both venvs, fetches the scripts
+abs voice setup      # installs uv if needed, builds the venvs, fetches the scripts
 abs voice status     # green/red check of every piece (scripts, venvs, ffmpeg, uv)
+abs voice samples    # one voice note per voice, so you choose by ear
 ```
 
 It needs `ffmpeg` (name it yourself — `sudo apt install ffmpeg` / `brew install
 ffmpeg`); everything else, including [`uv`](https://docs.astral.sh/uv/) and the
-two Python versions, `abs voice setup` handles. For an installed `abs` the engines
+Python versions, `abs voice setup` handles. For an installed `abs` the engines
 live in `~/.abs/voice`; in a dev checkout they sit beside `abs.sh`.
 
-Under the hood it's just two `uv` environments — the same thing by hand:
+Under the hood it's `uv` environments — the same thing by hand:
 
 ```sh
-uv venv .venv     --python 3.13 && VIRTUAL_ENV=.venv     uv pip install faster-whisper
-uv venv .venv-tts --python 3.11 && VIRTUAL_ENV=.venv-tts uv pip install chatterbox-tts "setuptools<81"
+# listening, and the default speaker
+uv venv .venv        --python 3.13 && VIRTUAL_ENV=.venv        uv pip install faster-whisper
+uv venv .venv-kokoro --python 3.12 && VIRTUAL_ENV=.venv-kokoro uv pip install kokoro soundfile
+
+# only if you want voice cloning — `abs voice setup --chatterbox`
+uv venv .venv-tts    --python 3.11 && VIRTUAL_ENV=.venv-tts    uv pip install chatterbox-tts "setuptools<81"
 ```
 
-**Two venvs, deliberately.** `chatterbox-tts` depends on a `numba` pin that only
-builds on Python <3.10, so TTS lives in its own 3.11 environment; Whisper runs in
-the main venv on 3.13. The `setuptools<81` pin is not optional — chatterbox's
-watermarker needs `pkg_resources`, which setuptools ≥81 dropped, and the failure
-surfaces four layers from its cause as `'NoneType' object is not callable`.
+**Separate venvs, deliberately.** Each engine pins a different Python: kokoro wants
+3.12, `chatterbox-tts` depends on a `numba` pin that only builds on Python <3.10 so
+it lives in its own 3.11 environment, and Whisper runs in the main venv on 3.13.
+
+**Kokoro is the default speaker,** and the reason is latency rather than quality:
+82M parameters, built for the CPU, a note in seconds on a laptop. Chatterbox wants
+a GPU, and without one a long report takes minutes — long enough for a burst of
+replies to pile up on each other. It stays installable because it is the only one
+that can clone a voice from a reference clip.
+
+The `setuptools<81` pin on chatterbox is not optional — its watermarker needs
+`pkg_resources`, which setuptools ≥81 dropped, and the failure surfaces four layers
+from its cause as `'NoneType' object is not callable`.
 
 **Long text is chunked, and that's load-bearing.** One synthesis call stops at
 chatterbox's token cap (~40 seconds of speech) and returns the short clip with no
@@ -491,7 +538,7 @@ engine pane alone.
 
 ## The restricted assistant — a later release
 
-> **Not part of 3.0.0.** Complete in code and covered by unit tests, but never
+> **Experimental, unreleased.** Complete in code and covered by unit tests, but never
 > provisioned by hand — it needs a third bot token, and that has kept it untested
 > since July. It ships dormant: nothing runs it unless you type
 > `abs restricted create`, which warns you of exactly this first. The work
