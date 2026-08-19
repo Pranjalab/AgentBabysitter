@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.5.2"
+readonly ABS_VERSION="3.5.3"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1846,15 +1846,48 @@ bar_label_clean() {
 # records that we tried, so `abs config label --clear` means "back to abs" and
 # stays that way rather than being re-seeded on the next launch.
 bar_label_seed() {
-  [ "$(state_get '.bar_label_seeded')" = "true" ] && return 0
-  local v; v="$(state_get '.bar_label')"
-  case "$v" in ''|null) ;; *) state_set '.bar_label_seeded = true'; return 0 ;; esac
-  local n c
-  if n="$(claude_display_name)" && c="$(bar_label_clean "$n")" && [ -n "$c" ]; then
-    state_set --arg l "$c" '.bar_label = $l | .bar_label_seeded = true'
-  else
-    state_set '.bar_label_seeded = true'
+  local n c auto
+  # `--clear` means "the plain abs:, and stay that way". Without an explicit
+  # marker the next launch sees an empty label, decides nothing is set, and
+  # helpfully fills the account name straight back in — which makes clearing
+  # look broken rather than deliberate.
+  [ "$(state_get '.bar_label_cleared')" = "true" ] && return 0
+  # WHICH account the current label came from, when it came from one at all.
+  # Storing the source rather than a "done" flag is what lets this tell an
+  # auto-filled label from a hand-picked one — and that distinction is the whole
+  # feature. Log into a different Claude account and the bar followed the old
+  # name forever, because a boolean cannot answer "is this still yours?".
+  auto="$(state_get '.bar_label_auto')"
+  case "$auto" in null) auto="" ;; esac
+
+  n="$(claude_display_name 2>/dev/null || true)"
+  if [ -z "$n" ]; then
+    # No account name to read. Leave whatever is there — including a label the
+    # operator typed — rather than reverting to "abs" because ~/.claude.json was
+    # briefly unreadable mid-login.
+    state_set '.bar_label_seeded = true' 2>/dev/null || true
+    return 0
   fi
+  c="$(bar_label_clean "$n")"
+  [ -n "$c" ] || { state_set '.bar_label_seeded = true' 2>/dev/null || true; return 0; }
+
+  local v; v="$(state_get '.bar_label')"
+  case "$v" in null) v="" ;; esac
+
+  if [ -n "$v" ] && [ -z "$auto" ]; then
+    # A label with no recorded source is one the operator set by hand, or one
+    # seeded by a version before this. Never overwrite it: guessing wrong here
+    # replaces a deliberate choice with a name from a file.
+    state_set '.bar_label_seeded = true' 2>/dev/null || true
+    return 0
+  fi
+  if [ "$v" = "$c" ]; then
+    state_set --arg a "$n" '.bar_label_auto = $a | .bar_label_seeded = true' 2>/dev/null || true
+    return 0
+  fi
+  # Either nothing is set, or the account behind it has changed.
+  state_set --arg l "$c" --arg a "$n" \
+    '.bar_label = $l | .bar_label_auto = $a | .bar_label_seeded = true' 2>/dev/null || true
   return 0
 }
 
@@ -3365,22 +3398,24 @@ cmd_config() {
         --clear|clear)
           # Marked seeded, or the next launch would helpfully put the account
           # name back and clearing would look broken.
-          state_set 'del(.bar_label) | .bar_label_seeded = true'
+          state_set 'del(.bar_label) | del(.bar_label_auto) | .bar_label_cleared = true | .bar_label_seeded = true'
           ok "Status-bar label back to '$BAR_LABEL_DEFAULT' — the bar reads ${BAR_LABEL_DEFAULT}:@$(state_get '.bot'). Your account name: ${c_bold}abs config label auto${c_reset}" ;;
         auto)
           local n; n="$(claude_display_name)" \
             || die "No display name on the Claude account here. Set one directly: abs config label <name>"
           local c; c="$(bar_label_clean "$n")"
           [ -n "$c" ] || die "The Claude display name ('$n') has nothing usable in it. Set one directly: abs config label <name>"
-          state_set --arg l "$c" '.bar_label = $l'
+          state_set --arg l "$c" --arg a "$n" '.bar_label = $l | .bar_label_auto = $a | del(.bar_label_cleared)'
           ok "Status-bar label: $c — from your Claude account. The bar reads ${c}:@$(state_get '.bot')." ;;
         *)
           local c; c="$(bar_label_clean "$val")"
+          # Chosen by hand from here on: clearing the source stops the next
+          # launch deciding it knows better.
           # Refuse rather than silently substitute: someone who typed an emoji
           # label should be told it won't render, not left wondering why the bar
           # still says abs.
           [ -n "$c" ] || die "Nothing usable in that label. Letters, digits, . _ @ - and spaces, up to $BAR_LABEL_MAX characters."
-          state_set --arg l "$c" '.bar_label = $l'
+          state_set --arg l "$c" '.bar_label = $l | del(.bar_label_auto) | del(.bar_label_cleared)'
           if [ "$c" != "$val" ]; then
             ok "Status-bar label: $c  ${c_dim}(trimmed from '$val' — max $BAR_LABEL_MAX chars, printable only)${c_reset}"
           else
@@ -3941,7 +3976,7 @@ usage_cache_file() { printf '%s/usage.json' "$ABS_DIR"; }
 # `field` helper already extracts "<pct>\t<reset>" per limit; we keep just the
 # two percents plus a fetch timestamp.
 usage_cache_write() {
-  local raw="$1" sfield spct sreset wpct wreset fpct now tmp
+  local raw="$1" sfield spct sreset wpct wreset fpct fname now tmp
   [ -n "$raw" ] && [ -d "$ABS_DIR" ] || return 0
   # The session field carries "<pct>\t<reset-stamp>"; keep both — the 5-hour
   # window is the soonest reset, so that stamp is the "next reset" we show.
@@ -3950,17 +3985,34 @@ usage_cache_write() {
   sreset=""; case "$sfield" in *$'\t'*) sreset="${sfield#*$'\t'}" ;; esac
   wpct="$(field "$raw" 'Current week \(all models\)' | cut -f1)"
   wreset="$(field "$raw" 'Current week \(all models\)' | cut -f2)"
-  # The per-model weekly line ("Current week (Fable)") only exists once that
-  # model has been used this week; null when absent so the glance can omit it.
-  fpct="$(field "$raw" 'Current week \(Fable\)' | cut -f1)"
+  # The per-model weekly line only exists once that model has been used this
+  # week, and it is named after the MODEL: "Current week (Fable)", "Current week
+  # (Opus)". This used to grep for the literal word Fable, so any other model
+  # silently reported nothing at all — and switching accounts or models was
+  # enough to trigger it.
+  #
+  # Take whichever per-model line is there and keep its name, rather than
+  # deciding in advance what the model will be called.
+  local fline
+  # Exclude the all-models line BEFORE taking the first match, not after. The
+  # obvious order — grep -m1 then filter — always returns nothing, because the
+  # all-models line comes first and -m1 stops there.
+  fline="$(grep -E '^Current week \([^)]+\): *[0-9]+% used' <<<"$raw" \
+           | grep -v 'all models' | head -1 || true)"
+  fpct=""; fname=""
+  if [ -n "$fline" ]; then
+    fname="$(sed -E 's/^Current week \(([^)]+)\).*/\1/' <<<"$fline")"
+    fpct="$(sed -E 's/.*: *([0-9]+)% used.*/\1/' <<<"$fline")"
+  fi
   case "$spct" in ''|*[!0-9]*) spct=null ;; esac
   case "$wpct" in ''|*[!0-9]*) wpct=null ;; esac
   case "$fpct" in ''|*[!0-9]*) fpct=null ;; esac
   now="$(date +%s)"
   tmp="$(mktemp "$ABS_DIR/usage.XXXXXX" 2>/dev/null)" || return 0
   if jq -n --argjson s "$spct" --argjson w "$wpct" --argjson f "$fpct" \
+       --arg fn "$fname" \
        --arg sr "$sreset" --arg wr "$wreset" --argjson t "$now" \
-       '{session_pct:$s, week_pct:$w, fable_pct:$f, session_reset:$sr, week_reset:$wr, fetched_at:$t}' > "$tmp" 2>/dev/null; then
+       '{session_pct:$s, week_pct:$w, fable_pct:$f, model_name:$fn, session_reset:$sr, week_reset:$wr, fetched_at:$t}' > "$tmp" 2>/dev/null; then
     chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$(usage_cache_file)" 2>/dev/null
   fi
   rm -f "$tmp" 2>/dev/null || true
@@ -4034,10 +4086,10 @@ _glance_seg() {   # <color?> <label+pct> <pct> <paren-or-empty>
 usage_glance_str() {
   local color=0
   [ "${1:-}" = color ] && color=1
-  local f s="" w="" fb="" sr="" wr="" stamp=0 interval line ctx=""
+  local f s="" w="" fb="" fname="" sr="" wr="" stamp=0 interval line ctx=""
   f="$(usage_cache_file)"
   if [ -f "$f" ]; then
-    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.session_reset//""),(.week_reset//""),(.fetched_at//0),(.ctx_left_pct//"")]|@tsv' "$f" 2>/dev/null)"
+    line="$(jq -r '[(.session_pct//""),(.week_pct//""),(.fable_pct//""),(.session_reset//""),(.week_reset//""),(.fetched_at//0),(.ctx_left_pct//""),(.model_name//"")]|@tsv' "$f" 2>/dev/null)"
     s="$(printf '%s' "$line" | cut -f1)"
     w="$(printf '%s' "$line" | cut -f2)"
     fb="$(printf '%s' "$line" | cut -f3)"
@@ -4045,6 +4097,7 @@ usage_glance_str() {
     wr="$(printf '%s' "$line" | cut -f5)"
     stamp="$(printf '%s' "$line" | cut -f6)"
     ctx="$(printf '%s' "$line" | cut -f7)"
+    fname="$(printf '%s' "$line" | cut -f8)"
   fi
   interval="$(state_get '.usage_refresh')"
   case "$interval" in ''|null|*[!0-9]*) interval="$USAGE_REFRESH_DEFAULT" ;; esac
@@ -4066,7 +4119,11 @@ usage_glance_str() {
   [ -n "$wr" ] && wday="$(reset_weekday "$wr")"
   local off=$'\033[0m' dim=$'\033[38;5;244m' sep=" · "
   [ "$color" = 1 ] && sep="${dim} · ${off}"
-  [ -n "$fb" ] && out="$(_glance_seg "$color" "Fable ${fb}%" "$fb" "")"
+  # Labelled with the model the number is actually about. Printing "Fable" over
+  # an Opus figure would be worse than printing nothing.
+  case "$fname" in ''|null) fname="Model" ;; esac
+  fname="$(printf '%s' "$fname" | LC_ALL=C tr -cd '[:alnum:] .-' | cut -c1-12)"
+  [ -n "$fb" ] && out="$(_glance_seg "$color" "${fname} ${fb}%" "$fb" "")"
   if [ -n "$w" ]; then
     local wp=""; [ -n "$wday" ] && wp="(resets on ${wday})"
     local wseg; wseg="$(_glance_seg "$color" "Week ${w}%" "$w" "$wp")"
