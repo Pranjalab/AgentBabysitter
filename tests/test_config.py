@@ -13,9 +13,16 @@ from absd.config import ENGINE_CHOICES, DaemonConfig
 
 
 def test_version_string() -> None:
-    """The package exposes a version (toolchain/import sanity)."""
+    """The package exposes a version (toolchain/import sanity).
+
+    Three numeric components, optionally followed by a pre-release suffix —
+    `3.6.0` or `3.6.0-beta.1`. The suffix is load-bearing elsewhere: it is what
+    stops a beta silently installing a release's daemon source.
+    """
+    import re
+
     assert isinstance(__version__, str)
-    assert __version__.count(".") == 2  # semver-ish
+    assert re.fullmatch(r"\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?", __version__), __version__
 
 
 def test_defaults_are_sane() -> None:

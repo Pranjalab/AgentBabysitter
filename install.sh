@@ -12,7 +12,16 @@ set -euo pipefail
 # Which release to install. `main` is the current one; a tag pins an older
 # release, which is the whole point of the escape hatch:
 #
-#   ABS_REF=v2.5.1 curl -fsSL https://agentbabysitter.com/install.sh | bash
+#   curl -fsSL https://agentbabysitter.com/install.sh | ABS_REF=v2.5.1 bash
+#
+# The variable goes on the RIGHT of the pipe, and this comment had it on the left
+# for as long as the feature has existed. `VAR=x curl … | bash` sets VAR in curl's
+# environment — the two sides of a pipeline are separate processes, and bash never
+# sees it. So the documented command silently installed main every time, which is
+# the worst possible failure for an escape hatch: the person running it has already
+# had something break, and the rollback they were told to use quietly reinstalls
+# the thing that broke. Found on 19 Aug when a pinned beta install came back
+# reporting the current release.
 #
 # The operator asked for this after a week in which three releases crashed on his
 # Mac. His first instinct was a second install button on the landing page; that
@@ -299,10 +308,14 @@ if [ "$ABS_REF" != "main" ]; then
   info ""
 fi
 if [ -n "$ver" ]; then
-  ok "Agent Babysitter $ver installed."
+  ok "Agent Babysitter $ver installed  ${c_dim}(from $ABS_REF)${c_reset}"
 else
-  ok "Agent Babysitter installed."
+  ok "Agent Babysitter installed  ${c_dim}(from $ABS_REF)${c_reset}"
 fi
+# Naming the ref even when it is `main` is the cheap half of the fix above. A
+# pin that goes missing cannot be detected — nothing here knows what you meant —
+# but someone who typed a tag and reads "from main" knows within a second, instead
+# of testing the wrong build for an hour.
 info ""
 info "  ${c_bold}abs${c_reset}            start a session (walks you through bot setup on first run)"
 info "  ${c_bold}abs help${c_reset}       everything else"

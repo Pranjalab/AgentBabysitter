@@ -22,4 +22,4 @@ __all__ = ["__version__"]
 
 # Mirrors ABS_VERSION in abs.sh / the repo-root VERSION file. absd ships as part
 # of the same product; keep this in lockstep on release.
-__version__ = "3.5.3"
+__version__ = "3.6.0"

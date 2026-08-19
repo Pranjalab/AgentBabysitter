@@ -231,3 +231,66 @@ def test_the_clone_prompt_defaults_to_yes(tmp_path: Path) -> None:
 # `test_a_piped_install_without_a_tty_falls_back_to_the_single_script` above.
 #
 # When the tarball install lands in the next release, THIS is where its test goes.
+
+
+# ---- the pinned-install command, as documented -------------------------------
+#
+# `ABS_REF=v2.5.1 curl … | bash` was the documented way to pin a version, in
+# install.sh's own header and on the releases page, for as long as the feature
+# existed. It has never worked: the two sides of a pipeline are separate
+# processes, so the assignment lands in curl's environment and the bash that does
+# the installing never sees it. Every "pinned" install silently installed main.
+#
+# That is the worst place for a silent failure. The person running a rollback has
+# already had something break, and the escape hatch quietly reinstalled the thing
+# that broke it. Caught on 19 Aug when a pinned beta install reported the current
+# release back.
+
+
+def _shipped_text_files():
+    """Every file a reader could copy the command out of."""
+    import pathlib
+    root = pathlib.Path(REPO)
+    for pattern in ("install.sh", "README.md", "CHANGELOG.md", "docs/*.md"):
+        for p in sorted(root.glob(pattern)):
+            yield p
+
+
+def test_no_shipped_file_documents_the_broken_pin_command():
+    import re
+    broken = re.compile(r"ABS_REF=\S+\s+curl\b")
+    offenders = []
+    for p in _shipped_text_files():
+        for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
+            if broken.search(line):
+                offenders.append(f"{p.name}:{i}: {line.strip()}")
+    assert not offenders, (
+        "ABS_REF must go after the pipe, immediately before bash:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_variable_really_is_lost_on_the_wrong_side_of_the_pipe():
+    """The mechanism, pinned so nobody 'fixes' the docs back.
+
+    Not a style preference — the wrong form genuinely loses the value, and this
+    is the two-line proof.
+    """
+    wrong = subprocess.run(
+        ["bash", "-c", "V=pinned echo x | bash -c 'printf %s \"${V:-LOST}\"'"],
+        capture_output=True, text=True,
+    )
+    right = subprocess.run(
+        ["bash", "-c", "echo x | V=pinned bash -c 'printf %s \"${V:-LOST}\"'"],
+        capture_output=True, text=True,
+    )
+    assert wrong.stdout == "LOST", wrong.stdout
+    assert right.stdout == "pinned", right.stdout
+
+
+def test_the_installer_always_names_the_ref_it_installed():
+    """A lost pin cannot be detected — nothing in the installer knows what you
+    meant. What it can do is say which ref it used, every time, so the mistake is
+    visible in one second instead of an hour."""
+    text = open(os.path.join(REPO, "install.sh")).read()
+    assert '(from $ABS_REF)' in text, "the final line must name the ref"

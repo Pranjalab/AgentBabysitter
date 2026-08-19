@@ -25,6 +25,78 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.6.0] — 2026-08-19 — macOS parity
+
+Everything here was found by putting the Mac bar and the Linux bar side by side,
+and fixed against tests that take the GNU tools away — which is as close to a Mac
+as CI gets, and not the same thing as a Mac. So it shipped as `3.6.0-beta.1` first
+and was run on a real one: no `timeout`, no `gtimeout`, `date -d` unsupported,
+BSD `date -j -f` working. All three fixes confirmed there before this tag existed.
+
+If you use abs on a Mac, this is the release where the status bar starts telling
+you the truth.
+
+- **The status bar was blind on every Mac, on every frame.** Claude Code's render
+  payload is read through `with_timeout 1 cat`, and `with_timeout` only falls back
+  to its own watchdog when GNU `timeout(1)` is missing — which is every stock macOS
+  and no Linux. That fallback backgrounds the command, and bash redirects an
+  asynchronous command's stdin from `/dev/null` unless the command carries an
+  explicit redirection. So `cat` read nothing.
+
+  Two visible symptoms, one cause: no `ctx` (the payload is its only source — there
+  is no CLI that reports context), and reset times in the `/usage` text format,
+  because with no payload the bar fell back to polling `claude -p "/usage"` every
+  few minutes. Slower, and it spends tokens. Naming fd 0 explicitly
+  (`"$@" 0<&0 &`) restores the one behaviour a stand-in for `timeout(1)` must have.
+
+- **`date -d` is GNU-only.** BSD date rejects it and wants `-j -f`; macOS ships
+  only BSD. The weekly limit lost its `(resets on Thu)` entirely, and the five-hour
+  one printed a raw `(resets Aug 19 at 5:49pm)` where Linux said `(resets in 4h 38m)`.
+
+  The stamp that matters is already an epoch — the payload sends one — so that path
+  is arithmetic now and involves no `date` at all. The weekday comes from
+  `date +%z`, the one flag both dialects spell the same way, cross-checked against
+  GNU date across five timezones including a +14 and a −11. A stamp that still
+  cannot be read drops its note on the bar rather than printing itself; `abs usage`
+  has the room and still shows it.
+
+- **The status-bar label follows the Claude account, and rechecks as the session
+  runs.** It is generated, not typed: it names the account this session is spending,
+  so a name from an account you logged out of two days ago is worse than no name.
+
+  This reverses 3.5.3's rule, which left a label with no recorded origin alone in
+  case it had been typed by hand — and so could never fix the case it was written
+  for, because every label written before 3.5.3 has no recorded origin. Only
+  `abs config label <name>` (recorded explicitly now) and `--clear` outrank the
+  account. Re-checked at most once a minute, so `~/.claude.json` is never read per
+  frame.
+
+- **The documented way to install an old version has never worked.** `ABS_REF=v2.5.1
+  curl … | bash` puts the variable in *curl's* environment. The two sides of a
+  pipeline are separate processes, so the bash that does the installing never sees
+  it, and every "pinned" install silently installed the current release instead.
+
+  The wrong form was in `install.sh`'s own header and on the releases page, which
+  means the rollback route has never worked either — and that is the worst possible
+  place for a silent failure, because the person running a rollback has already had
+  something break and the escape hatch quietly reinstalls the thing that broke.
+  Found the only way it could be: a pinned beta install reported the current
+  release back. The variable goes after the pipe:
+
+  ```sh
+  curl -fsSL https://agentbabysitter.com/install.sh | ABS_REF=v2.5.1 bash
+  ```
+
+  A lost pin cannot be detected — nothing in the installer knows what you meant —
+  so the last line now names the ref every time, pinned or not: `Agent Babysitter
+  3.6.0 installed (from main)`. A mistake is visible in a second instead of an hour.
+
+- **A pre-release will not fall back to main for its v3 source.** `abs src install`
+  tries the version's tag and then main, because a version can ship before anyone
+  tags it. For a beta that trade is wrong: it would pair a `3.6.0-beta.1` `abs.sh`
+  with main's `3.5.3` daemon and hand the tester a build nobody wrote. It now fails
+  and says which tag is missing.
+
 ## [3.5.3] — 2026-08-19 — two things that broke when you changed account
 
 - **The status bar kept the old account's name.** The seed was guarded by a

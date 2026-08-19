@@ -6,10 +6,15 @@ bytes, on every Claude Code render. So the command **sanitises** rather than
 validates, and refuses input that sanitises to nothing instead of silently
 storing something the bar will ignore.
 
-`auto` reads `.oauthAccount.displayName` from `~/.claude.json` — exactly that one
-field, never the file, which also holds account tokens. It resolves ONCE and
-stores the result, so no render pays for the read and the label can't change
-under the operator later.
+The label is **generated, not typed**: it names the Claude account this session is
+spending, so it follows that account and re-checks as the session runs. It reads
+`.oauthAccount.displayName` from `~/.claude.json` — exactly that one field, never
+the file, which also holds account tokens — gated on mtime and throttled to once a
+minute, because that file is large and rewritten constantly.
+
+Two operator choices outrank it, and only two: `label <name>` pins one, `--clear`
+returns the plain default. Anything else, including a label written by a version
+that recorded nothing about its origin, gets corrected.
 
 Rendering is covered in `test_statusline_dots.py`; this is the setting.
 """
@@ -319,17 +324,20 @@ def test_a_label_you_chose_is_never_overwritten_by_an_account_switch(home, tmp_p
     assert stored(home) == "Work"
 
 
-def test_a_label_from_an_older_abs_is_left_alone(home, tmp_path):
-    """Upgrading must not rename anybody's bar. A label with no recorded source
-    predates this change, and there is no way to tell whether it was typed or
-    seeded — so it is treated as typed, which is the safe direction."""
+def test_a_label_from_an_older_abs_is_corrected(home, tmp_path):
+    """The reversal, decided 19 Aug. The previous rule left an unattributed label
+    alone in case it had been typed — and so never fixed the one case it was
+    written for, because every label written before the source was recorded is
+    unattributed. The bar is system-generated: an unattributed name is stale, not
+    sacred. Only an explicit `label <name>` is protected now.
+    """
     fake = tmp_path / "fakehome"
     _claude_json(fake, displayName="Pranfold")
     import json as _json
     rc = home / "profiles" / PROFILE / "rc.json"
     d = _json.loads(rc.read_text()); d["bar_label"] = "Legacy"; rc.write_text(_json.dumps(d))
     seed(home, fake_home=fake)
-    assert stored(home) == "Legacy"
+    assert stored(home) == "Pranfold"
 
 
 def test_clearing_survives_an_account_switch(home, tmp_path):
@@ -365,3 +373,137 @@ def test_an_unreadable_account_file_does_not_reset_the_label(home, tmp_path):
     (fake / ".claude.json").unlink()
     seed(home, fake_home=fake)
     assert stored(home) == "Pran"
+
+
+def test_the_exact_state_that_was_reported_broken(home, tmp_path):
+    """The operator's own profile, byte for byte: a label seeded by 3.1.0 with no
+    recorded source, against an account he has since changed. It survived two
+    attempted fixes — the first could not see it, the second saw it and chose to
+    leave it — and this is the assertion that would have caught both.
+    """
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pranfold")
+    import json as _json
+    rc = home / "profiles" / PROFILE / "rc.json"
+    d = _json.loads(rc.read_text())
+    d["bar_label"] = "Pran"; d["bar_label_seeded"] = True      # exactly the 3.1.0 shape
+    rc.write_text(_json.dumps(d))
+
+    out = seed(home, fake_home=fake)
+    assert out.returncode == 0, out.stderr
+    assert stored(home) == "Pranfold"
+    assert out.stdout == "Pranfold"
+
+
+def test_the_3_5_3_shape_also_follows(home, tmp_path):
+    """A label carrying the old `bar_label_auto` marker: still not manual, so it
+    follows, and the dead key is cleaned up on the way past."""
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pranfold")
+    import json as _json
+    rc = home / "profiles" / PROFILE / "rc.json"
+    d = _json.loads(rc.read_text())
+    d["bar_label"] = "Pran"; d["bar_label_auto"] = "Pran"; d["bar_label_seeded"] = True
+    rc.write_text(_json.dumps(d))
+    seed(home, fake_home=fake)
+    assert stored(home) == "Pranfold"
+    assert "bar_label_auto" not in _json.loads(rc.read_text())
+
+
+def test_only_an_explicit_label_is_protected(home, tmp_path):
+    """`config label <name>` records that a human chose it. Nothing else does."""
+    import json as _json
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    run(home, "config", "label", "Work")
+    rc = home / "profiles" / PROFILE / "rc.json"
+    assert _json.loads(rc.read_text()).get("bar_label_manual") is True
+    _claude_json(fake, displayName="SomeoneElse")
+    seed(home, fake_home=fake)
+    assert stored(home) == "Work"
+
+
+def test_label_auto_hands_the_name_back_to_the_account(home, tmp_path):
+    import json as _json
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pranfold")
+    run(home, "config", "label", "Work")
+    run(home, "config", "label", "auto", fake_home=fake)
+    assert stored(home) == "Pranfold"
+    assert _json.loads((home / "profiles" / PROFILE / "rc.json").read_text()).get(
+        "bar_label_manual") is None
+    _claude_json(fake, displayName="Third")
+    seed(home, fake_home=fake)
+    assert stored(home) == "Third"
+
+
+# ---- live, not only at launch ------------------------------------------------
+#
+# "All of the other information is also useful for the user as live as possible so
+# that it can understand which account and which bot" — 19 Aug. Seeding at launch
+# left a mid-session /login showing the wrong account until the next restart.
+
+
+def statusline(home, fake_home=None):
+    env = dict(os.environ, ABS_HOME=str(home))
+    for k in ("TELEGRAM_STATE_DIR", "ABS_SESSION_PROFILE"):
+        env.pop(k, None)
+    if fake_home is not None:
+        env["HOME"] = str(fake_home)
+    return subprocess.run(
+        ["bash", ABS_SH, "--profile", PROFILE, "statusline"],
+        capture_output=True, text=True, env=env, input="",
+    )
+
+
+def test_the_bar_picks_up_a_mid_session_account_change(home, tmp_path):
+    import json as _json
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    seed(home, fake_home=fake)
+    assert "Pran" in statusline(home, fake_home=fake).stdout
+
+    # Logged into another account without restarting. Age the throttle out.
+    _claude_json(fake, displayName="Pranfold")
+    rc = home / "profiles" / PROFILE / "rc.json"
+    d = _json.loads(rc.read_text()); d["bar_label_at"] = 0; rc.write_text(_json.dumps(d))
+
+    assert "Pranfold" in statusline(home, fake_home=fake).stdout
+    assert stored(home) == "Pranfold"
+
+
+def test_the_bar_does_not_re_read_the_account_file_every_frame(home, tmp_path):
+    """~/.claude.json is large and holds tokens. Within the TTL the render path
+    must not touch it — the guard that keeps this from being a per-frame cost.
+    Corrupting the file is the test: if it were read, the label would go."""
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    seed(home, fake_home=fake)
+    (fake / ".claude.json").write_text("{ this is not json")   # would fail if read
+    out = statusline(home, fake_home=fake)
+    assert "Pran" in out.stdout
+    assert stored(home) == "Pran"
+
+
+def test_a_pinned_label_is_not_touched_by_the_render_path(home, tmp_path):
+    import json as _json
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    run(home, "config", "label", "Work")
+    _claude_json(fake, displayName="Pranfold")
+    rc = home / "profiles" / PROFILE / "rc.json"
+    d = _json.loads(rc.read_text()); d["bar_label_at"] = 0; rc.write_text(_json.dumps(d))
+    assert "Work" in statusline(home, fake_home=fake).stdout
+    assert stored(home) == "Work"
+
+
+def test_a_cleared_label_is_not_touched_by_the_render_path(home, tmp_path):
+    import json as _json
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    seed(home, fake_home=fake)
+    run(home, "config", "label", "--clear")
+    rc = home / "profiles" / PROFILE / "rc.json"
+    d = _json.loads(rc.read_text()); d["bar_label_at"] = 0; rc.write_text(_json.dumps(d))
+    statusline(home, fake_home=fake)
+    assert stored(home) is None
