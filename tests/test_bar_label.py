@@ -287,3 +287,81 @@ def test_seeding_does_not_leak_the_rest_of_claude_json(home, tmp_path):
     out = seed(home, fake_home=fake)
     assert "SECRET" not in out.stdout + out.stderr
     assert json.dumps(json.loads((home / "profiles" / PROFILE / "rc.json").read_text())).count("SECRET") == 0
+
+
+# ---- following a change of Claude account ------------------------------------
+#
+# Reported after logging into a second account: the bar kept the old name
+# forever. The seed was guarded by a boolean — "have we done this?" — and a
+# boolean cannot answer the question that matters, which is "is this label still
+# yours?". The account it came FROM is stored now, so a mismatch is visible.
+
+
+def test_the_label_follows_a_change_of_account(home, tmp_path):
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    seed(home, fake_home=fake)
+    assert stored(home) == "Pran"
+
+    _claude_json(fake, displayName="Pranfold")          # logged into another account
+    seed(home, fake_home=fake)
+    assert stored(home) == "Pranfold", "the bar kept the old account's name"
+
+
+def test_a_label_you_chose_is_never_overwritten_by_an_account_switch(home, tmp_path):
+    """The other half, and the one that would be worse to get wrong: replacing a
+    deliberate choice with a name read out of a file."""
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    run(home, "config", "label", "Work")
+    _claude_json(fake, displayName="SomeoneElse")
+    seed(home, fake_home=fake)
+    assert stored(home) == "Work"
+
+
+def test_a_label_from_an_older_abs_is_left_alone(home, tmp_path):
+    """Upgrading must not rename anybody's bar. A label with no recorded source
+    predates this change, and there is no way to tell whether it was typed or
+    seeded — so it is treated as typed, which is the safe direction."""
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pranfold")
+    import json as _json
+    rc = home / "profiles" / PROFILE / "rc.json"
+    d = _json.loads(rc.read_text()); d["bar_label"] = "Legacy"; rc.write_text(_json.dumps(d))
+    seed(home, fake_home=fake)
+    assert stored(home) == "Legacy"
+
+
+def test_clearing_survives_an_account_switch(home, tmp_path):
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    seed(home, fake_home=fake)
+    run(home, "config", "label", "--clear")
+    _claude_json(fake, displayName="Pranfold")
+    seed(home, fake_home=fake)
+    assert stored(home) is None
+    assert seed(home, fake_home=fake).stdout == "abs"
+
+
+def test_label_auto_re_arms_following_the_account(home, tmp_path):
+    """After setting one by hand, `label auto` has to put you back on the
+    follow-the-account path — otherwise it is a one-shot with no way back."""
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    run(home, "config", "label", "Work")
+    run(home, "config", "label", "auto", fake_home=fake)
+    assert stored(home) == "Pran"
+    _claude_json(fake, displayName="Pranfold")
+    seed(home, fake_home=fake)
+    assert stored(home) == "Pranfold"
+
+
+def test_an_unreadable_account_file_does_not_reset_the_label(home, tmp_path):
+    """Mid-login ~/.claude.json can be briefly absent. Reverting to "abs" because
+    of a transient read failure would look like the tool forgetting who you are."""
+    fake = tmp_path / "fakehome"
+    _claude_json(fake, displayName="Pran")
+    seed(home, fake_home=fake)
+    (fake / ".claude.json").unlink()
+    seed(home, fake_home=fake)
+    assert stored(home) == "Pran"

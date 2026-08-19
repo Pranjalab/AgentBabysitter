@@ -25,6 +25,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.5.3] — 2026-08-19 — two things that broke when you changed account
+
+- **The status bar kept the old account's name.** The seed was guarded by a
+  boolean — "have we done this?" — and a boolean cannot answer the question that
+  matters, which is "is this label still yours?". The account it was taken from is
+  recorded now, so a mismatch is visible and the bar follows a login.
+
+  A label you set by hand is never overwritten, one written by an older version is
+  left alone (there is no way to tell typed from seeded, and typed is the safe
+  guess), and `--clear` stays cleared across a switch.
+
+- **Only a model literally called "Fable" was ever read.** `/usage` names its
+  per-model line after the model — `Current week (Opus)`, `Current week (Fable)` —
+  and the parser grepped for the one word. Every other model reported nothing,
+  which renders identically to never having used it. It now reads whichever
+  per-model line is present and labels the figure with that model's actual name.
+
 ## [3.5.2] — 2026-08-19 — the voice threshold was set too high
 
 - **150 words, not 300.** 300 was a guess and it was wrong by a lot: a four-item
