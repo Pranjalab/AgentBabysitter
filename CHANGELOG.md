@@ -33,7 +33,7 @@ the GNU tools away — which is as close to a Mac as CI gets, and not the same t
 as a Mac. It wants a real one before it is called a release. Install it pinned:
 
 ```sh
-ABS_REF=v3.6.0-beta.1 curl -fsSL https://agentbabysitter.com/install.sh | bash
+curl -fsSL https://agentbabysitter.com/install.sh | ABS_REF=v3.6.0-beta.1 bash
 ```
 
 A pinned install says so on the way in and does not update itself past that tag;

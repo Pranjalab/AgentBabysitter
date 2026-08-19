@@ -235,12 +235,29 @@ def test_the_payload_reaches_the_cache_without_coreutils(mac, no_timeout_path):
 
 
 def test_both_platforms_render_the_same_bar(mac, no_timeout_path, tmp_path):
-    """The point of the whole fix: one payload, two environments, one string."""
+    """The point of the whole fix: one payload, two environments, one string.
+
+    The countdown itself is masked before comparing, and its shape is asserted
+    separately instead. Not to paper over a difference — both paths run the same
+    arithmetic now — but because the two renders are two processes a few
+    milliseconds apart, and the clock moves between them. A reset five hours out
+    reads "in 5h 0m" if both land in the same second and "in 4h 59m" if the second
+    one slips past it, so even the hour is not stable. Left strict this failed
+    about one run in six, and a test that fails one time in six is a test you learn
+    to ignore.
+    """
+    import re
     home, fake = mac
     payload = _payload()
     with_gnu = _bar(home, fake, stdin=payload)
     without = _bar(home, fake, path=no_timeout_path, stdin=payload)
-    assert with_gnu == without, f"\nlinux: {with_gnu}\nmacos: {without}"
+
+    countdown = re.compile(r"in \d+h \d+m")
+    # Masking cannot hide a missing countdown: each side must have one first.
+    assert countdown.search(with_gnu), with_gnu
+    assert countdown.search(without), without
+    mask = lambda s: countdown.sub("in Xh Ym", s)
+    assert mask(with_gnu) == mask(without), f"\nlinux: {with_gnu}\nmacos: {without}"
 
 
 def test_an_unreadable_reset_drops_the_note_rather_than_printing_a_stamp(mac):
