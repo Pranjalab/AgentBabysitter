@@ -109,7 +109,17 @@ def box(tmp_path):
                 if log.exists() and log.read_text().strip():
                     break
                 time.sleep(0.1)
-            time.sleep(1.2)  # and a beat more, so a *second* line can show up
+            # And a beat more, so a *second* line can show up. Polled rather than
+            # slept flat, because a split lead produces one line per note and a
+            # fixed 1.2s would read a three-note answer as a one-note answer.
+            settle = time.time() + 3.0
+            seen = -1
+            while time.time() < settle:
+                time.sleep(0.4)
+                now = len(log.read_text().splitlines()) if log.exists() else 0
+                if now == seen and now > 0:
+                    break
+                seen = now
             if not log.exists():
                 return []
             return [l for l in log.read_text().splitlines() if l.strip()]
@@ -117,13 +127,18 @@ def box(tmp_path):
         def tags(self, wait=8.0):
             return [l.split(" ", 1)[0] for l in self.order(wait)]
 
+        def notes(self, wait=8.0):
+            """Every note, in order. A lead longer than one bubble is now SPLIT
+            across several, so anything asserting on "what was said" has to look at
+            all of them — reading only the first is the bug this feature had."""
+            return [l.split(" ", 1)[1] for l in self.order(wait)
+                    if l.startswith("VOICE ")]
+
         def spoken(self, wait=8.0):
-            """What TTS was asked to say. Read by tag, never by position: a long
-            answer is now preceded by a "🔊 Recording a voice note…" text line, and
-            index-based assertions silently started reading that instead."""
-            out = [l.split(" ", 1)[1] for l in self.order(wait)
-                   if l.startswith("VOICE ")]
-            return out[0] if out else ""
+            """What TTS was asked to say, across every note. Read by tag, never by
+            position: a long answer is preceded by a "🔊 Recording a voice note…"
+            text line, and index-based assertions silently read that instead."""
+            return " ".join(self.notes(wait))
 
         def texts(self, wait=8.0):
             return [json.loads(l.split(" ", 1)[1]) for l in self.order(wait)
@@ -444,10 +459,35 @@ def test_a_long_message_with_a_link_still_goes_text_first(box):
     assert box.order(wait=2.0) == []
 
 
-def test_a_long_message_with_code_still_goes_text_first(box):
+def test_code_BELOW_the_prose_no_longer_blocks_voice_first(box):
+    """A deliberate change of behaviour, and the reason is the prose boundary.
+
+    This used to go text-first, because the guard looked at the first PARAGRAPH and
+    a fence on the very next line was inside it. Now the prose section stops AT the
+    fence, so what would be spoken is the explanation and nothing else — and the
+    text, with the code in it, still follows immediately behind. Making the operator
+    read an explanation because there is a command underneath it was never the point
+    of that guard; a link he has to TAP is (see the test above).
+    """
     run = _hook(box, _reply(text=LONG + "\n```sh\nabs status\n```"))
+    assert run.returncode == 2, run.stderr
+    spoken = box.spoken()
+    assert "merge is clean" in spoken
+    assert "abs status" not in spoken
+
+
+def test_a_link_INSIDE_the_prose_still_goes_text_first(box):
+    """The guard that still earns its place: a URL in the part that would be spoken
+    means the message is to be read."""
+    run = _hook(box, _reply(text=LONG + " see https://example.com/r\n\n- detail\n"))
     assert run.returncode == 0
     assert box.order(wait=2.0) == []
+
+
+def test_a_link_below_the_prose_does_not_block_voice_first(box):
+    run = _hook(box, _reply(text=LONG + "\n\n- https://example.com/report\n"))
+    assert run.returncode == 2, run.stderr
+    assert "merge is clean" in box.spoken()
 
 # ---- the spoken half is the summary the writer wrote -------------------------
 #
@@ -472,7 +512,7 @@ DETAIL = (
 TWO_HALVES = SUMMARY + "\n\n" + DETAIL
 
 
-def test_the_spoken_half_is_the_first_paragraph(box):
+def test_the_spoken_half_is_the_prose_section(box):
     _hook(box, _reply(text=TWO_HALVES))
     spoken = box.spoken()
     assert "PyPI" in spoken, spoken          # the questions are IN the audio
@@ -480,21 +520,107 @@ def test_the_spoken_half_is_the_first_paragraph(box):
     assert "| channel |" not in spoken       # and neither is the table
 
 
+# ---- and the prose section is ALL of it, not just its first paragraph --------
+#
+# Reported from the phone: "in the voice you are speaking only the first paragraph
+# not the whole text section." It was doing exactly that — `awk 'BEGIN{RS=""}
+# NR==1{print; exit}'` takes paragraph one and stops — so every explanation that ran
+# to two paragraphs arrived cut off at the first blank line. The prompt asks the
+# writer for a self-contained summary; the code then enforced it as a hard cut.
+#
+# The boundary is now STRUCTURE, not the first blank line: prose runs until the
+# first bullet, table row, heading, code fence or rule.
+
+THREE_PARAGRAPHS = (
+    "Voice-first is fixed and the security review is still running, which is the "
+    "headline and it fits in one paragraph.\n\n"
+    "The part that surprised me is in the second paragraph: the installer had been "
+    "pinning the wrong ref for two years and nobody noticed because the command "
+    "looked right.\n\n"
+    "And the decision I need from you lives in the third: do we publish to PyPI, or "
+    "drop the line from the README entirely?\n\n"
+    "- 853 tests green\n- 80 commits ahead of main\n"
+)
+
+
+def test_every_prose_paragraph_is_spoken_not_only_the_first(box):
+    _hook(box, _reply(text=THREE_PARAGRAPHS))
+    spoken = box.spoken()
+    assert "headline" in spoken, spoken            # first paragraph
+    assert "surprised me" in spoken, spoken        # second — this was being dropped
+    assert "PyPI" in spoken, spoken                # third — and so was the question
+    assert "853 tests" not in spoken               # the list still is not spoken
+
+
+def test_a_bold_label_line_that_only_introduces_a_list_is_not_spoken(box):
+    """`**Site — read back after propagation:**` says nothing on its own; it is a
+    heading in everything but syntax. A bold label WITH prose after it is a
+    sentence and stays."""
+    text = (
+        "The repo and the site both moved and I read the pages back afterwards "
+        "rather than trusting the deploy to have worked.\n\n"
+        "**Repo:** main and v3-daemon are both at dba96e7 with nothing unpushed.\n\n"
+        "**Site — read back after propagation:**\n"
+        "- docs.html has 58 command rows\n"
+    )
+    _hook(box, _reply(text=text))
+    spoken = box.spoken()
+    assert "nothing unpushed" in spoken, spoken      # the labelled sentence is prose
+    assert "read back after propagation" not in spoken, spoken
+    assert "58 command rows" not in spoken, spoken
+
+
+def test_a_heading_ends_the_prose_section(box):
+    text = ("A paragraph of real prose that runs comfortably past the eighty "
+            "characters the preamble check wants.\n\n## Detail\n\nnot this\n")
+    _hook(box, _reply(text=text))
+    assert "not this" not in box.spoken()
+
+
+def test_a_message_that_opens_with_a_list_falls_back_to_the_whole_thing(box):
+    """No prose section at all. Speaking nothing would be the same half-a-message
+    failure in its worst shape — silence."""
+    text = ("- first item that is here\n- second item that is here\n\n"
+            "And the prose comes afterwards in this one, at length, past eighty.\n")
+    _hook(box, _reply(text=text))
+    assert "prose comes afterwards" in box.spoken()
+
+
 def test_the_text_still_carries_both_halves(box):
     _hook(box, _reply(text=TWO_HALVES))
     assert box.delivered()["text"] == TWO_HALVES
 
 
-def test_a_summary_longer_than_the_budget_is_cut_at_a_sentence(box):
-    """The rail exists so a runaway paragraph cannot hold the text behind minutes of
-    synthesis. It is deliberately generous — 4000 characters, about 90 seconds — and
-    what it appends states a fact rather than sending him off to read."""
-    long_summary = ("This sentence is here to fill the spoken budget. " * 100)
-    _hook(box, _reply(text=long_summary + "\n\ndetail here"))
-    spoken = box.spoken()
-    assert 3800 < len(spoken) < 4200, len(spoken)
-    assert spoken.count("one note can carry") == 1, spoken  # markers not stacked
-    assert "rest is in the text" not in spoken   # never defer to the text
+def test_a_prose_section_longer_than_one_note_is_split_across_notes(box):
+    """"If one voice note cannot have everything then multiple voice notes can be
+    split and sent as whole textual information because users want to hear it also."
+
+    4000 characters is about 90 seconds, which is as much as one bubble should be —
+    but it is a rail on the BUBBLE, not on the answer. Past it the lead is split and
+    spoken in order, rather than cut with an apology.
+    """
+    long_summary = ("This sentence is here to fill the spoken budget. " * 150)  # ~7200
+    _hook(box, _reply(text=long_summary + "\n\n- detail here"))
+    notes = box.notes()
+    assert len(notes) >= 2, notes
+    assert all(len(n) <= 4200 for n in notes), [len(n) for n in notes]
+    joined = " ".join(notes)
+    assert len(joined) > 7000, len(joined)       # the whole thing was said
+    assert "one note can carry" not in joined    # nothing was apologised for
+    assert "rest is in the text" not in joined   # never defer to the text
+
+
+def test_the_notes_are_spoken_before_the_text_not_around_it(box):
+    """All the audio, then the words. Interleaving would put the written half in the
+    middle of the answer, which is worse than either order."""
+    long_summary = ("This sentence is here to fill the spoken budget. " * 150)
+    _hook(box, _reply(text=long_summary + "\n\n- detail here"))
+    tags = box.tags()
+    assert tags[-1] == "TEXT", tags
+    assert tags.count("VOICE") >= 2, tags
+    # the announcement is a TEXT line and comes first; no TEXT between the notes
+    body = tags[1:]
+    assert body[-1] == "TEXT" and set(body[:-1]) == {"VOICE"}, tags
 
 
 def test_a_one_line_preamble_does_not_become_the_whole_report(box):
@@ -531,7 +657,7 @@ def test_a_long_answer_is_spoken_in_full_rather_than_trimmed(box):
     _hook(box, _reply(text=answer + "\n\ndetail half"))
     spoken = box.spoken()
     assert len(spoken) > 1400, len(spoken)
-    assert "one note can carry" not in spoken
+    assert "notes can carry" not in spoken
 
 
 def test_a_long_note_is_announced_before_the_silence(box):

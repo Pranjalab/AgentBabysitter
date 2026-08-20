@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.6.0"
+readonly ABS_VERSION="3.6.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -1312,8 +1312,8 @@ for a reply as well, or they get it twice. The tool may come back BLOCKED with a
 note saying it was delivered as audio plus text — that is success. Do not resend.
 
 This is worth knowing when you write: a substantial answer WILL be heard, so the
-first paragraph has to stand on its own as described below. A brief one will only
-be read, so it can be terse without losing anything.
+prose section has to stand on its own as described below. A brief one will only be
+read, so it can be terse without losing anything.
 
 THE VOICE NOTE IS THE ANSWER. THE TEXT IS THE RECORD.
 
@@ -1322,8 +1322,10 @@ the voice note is the primary way you talk to him. So the note is not a summary,
 preview or a lead — it is the whole thing, and he should never have to open the text
 to understand what happened or what you are asking.
 
-What is spoken is your FIRST PARAGRAPH, so write that paragraph as the complete
-answer:
+What is spoken is your PROSE SECTION — every paragraph from the top of the message
+until the first bullet, table row, heading or code fence. It can be one paragraph or
+five; the boundary is the first piece of STRUCTURE, not the first blank line. So
+write everything above that boundary as the complete answer:
 
 - The outcome, what it means, what you verified, what surprised you.
 - The decision, ASKED as a real question, with the options and your recommendation.
@@ -1332,9 +1334,9 @@ answer:
 - Plain spoken sentences: no bullets, no tables, no code, no file paths, no URLs.
   Say "the release doc" rather than reciting a path — the path belongs in the text.
 - NEVER say "the rest is in the text", "see below", "details follow" or any other
-  deferral. If it matters, say it out loud. Length is not a constraint: a note can
-  run a minute or more when the answer needs it. Brevity is a virtue only when the
-  answer is genuinely short.
+  deferral. If it matters, say it out loud. Length is not a constraint: a prose
+  section too long for one note is split across several, in order, automatically.
+  Brevity is a virtue only when the answer is genuinely short.
 
 Then, AFTER a blank line, write the record. It repeats the substance — it does not
 continue from where the voice stopped — and adds what audio cannot carry: exact
@@ -1577,13 +1579,14 @@ WHAT MAKES A REPORT WORTH HEARING
 - What you did NOT do, if you left something out on purpose.
 
 HOW TO WRITE IT
-- One message, two halves, split by a blank line. First a spoken-summary paragraph
-  that stands alone; then the detail. If voice is on, the first half is what they
-  hear (see the reply-mode note above) — but write it that way regardless, because
-  the first paragraph is also all most people read on a phone.
-- The summary half: plain sentences only. No tables, no headings, no code fences,
-  no bullet lists. Those are unreadable aloud and they are what makes a phone
-  message a wall.
+- One message, two halves. First the prose — one paragraph or several, whatever the
+  answer needs — then the detail, starting at the first bullet, table, heading or
+  code fence. If voice is on, that prose half is exactly what they hear (see the
+  reply-mode note above) — but write it that way regardless, because it is also all
+  most people read on a phone.
+- The prose half: plain sentences only, in as many paragraphs as it takes. No
+  tables, no headings, no code fences, no bullet lists — the first of those ENDS the
+  half, and they are what makes a phone message a wall.
 - The detail half: whatever the job needs. Exact commands, paths, numbers, a small
   table if a table is genuinely the clearest form. Keep the whole message under
   about 3000 characters; past that, send what matters and say where the rest is.
@@ -2310,11 +2313,13 @@ _voice_long_enough() {
   [ "$words" -ge "$(_voice_min_words)" ]
 }
 
-# How much of a long message voice-first reads out before the text follows.
+# How much of the spoken half fits in ONE note. Not a ceiling on the answer any more:
+# past it the lead is split across notes (see _voice_chunk), because a prose section
+# is the answer and the operator should hear all of it.
 #
-# 4000 characters is around 90 seconds of speech, and it is a safety rail rather than
-# a style: past it the note runs to minutes AND the text waits behind it, since
-# synthesis costs roughly a second per twenty characters.
+# 4000 characters is around 90 seconds of speech. It is a rail on the size of a single
+# bubble rather than a style — synthesis costs roughly a second per twenty characters,
+# and the text waits behind the first note.
 #
 # It was 400, then 700, then 1800, and every one of those was me deciding for the
 # operator how much he wants to hear. He does not want that decided — "the voicenote
@@ -2342,42 +2347,112 @@ _voice_too_long_only() {
   return 0
 }
 
-# The opening of a message, cut at a sentence end, for voice-first to speak while
-# the full text follows behind it.
+# Where the prose stops and the reference material starts.
 #
-# Trimming to the last `.`/`!`/`?` inside the budget is what keeps it from ending
-# mid-thought; falling back to the last space keeps a wall of text without
-# punctuation from being cut mid-word. The closing line exists so the operator is
-# never left wondering whether they missed something.
+# The operator's rule, in his words: "the whole text section in multiple paragraphs
+# should be converted into speech ... the table and bullet points can come downwards,
+# which the voice can let it go." So the boundary is not the first blank line — it is
+# the first line that is STRUCTURE rather than sentences.
+#
+# Bullets, numbered items, table rows, headings, code fences and rules all read
+# terribly aloud and all mark, in practice, the point where a report stops explaining
+# and starts listing. Everything above the first of them is the answer.
+#
+# Deliberately anchored at line start and requiring a space after the marker, so
+# `**Repo:**` (emphasis) and an em-dash aside are prose, while `- item` is not.
+_voice_prose() {
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*```/                                        { exit }
+    /^[[:space:]]*\|/                                          { exit }
+    /^[[:space:]]*#+[[:space:]]/                               { exit }
+    /^[[:space:]]*[-*+][[:space:]]/                            { exit }
+    /^[[:space:]]*[0-9]+[.)][[:space:]]/                       { exit }
+    /^[[:space:]]*(---+|===+|___+)[[:space:]]*$/               { exit }
+    # A line that is WHOLLY a bold span is a heading in everything but syntax —
+    # `**Site — read back after propagation:**` introduces a list, it does not say
+    # anything. A bold LABEL with prose after it (`**Repo:** both at dba96e7`) is a
+    # sentence and stays, which is why this anchors at both ends.
+    /^[[:space:]]*\*\*[^*]+\*\*[.:;,!?]?[[:space:]]*$/          { exit }
+    { print }
+  '
+}
+
+# The raw slice of a message that voice-first speaks, BEFORE any prep.
+#
+# Shared with the code/link guard in the gate so the two cannot disagree about what
+# is being inspected — they were separate copies of the same awk line for a while,
+# and a change to one silently left the other checking a different span of text.
+_voice_lead_src() {
+  local prose prepped
+  prose="$(_voice_prose "$1")"
+  prepped="$(_voice_prep "$prose")"
+  # A prose section that is only a greeting or a one-line preamble is not a summary,
+  # so fall back to the whole message — this is also what catches a reply that opens
+  # straight into a list, where the prose section is empty.
+  if [ "${#prepped}" -lt 80 ]; then printf '%s' "$1"; else printf '%s' "$prose"; fi
+}
+
+# The spoken half of a message: every leading prose paragraph, prepped for speech.
+#
+# It used to be the FIRST paragraph and nothing else — `awk 'BEGIN{RS=""} NR==1'` —
+# which is how a four-paragraph report came out of the phone as one paragraph and
+# stopped. The prompt asks the writer for a self-contained summary; the code then
+# enforced that as a hard cut, so any explanation that ran past one paragraph was
+# thrown away before synthesis ever started.
+#
+# Length is no longer a reason to truncate: past VOICE_LEAD_MAX the lead is SPLIT
+# across notes by _voice_chunk rather than apologised for. The hard ceiling here is
+# only a rail against pathological input spawning notes forever.
+readonly VOICE_LEAD_HARD_MAX="${ABS_VOICE_LEAD_HARD_CHARS:-12000}"
 _voice_lead() {
-  local first prepped cut
-  # The FIRST PARAGRAPH first, because the prompt asks for a self-contained summary
-  # there and a paragraph break is the one boundary the writer controls on purpose.
-  # Sentence-cutting a wall of text can only ever produce an excerpt; a paragraph
-  # the author meant as a summary is a summary.
-  first="$(printf '%s' "$1" | awk 'BEGIN{RS=""} NR==1{print; exit}')"
-  prepped="$(_voice_prep "${first:-$1}")"
-
-  # A first paragraph that is only a greeting or a one-line preamble is not a
-  # summary, so fall back to the whole message and cut that instead.
-  if [ "${#prepped}" -lt 80 ]; then
-    prepped="$(_voice_prep "$1")"
+  local prepped
+  prepped="$(_voice_prep "$(_voice_lead_src "$1")")"
+  if [ "${#prepped}" -gt "$VOICE_LEAD_HARD_MAX" ]; then
+    prepped="${prepped:0:$VOICE_LEAD_HARD_MAX}"
   fi
+  printf '%s' "$prepped"
+}
 
-  if [ "${#prepped}" -le "$VOICE_LEAD_MAX" ]; then
-    printf '%s' "$prepped"
-    return 0
-  fi
-  cut="$(printf '%s' "$prepped" | cut -c1-"$VOICE_LEAD_MAX")"
-  case "$cut" in
-    *[.!?]*) cut="$(printf '%s' "$cut" | sed -E 's/([.!?])[^.!?]*$/\1/')" ;;
-    *\ *)    cut="${cut% *}" ;;
-  esac
-  # Reaching here means the rail bit, which the prompt is written to avoid. Saying
-  # nothing would end the note mid-thought; the old wording ("the rest is in the
-  # text") turned every long answer into a teaser, which is exactly what the operator
-  # objected to. So: factual, and rare.
-  printf '%s That is as much as one note can carry; the written message continues from there.' "$cut"
+# How many notes one reply may be split into. A rail, not a target: three notes is
+# already four-plus minutes of audio, and a report that long is a report that went
+# wrong somewhere earlier.
+readonly VOICE_MAX_NOTES="${ABS_VOICE_MAX_NOTES:-3}"
+
+# Split an already-prepped, single-line lead into notes, one per line.
+#
+# One per line is safe precisely because _voice_prep ends in `tr '\n' ' '` — the
+# thing it hands back can never itself contain a newline.
+#
+# Cutting at the last `.`/`!`/`?` inside the budget is what keeps a note from ending
+# mid-thought; the last space is the fallback for a wall of text with no punctuation,
+# which would otherwise be cut mid-word.
+_voice_chunk() {
+  local rest="$1" n=0 cut
+  while [ -n "$rest" ]; do
+    n=$((n + 1))
+    if [ "${#rest}" -le "$VOICE_LEAD_MAX" ]; then
+      printf '%s\n' "$rest"
+      return 0
+    fi
+    cut="${rest:0:$VOICE_LEAD_MAX}"
+    if [ "$n" -ge "$VOICE_MAX_NOTES" ]; then
+      # The rail bit. Say so plainly rather than stopping mid-sentence — but note
+      # this is the ONLY place a note defers to the text, and it takes three full
+      # notes of speech to get here.
+      cut="$(printf '%s' "$cut" | sed -E 's/[^ ]*$//')"
+      printf '%s That is as much as the notes can carry; the written message has the rest.\n' "${cut% }"
+      return 0
+    fi
+    case "$cut" in
+      *[.!?]*) cut="$(printf '%s' "$cut" | sed -E 's/([.!?])[^.!?]*$/\1/')" ;;
+      *\ *)    cut="${cut% *}" ;;
+    esac
+    # Belt and braces: a cut that collapsed to nothing would loop forever.
+    [ -n "$cut" ] || cut="${rest:0:$VOICE_LEAD_MAX}"
+    printf '%s\n' "$cut"
+    rest="${rest:${#cut}}"
+    rest="${rest# }"
+  done
 }
 
 # Is this message safe to deliver as voice INSTEAD of text? Only asked in `voice`
@@ -2676,8 +2751,28 @@ cmd_voice_then_text() {
   # long the operator sits looking at nothing. He waited five minutes on a Mac
   # running the slow engine and then got text with no explanation. Two minutes is
   # the most a written answer should ever wait for audio.
-  local spoke=0
-  _voice_mirror "$lead" "$((VOICE_LEAD_MAX + 200))" "$VOICE_FIRST_TIMEOUT" && spoke=1
+  #
+  # One note if it fits, several in order if it does not. The prose section is the
+  # answer, so its length is not a reason to drop the end of it — and a note that
+  # trails off into "the rest is in the text" is the exact thing the operator asked
+  # never to receive.
+  local spoke=0 note
+  local -a notes=()
+  while IFS= read -r note; do
+    [ -n "$note" ] && notes+=("$note")
+  done < <(_voice_chunk "$lead")
+  [ "${#notes[@]}" -gt 0 ] || notes=("$lead")
+  for note in "${notes[@]}"; do
+    # </dev/null so nothing inside synthesis can eat what is left of this loop.
+    if _voice_mirror "$note" "$((VOICE_LEAD_MAX + 200))" "$VOICE_FIRST_TIMEOUT" </dev/null; then
+      spoke=1
+    else
+      # A failed note means the engine is wedged or the lock is contended, and the
+      # ones behind it will fail the same way. Stop and let the text go: the words
+      # matter more than the remaining audio.
+      break
+    fi
+  done
 
   { [ -n "$chat" ] && [ "$chat" != null ]; } || return 0
   [ -n "${BOT_TOKEN:-}" ] || load_token 2>/dev/null || return 0
@@ -2772,10 +2867,11 @@ _reply_voice_first_gate() {
   # declines here does not get spoken there either.
   _voice_long_enough "$text" || return 0
 
-  # What gets SPOKEN is the summary half — the first paragraph — whatever the total
-  # length. Speaking the whole message was wrong twice over: past the ceiling it gave
-  # up and went text-first, and under the ceiling it read the tables, paths and
-  # commands out loud. Both land as "you sent me half a message", from opposite ends.
+  # What gets SPOKEN is the prose half — every leading paragraph, up to the first
+  # bullet, table row or heading — whatever the total length. Speaking the WHOLE
+  # message reads tables, paths and commands out loud; speaking only the FIRST
+  # paragraph drops the rest of the explanation. Both land as "you sent me half a
+  # message", from opposite ends, and this project has now shipped each of them.
   local lead first
   lead="$(_voice_lead "$text")"
   [ -n "$lead" ] || return 0
@@ -2787,7 +2883,7 @@ _reply_voice_first_gate() {
   # order is the right one. (Mode `voice` keeps the stricter whole-message test in
   # `_voice_speakable`: there the note replaces the text, so a swallowed link is
   # a link the operator never receives.)
-  first="$(printf '%s' "$text" | awk 'BEGIN{RS=""} NR==1{print; exit}')"
+  first="$(_voice_lead_src "$text")"
   printf '%s' "$first" | grep -q '```' && return 0
   printf '%s' "$first" | grep -qE 'https?://' && return 0
 

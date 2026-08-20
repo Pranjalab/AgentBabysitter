@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import time
 
@@ -272,3 +274,46 @@ def test_an_unreadable_reset_drops_the_note_rather_than_printing_a_stamp(mac):
     bar = _bar(home, fake, stdin="")
     assert "5:49pm" not in bar, bar
     assert "5H 10%" in bar and "Week 8%" in bar
+
+
+# ---- awk has dialects too, and the Mac ships the least capable one -----------
+#
+# `_voice_prose` is the only awk PROGRAM in abs.sh (everything else is a one-liner),
+# and it decides what gets spoken. macOS ships BWK awk, not gawk: interval
+# expressions (`#{1,6}`) are the classic thing it treats as literal braces rather
+# than a repeat count, which would silently stop matching headings and leave a table
+# being read out loud on the Mac only.
+#
+# Checked as a property of the source rather than by running it, because the failure
+# is a silent mismatch and there is no BSD awk on CI to reproduce it against.
+
+def _prose_program():
+    src = open(ABS_SH).read()
+    body = re.search(r"^_voice_prose\(\) \{.*?^\}$", src, re.S | re.M)
+    assert body, "_voice_prose not found"
+    prog = re.search(r"awk '(.*?)'", body.group(0), re.S)
+    assert prog, "no awk program inside _voice_prose"
+    return prog.group(1)
+
+
+def test_the_prose_program_uses_no_interval_expressions():
+    prog = _prose_program()
+    assert not re.search(r"\{[0-9]+(,[0-9]*)?\}", prog), prog
+
+
+def test_the_prose_program_is_accepted_by_every_awk_on_this_box(tmp_path):
+    """gawk, mawk and busybox awk disagree about enough that "it parses here" is not
+    the same as "it parses". Whichever of them this machine has, all must take it."""
+    prog = _prose_program()
+    found = 0
+    for awk in ("awk", "gawk", "mawk", "original-awk", "busybox"):
+        exe = shutil.which(awk)
+        if not exe:
+            continue
+        cmd = [exe, "awk", prog] if awk == "busybox" else [exe, prog]
+        run = subprocess.run(cmd, input="hello\n- bullet\n",
+                             capture_output=True, text=True)
+        assert run.returncode == 0, f"{awk}: {run.stderr}"
+        assert run.stdout == "hello\n", f"{awk}: {run.stdout!r}"
+        found += 1
+    assert found, "no awk on this machine at all"

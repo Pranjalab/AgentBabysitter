@@ -25,6 +25,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.6.1] — 2026-08-20 — the whole prose section, not the first paragraph
+
+Reported from the phone: "in the voice you are speaking only the first paragraph
+not the whole text section."
+
+### Fixed
+
+- **Voice notes read every prose paragraph, not just the first.** `_voice_lead`
+  selected the spoken half with `awk 'BEGIN{RS=""} NR==1{print; exit}'` — paragraph
+  one, stop. Any explanation that ran to two paragraphs was truncated at the first
+  blank line before synthesis started, so the outcome was heard and the reasoning
+  and the question were not. The only escape hatch was a first paragraph under 80
+  characters, which is why short replies sounded whole and long ones sounded cut off.
+
+  The boundary is now **structure, not the first blank line**: prose runs from the
+  top of the message until the first bullet, numbered item, table row, heading, code
+  fence, rule, or bold-only label line. A bold label with a sentence after it
+  (`**Repo:** both at dba96e7`) is prose and is spoken; a bold label that only
+  introduces a list is not.
+
+  The same `awk` line existed a second time in the voice-first gate, checking the
+  wrong span of text for code and links. Both callers now share `_voice_lead_src`,
+  so they cannot disagree again.
+
+### Added
+
+- **A prose section longer than one note is split across several notes**, in order,
+  before the text goes out — up to three, tunable with `ABS_VOICE_MAX_NOTES`. It used
+  to be cut at 4,000 characters with a closing apology. 4,000 is still the size of one
+  bubble (`ABS_VOICE_LEAD_CHARS`), but it is no longer a ceiling on the answer.
+
+### Changed
+
+- **A code block *below* the prose no longer forces text-first.** It used to, because
+  the guard looked at the first paragraph and a fence on the next line was inside it.
+  A link *inside* the prose still does — that is one you have to tap.
+- The injected reply prompt now describes the prose section rather than "your FIRST
+  PARAGRAPH", so what the model is asked to write matches what the hook speaks.
+- `_voice_prose` avoids awk interval expressions (`#{1,6}`), which BSD awk on macOS
+  treats as literal braces. Guarded by a test, alongside one that runs the program
+  through every awk on the box.
+
 ## [3.6.0] — 2026-08-19 — macOS parity
 
 Everything here was found by putting the Mac bar and the Linux bar side by side,
