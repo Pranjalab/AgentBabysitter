@@ -278,8 +278,9 @@ def test_an_unreadable_reset_drops_the_note_rather_than_printing_a_stamp(mac):
 
 # ---- awk has dialects too, and the Mac ships the least capable one -----------
 #
-# `_voice_prose` is the only awk PROGRAM in abs.sh (everything else is a one-liner),
-# and it decides what gets spoken. macOS ships BWK awk, not gawk: interval
+# `_voice_boundary` is the only awk PROGRAM in abs.sh (everything else is a
+# one-liner), and it decides what gets spoken — `_voice_prose` and `_voice_detail`
+# are slicers on the line number it prints. macOS ships BWK awk, not gawk: interval
 # expressions (`#{1,6}`) are the classic thing it treats as literal braces rather
 # than a repeat count, which would silently stop matching headings and leave a table
 # being read out loud on the Mac only.
@@ -289,10 +290,10 @@ def test_an_unreadable_reset_drops_the_note_rather_than_printing_a_stamp(mac):
 
 def _prose_program():
     src = open(ABS_SH).read()
-    body = re.search(r"^_voice_prose\(\) \{.*?^\}$", src, re.S | re.M)
-    assert body, "_voice_prose not found"
+    body = re.search(r"^_voice_boundary\(\) \{.*?^\}$", src, re.S | re.M)
+    assert body, "_voice_boundary not found"
     prog = re.search(r"awk '(.*?)'", body.group(0), re.S)
-    assert prog, "no awk program inside _voice_prose"
+    assert prog, "no awk program inside _voice_boundary"
     return prog.group(1)
 
 
@@ -311,9 +312,11 @@ def test_the_prose_program_is_accepted_by_every_awk_on_this_box(tmp_path):
         if not exe:
             continue
         cmd = [exe, "awk", prog] if awk == "busybox" else [exe, prog]
-        run = subprocess.run(cmd, input="hello\n- bullet\n",
+        # The program prints the line NUMBER of the boundary: the bullet is line 2.
+        # (A bare "hello" would itself count as a label above a list.)
+        run = subprocess.run(cmd, input="hello there, this is prose.\n- bullet\n",
                              capture_output=True, text=True)
         assert run.returncode == 0, f"{awk}: {run.stderr}"
-        assert run.stdout == "hello\n", f"{awk}: {run.stdout!r}"
+        assert run.stdout == "2\n", f"{awk}: {run.stdout!r}"
         found += 1
     assert found, "no awk on this machine at all"

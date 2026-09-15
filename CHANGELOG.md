@@ -25,6 +25,52 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.6.2] — 2026-09-16 — the text behind the voice note, and a shape for updates
+
+Two reports from the phone, both about the same conversation: "sometimes only the
+voice note is coming and the text is not coming", and the note stopping mid-update
+to say "that is as much as a voice note can carry".
+
+### Fixed
+
+- **Long replies no longer lose their text.** Voice-first sends the words itself,
+  after the note, and appended the usage footer without checking Telegram's 4096-
+  character ceiling. A 3994-character reply plus the footer went over; Telegram
+  rejected it, both retries failed, and the only trace was a line in the profile
+  log. Every text send from abs now goes through `tg_send_long`, which splits at a
+  paragraph (then a line, then a space) and sends the pieces in order. `abs send`
+  used to trim to 4096 with a warning; it splits too.
+- **Nothing is ever trimmed from a voice note.** "That is as much as one note can
+  carry" was still reachable through the PostToolUse mirror — the path a reply takes
+  when its summary contains a link — because that path kept a 1200-character
+  ceiling after voice-first stopped using it. "As much as the notes can carry" was
+  the three-note rail. Both phrases are gone: every path splits across notes, the
+  rail sits at ten notes where no report reaches it, and it says nothing when it
+  does. In the operator's words, length "is a recommendation, not a limitation".
+- **A bare label line above a list is not read aloud.** "Detail" on a line of its
+  own, with no `#`, was spoken along with the first line of what followed. A short
+  line with no sentence punctuation that sits directly above structure now ends the
+  prose section; a one-line paragraph like "Nothing outstanding" does not.
+- **`pyproject.toml` said 3.5.3.** It is now kept at the same version as `VERSION`,
+  `abs.sh` and `absd`.
+
+### Changed
+
+- **A reply arrives as three messages, not two.** The voice note; then the text of
+  exactly what it said, so you can read along; then the detail card as its own
+  message, so its headings sit at the top of a bubble. The usage footer rides on
+  the last one. A reply with no detail half is still one message.
+- **An opening heading is spoken as the title.** The boundary between prose and
+  detail used to be the first heading; now it is the first heading *after* the
+  opening line, so an update can begin with `# What this is about`.
+- **The prompt asks for three message types and nothing else.** An ACK (one line,
+  the moment a task lands), a FORK (mid-task, only when the plan changes), and an
+  UPDATE: a heading, five spoken beats — outcome, evidence, issue, decision, left —
+  and a card with seven fixed headings: Objective, Done (each item with how it was
+  verified), Issues, Decisions, You, Me, Not doing. "Done" may only hold things
+  that ran; "Not doing" is where an unrequested idea goes instead of into the code.
+  The "Left: · … " closing line is replaced by the You/Me sections.
+
 ## [3.6.1] — 2026-08-20 — the whole prose section, not the first paragraph
 
 Reported from the phone: "in the voice you are speaking only the first paragraph

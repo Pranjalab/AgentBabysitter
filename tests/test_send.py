@@ -141,14 +141,26 @@ def test_a_rejection_from_telegram_is_reported_not_swallowed(box):
     assert "chat not found" in combined, combined
 
 
-def test_an_over_long_message_is_truncated_and_says_so(box):
-    """Telegram's ceiling is 4096. Sending nothing would be the worst outcome, so it
-    trims and warns rather than failing."""
+def test_an_over_long_message_is_split_not_truncated(box):
+    """Telegram's ceiling is 4096. This used to send the first 4096 and drop the
+    rest with a warning — and `abs send` is the model's fallback when the bridge is
+    down, which is exactly when a report is long. Now it goes as several messages,
+    split at a paragraph where there is one, and nothing is dropped."""
+    paras = "\n\n".join("Paragraph %d " % i + "word " * 60 for i in range(20))  # ~6300
+    run = box.run(paras)
+    assert run.returncode == 0, run.stderr
+    msgs = box.sent()
+    assert len(msgs) >= 2, len(msgs)
+    assert all(len(m["text"]) <= 4096 for m in msgs)
+    assert "".join(m["text"] for m in msgs).count("Paragraph") == 20
+
+
+def test_an_unbreakable_wall_is_still_delivered_whole(box):
     run = box.run("x" * 5000)
     assert run.returncode == 0, run.stderr
-    (msg,) = box.sent()
-    assert len(msg["text"]) == 4096
-    assert "4096" in run.stdout + run.stderr
+    msgs = box.sent()
+    assert sum(len(m["text"]) for m in msgs) == 5000
+    assert all(len(m["text"]) <= 4096 for m in msgs)
 
 
 def test_an_unpaired_profile_says_what_to_do(box):

@@ -586,9 +586,157 @@ def test_a_message_that_opens_with_a_list_falls_back_to_the_whole_thing(box):
     assert "prose comes afterwards" in box.spoken()
 
 
-def test_the_text_still_carries_both_halves(box):
+def test_the_text_arrives_as_transcript_then_card(box):
+    """"A text message of what you are speaking should arrive separately and a
+    detailed message should show point-wise what needs to be done."
+
+    Two halves, two bubbles: first the prose that was just spoken, so he can read
+    along, then the card on its own so its headings sit at the top of a message.
+    Nothing is lost between them — together they are the whole reply.
+    """
     _hook(box, _reply(text=TWO_HALVES))
-    assert box.delivered()["text"] == TWO_HALVES
+    texts = [t["text"] for t in box.texts()]
+    body = [t for t in texts if not t.startswith("🔊")]
+    assert len(body) == 2, texts
+    assert body[0].strip() == SUMMARY
+    assert body[1].strip() == DETAIL
+
+
+def test_a_single_half_reply_is_one_message(box):
+    _hook(box, _reply(text=SUMMARY))
+    body = [t["text"] for t in box.texts() if not t["text"].startswith("🔊")]
+    assert len(body) == 1, body
+
+
+def test_the_footer_goes_on_the_card_not_the_transcript(box):
+    _warm_usage_cache(box)
+    _hook(box, _reply(text=TWO_HALVES))
+    body = [t["text"] for t in box.texts() if not t["text"].startswith("🔊")]
+    assert "📊" not in body[0]
+    assert body[1].rstrip().splitlines()[-1].startswith("📊 ")
+
+
+# ---- the update opens with a heading, and that heading is spoken --------------
+#
+# "I would love a heading also." The update format opens with `# <heading>`; the
+# boundary used to be the FIRST heading, which would have left an empty prose
+# section — and an empty prose section falls back to speaking the whole message,
+# card and all. So the opening heading is a title, and the NEXT heading ends the
+# prose.
+
+TITLED = (
+    "# Voice fixes shipped\n\n"
+    + SUMMARY + "\n\n"
+    "## 🎯 Objective\n- stop losing long replies\n"
+    "## ✅ Done\n- ran 33 tests, all green\n"
+)
+
+
+def test_an_opening_heading_is_spoken_as_the_title(box):
+    _hook(box, _reply(text=TITLED))
+    spoken = box.spoken()
+    assert spoken.startswith("Voice fixes shipped"), spoken
+    assert "PyPI" in spoken
+    assert "Objective" not in spoken
+    assert "33 tests" not in spoken
+
+
+def test_the_title_stays_with_the_transcript_and_the_card_starts_at_its_heading(box):
+    _hook(box, _reply(text=TITLED))
+    body = [t["text"] for t in box.texts() if not t["text"].startswith("🔊")]
+    assert body[0].startswith("# Voice fixes shipped")
+    assert body[1].startswith("## 🎯 Objective")
+
+
+# ---- a label line without its `#` is still a boundary ------------------------
+#
+# "Detail" on a line of its own, followed by a list, was read aloud along with
+# the first line of the list, because nothing in it looked like structure. A
+# short line with no sentence punctuation, sitting right above structure, is a
+# heading in everything but syntax.
+
+def test_a_bare_label_line_above_a_list_is_not_spoken(box):
+    text = SUMMARY + "\n\nDetail\n\nGitHub (origin)\n- main = b51b6aa\n- tag v3.6.0"
+    _hook(box, _reply(text=text))
+    spoken = box.spoken()
+    assert "PyPI" in spoken
+    assert "Detail" not in spoken, spoken
+    assert "GitHub" not in spoken, spoken
+
+
+def test_a_one_line_paragraph_is_still_prose(box):
+    """"Nothing outstanding" is a sentence without a full stop, not a heading —
+    the label rule only fires when structure follows."""
+    text = SUMMARY + "\n\nNothing outstanding"
+    _hook(box, _reply(text=text))
+    assert "Nothing outstanding" in box.spoken()
+
+
+# ---- Telegram's 4096-character ceiling never loses a message -----------------
+#
+# Reproduced from the log: a 3994-character reply plus the usage footer went over
+# 4096, Telegram rejected it, both retries failed, and the operator got the voice
+# note with no text behind it. The words are split at paragraphs and sent as
+# several messages instead.
+
+def test_a_reply_over_telegrams_limit_arrives_in_pieces(box):
+    para = "This paragraph is here to push the message past the ceiling. " * 6 + "\n\n"
+    long_prose = para * 12                              # ~4600 chars of prose
+    _hook(box, _reply(text=long_prose + "- one bullet"))
+    body = [t["text"] for t in box.texts(wait=12) if not t["text"].startswith("🔊")]
+    assert len(body) >= 3, [len(b) for b in body]       # transcript split + card
+    assert all(len(b) <= 4096 for b in body), [len(b) for b in body]
+    joined = "\n\n".join(body)
+    assert joined.count("push the message") == long_prose.count("push the message")
+
+
+def test_the_footer_rides_on_the_last_piece_only(box):
+    _warm_usage_cache(box)
+    para = "This paragraph is here to push the message past the ceiling. " * 6 + "\n\n"
+    _hook(box, _reply(text=para * 12 + "- one bullet"))
+    body = [t["text"] for t in box.texts(wait=12) if not t["text"].startswith("🔊")]
+    assert sum("📊" in b for b in body) == 1, body
+    assert "📊" in body[-1]
+
+
+# ---- nothing is ever trimmed, on any path --------------------------------------
+#
+# "That is as much as one note can carry" survived the voice-first fix through the
+# PostToolUse mirror, which a summary with a link in it still takes; "as much as
+# the notes can carry" was the three-note rail. Both are gone: "the voice note can
+# be big if it is required ... it is a recommendation, not a limitation."
+
+def test_the_mirror_path_never_trims_either(box):
+    long_with_link = ("See https://example.com/x for the page. " +
+                      "The rest of this is a long explanation. " * 60)   # ~2500
+    _hook(box, _reply(text=long_with_link))           # gate declines: link in prose
+    # the plugin sends the text itself; PostToolUse then speaks it
+    payload = json.dumps({"hook_event_name": "PostToolUse", "tool_name": REPLY_TOOL,
+                          "session_id": "s-1", "tool_input": _reply(text=long_with_link),
+                          "tool_response": {"ok": True}})
+    env = dict(os.environ, ABS_HOME=str(box.abs_home), ABS_VOICE_CMD=box.tts_cmd,
+               PATH=box.path, ABS_VOICE_MIN_WORDS="1")
+    env.pop("TELEGRAM_STATE_DIR", None)
+    subprocess.run(["bash", ABS_SH, "--profile", PROFILE, "__silent-hook"],
+                   input=payload, capture_output=True, text=True, env=env)
+    spoken = box.spoken()
+    assert "long explanation" in spoken, spoken
+    assert "note can carry" not in spoken
+    assert len(spoken) > 2000, len(spoken)
+
+
+def test_a_very_long_answer_is_all_spoken_with_no_apology(box):
+    # Numbered, so no two notes are identical: the mirror skips a note whose text
+    # matches the one before it, and a test built from one repeated sentence
+    # would trip that rather than the rail.
+    huge = "".join(f"Sentence number {i} has to be heard in full. " for i in range(320))
+    _hook(box, _reply(text=huge + "\n\n- detail"))
+    notes = box.notes(wait=12)
+    assert len(notes) >= 4, len(notes)
+    joined = " ".join(notes)
+    assert "notes can carry" not in joined
+    assert "note can carry" not in joined
+    assert joined.count("heard in full") == 320, joined.count("heard in full")
 
 
 def test_a_prose_section_longer_than_one_note_is_split_across_notes(box):
@@ -618,9 +766,12 @@ def test_the_notes_are_spoken_before_the_text_not_around_it(box):
     tags = box.tags()
     assert tags[-1] == "TEXT", tags
     assert tags.count("VOICE") >= 2, tags
-    # the announcement is a TEXT line and comes first; no TEXT between the notes
+    # the announcement is a TEXT line and comes first; then every note, then the
+    # words — which may be more than one message now (transcript, then card)
     body = tags[1:]
-    assert body[-1] == "TEXT" and set(body[:-1]) == {"VOICE"}, tags
+    first_text = body.index("TEXT")
+    assert set(body[:first_text]) == {"VOICE"}, tags
+    assert set(body[first_text:]) == {"TEXT"}, tags
 
 
 def test_a_one_line_preamble_does_not_become_the_whole_report(box):
