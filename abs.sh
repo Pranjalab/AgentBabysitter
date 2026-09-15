@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.6.1"
+readonly ABS_VERSION="3.6.2"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -534,6 +534,43 @@ tg_send() {
     return 1
   fi
   TG_ERR=""
+}
+
+# Telegram's ceiling is 4096 characters per message, and it REJECTS a longer one
+# rather than trimming it. tg_send reports that as an error; what it must never
+# be is the reason a report is lost — which is exactly what happened: a 3994-char
+# reply plus the usage footer went over, the send failed twice, and the operator
+# got the voice note with no text behind it and nothing to say why.
+#
+# So anything that could be long goes through here. Splitting prefers a blank
+# line, then a newline, then a space, so a piece ends at a paragraph rather than
+# mid-word; the pieces are sent in order and the first failure stops the rest,
+# because a message with its middle missing is worse than one that stops.
+#
+# 4000, not 4096: Telegram counts UTF-16 code units and bash counts characters,
+# so an emoji-heavy message is longer than ${#text} says. The margin covers it.
+readonly TG_TEXT_MAX="${ABS_TG_TEXT_MAX:-4000}"
+tg_send_long() {
+  local chat="$1" text="$2" piece rest cut
+  rest="$text"
+  while [ -n "$rest" ]; do
+    if [ "${#rest}" -le "$TG_TEXT_MAX" ]; then
+      tg_send "$chat" "$rest" || return 1
+      return 0
+    fi
+    piece="${rest:0:$TG_TEXT_MAX}"
+    cut="${piece%$'\n\n'*}"
+    if [ "${#cut}" -lt 200 ] || [ "$cut" = "$piece" ]; then cut="${piece%$'\n'*}"; fi
+    if [ "${#cut}" -lt 200 ] || [ "$cut" = "$piece" ]; then cut="${piece% *}"; fi
+    if [ "${#cut}" -lt 200 ] || [ "$cut" = "$piece" ]; then cut="$piece"; fi
+    tg_send "$chat" "$cut" || return 1
+    rest="${rest:${#cut}}"
+    # Drop the separator the cut landed on, so the next piece does not open blank.
+    while [ -n "$rest" ] && { [ "${rest:0:1}" = $'\n' ] || [ "${rest:0:1}" = ' ' ]; }; do
+      rest="${rest:1}"
+    done
+  done
+  return 0
 }
 
 # --- profiles ----------------------------------------------------------------
@@ -1322,29 +1359,22 @@ the voice note is the primary way you talk to him. So the note is not a summary,
 preview or a lead — it is the whole thing, and he should never have to open the text
 to understand what happened or what you are asking.
 
-What is spoken is your PROSE SECTION — every paragraph from the top of the message
-until the first bullet, table row, heading or code fence. It can be one paragraph or
-five; the boundary is the first piece of STRUCTURE, not the first blank line. So
-write everything above that boundary as the complete answer:
+What is spoken is your PROSE SECTION: the opening heading and every paragraph after
+it, up to the first bullet, table row, second heading or code fence. It can be one
+paragraph or five; the boundary is the first piece of STRUCTURE, not the first blank
+line. The text of that section is then sent as its own message, so he can read
+along while he listens; the detail card follows as a separate message. Write the
+prose as the complete answer (the shape is under MESSAGE TYPES):
 
-- The outcome, what it means, what you verified, what surprised you.
-- The decision, ASKED as a real question, with the options and your recommendation.
-  A question further down is a question he will never hear.
-- Everything he needs to reply intelligently without reading a word.
 - Plain spoken sentences: no bullets, no tables, no code, no file paths, no URLs.
-  Say "the release doc" rather than reciting a path — the path belongs in the text.
+  Say "the release doc" rather than reciting a path — the path belongs in the card.
+- The decision, ASKED as a real question, with the options and your recommendation.
+  A question that only lives in the card is a question he will never hear.
 - NEVER say "the rest is in the text", "see below", "details follow" or any other
-  deferral. If it matters, say it out loud. Length is not a constraint: a prose
-  section too long for one note is split across several, in order, automatically.
-  Brevity is a virtue only when the answer is genuinely short.
-
-Then, AFTER a blank line, write the record. It repeats the substance — it does not
-continue from where the voice stopped — and adds what audio cannot carry: exact
-commands, paths, numbers, tables, code blocks, links. Someone reading only the text
-should get everything the listener got, plus the things they need to copy. Structure
-it so it can be skimmed: short headings, blank lines between blocks, one idea per
-line, fenced code for anything to be run, a table only where a table is genuinely
-clearest. Several messages are fine if one would be a wall.
+  deferral. If it matters, say it out loud. Length is a recommendation, not a limit:
+  a prose section too long for one note is split across several, in order,
+  automatically, and nothing is ever trimmed. Three minutes is fine when the task
+  needs it; a minute is the target when it does not.
 
 You do not have to announce the voice note. ABS sends a "🔊 Recording a voice
 note…" line itself when synthesis will take a moment, so saying it too would double
@@ -1578,36 +1608,67 @@ WHAT MAKES A REPORT WORTH HEARING
   recommendation. Recommend, do not present a menu and wait.
 - What you did NOT do, if you left something out on purpose.
 
-HOW TO WRITE IT
-- One message, two halves. First the prose — one paragraph or several, whatever the
-  answer needs — then the detail, starting at the first bullet, table, heading or
-  code fence. If voice is on, that prose half is exactly what they hear (see the
-  reply-mode note above) — but write it that way regardless, because it is also all
-  most people read on a phone.
-- The prose half: plain sentences only, in as many paragraphs as it takes. No
-  tables, no headings, no code fences, no bullet lists — the first of those ENDS the
-  half, and they are what makes a phone message a wall.
-- The detail half: whatever the job needs. Exact commands, paths, numbers, a small
-  table if a table is genuinely the clearest form. Keep the whole message under
-  about 3000 characters; past that, send what matters and say where the rest is.
-- Lead with the outcome, not the process. Then the decision, then the detail.
-- Nothing that must be copied — a command, a path, a URL — belongs only in the
-  summary half. Repeat it in the detail, because audio cannot be copied.
+MESSAGE TYPES — THERE ARE THREE, AND NOTHING ELSE
+The operator asked for this shape in so many words: a one-line acknowledgement the
+moment a task lands, a separate spoken update with its own transcript, and a
+point-wise card with fixed headings "so the eye knows where to look".
 
-HOW A REPORT ENDS
-The last two lines of a task-done report, in this order and nothing after them.
-Not on replies, not on mid-task notes — those end when they end.
+1. ACK — text only, one line, one emoji, sent the moment a task arrives:
+       🛠 On it — <what you are starting, in one line>
+   or, when one thing genuinely decides the work:
+       🤔 <the one question>
+   Never a paragraph, never a voice note. If nothing is unclear, do not ask.
 
-SECOND-TO-LAST: WHAT IS LEFT. This is the line they scroll to the bottom for, so
-it is the one thing that must never be missing. Three or four items at most,
-shortest form that is still true, each with an owner. Anything blocked on a
-decision of theirs goes first. If nothing is outstanding, say exactly that —
-"nothing outstanding" is an answer, a missing list is an oversight.
+2. FORK — mid-task, only when something changes the plan or needs their call.
+   Two to four sentences, ending in a question with your recommendation. Routine
+   progress is never a message.
 
-    Left: · merge and push (yours) · web installer (mine, ~20m) · restricted (parked)
+3. UPDATE — the report, when you finish or hand control back. One reply, in this
+   order; ABS splits it into the note, the transcript and the card:
 
-LAST: the numbers. DO NOT WRITE THEM. ABS appends this line to every reply it
-sends, because relying on you to remember meant they were usually missing:
+   # <Heading — what this update is about, five words or fewer>
+
+   Then the spoken part, plain paragraphs, five beats, each one or two sentences:
+     Outcome   — what is true now that was not before.
+     Evidence  — what you ran and what it showed; just as plainly, what you did
+                 NOT verify.
+     Issue     — what surprised you or changed the plan, or the word "nothing".
+     Decision  — the one thing they must decide, asked as a question, with the
+                 options and your pick.
+     Left      — who owns what, in one breath.
+
+   Then the card, fixed headings in this order, one line per bullet. An empty
+   section says "none" — a missing section is how things get forgotten:
+
+   ## 🎯 Objective
+   - one line: what the task was
+   ## ✅ Done
+   - each item WITH how it was verified ("ran X, saw Y"); nothing that did not run
+   ## ⚠️ Issues
+   - what broke or surprised, or none
+   ## 🤔 Decisions
+   - each choice: the options, the recommended one marked
+   ## 👤 You
+   - what only they can do, each tagged [terminal] or [phone]; blocked-on-you first
+   ## 🤖 Me
+   - what you do next, with a rough time
+   ## 🅿️ Not doing
+   - anything you noticed but were not asked for — visible, parked, never built
+
+   The card repeats the substance of the note — it does not continue from where the
+   voice stopped — and adds what audio cannot carry: exact commands, paths, numbers,
+   a small table only where a table is genuinely clearest. Long is fine; a message
+   over Telegram's limit is split at paragraphs automatically.
+
+STAYING ON THE TASK
+The structure is also the guard against drift. "Done" may only hold things that
+ran. "Not doing" is where a good idea goes when nobody asked for it. The ACK states
+the objective in one line before you touch anything — that is when scope creep is
+cheapest to catch, and if what you are about to build is not in that line, stop
+and ask.
+
+THE NUMBERS: DO NOT WRITE THEM. ABS appends this line to the last message of every
+reply it sends, because relying on you to remember meant they were usually missing:
 
     📊 Fable 0% · Week 43% (resets on Tue) · 5H 62% (resets in 1h 10m) · ctx 68%
 
@@ -2360,21 +2421,71 @@ _voice_too_long_only() {
 #
 # Deliberately anchored at line start and requiring a space after the marker, so
 # `**Repo:**` (emphasis) and an em-dash aside are prose, while `- item` is not.
-_voice_prose() {
+#
+# Two refinements, both from the phone:
+#
+#   * A heading on the FIRST line is a title, not a boundary. The update format
+#     opens with one (`# Voice fixes shipped`), and a boundary there would leave
+#     an empty prose section — which falls back to speaking the whole message,
+#     tables and all. So the opening heading is spoken, and the NEXT heading ends
+#     the prose.
+#   * A short label line with no sentence punctuation, sitting right above
+#     structure, is a heading that forgot its `#`. "Detail" on a line of its own
+#     was being read aloud, followed by "Commit deeb0a8, abs-monitor, three point
+#     seven point oh" — the exact thing the boundary exists to keep out of the
+#     audio. The label is only treated as one when structure follows it, so a
+#     one-line paragraph like "Nothing outstanding" stays prose.
+#
+# The awk prints the LINE NUMBER of the boundary (0 when there is none), and the
+# two slicers below cut on it — one program, so the prose and the detail can never
+# disagree about where one stops and the other starts.
+_voice_boundary() {
   printf '%s\n' "$1" | awk '
-    /^[[:space:]]*```/                                        { exit }
-    /^[[:space:]]*\|/                                          { exit }
-    /^[[:space:]]*#+[[:space:]]/                               { exit }
-    /^[[:space:]]*[-*+][[:space:]]/                            { exit }
-    /^[[:space:]]*[0-9]+[.)][[:space:]]/                       { exit }
-    /^[[:space:]]*(---+|===+|___+)[[:space:]]*$/               { exit }
-    # A line that is WHOLLY a bold span is a heading in everything but syntax —
-    # `**Site — read back after propagation:**` introduces a list, it does not say
-    # anything. A bold LABEL with prose after it (`**Repo:** both at dba96e7`) is a
-    # sentence and stays, which is why this anchors at both ends.
-    /^[[:space:]]*\*\*[^*]+\*\*[.:;,!?]?[[:space:]]*$/          { exit }
-    { print }
-  '
+    function structure(s) {
+      return (s ~ /^[[:space:]]*```/ || s ~ /^[[:space:]]*\|/ \
+           || s ~ /^[[:space:]]*#+[[:space:]]/ \
+           || s ~ /^[[:space:]]*[-*+][[:space:]]/ \
+           || s ~ /^[[:space:]]*[0-9]+[.)][[:space:]]/ \
+           || s ~ /^[[:space:]]*(---+|===+|___+)[[:space:]]*$/ \
+           || s ~ /^[[:space:]]*\*\*[^*]+\*\*[.:;,!?]?[[:space:]]*$/)
+    }
+    function label(s,   t) {
+      t = s; sub(/:[[:space:]]*$/, "", t)
+      return (length(t) <= 40 && t !~ /[.!?,;:]/ && t ~ /[[:alpha:]]/ \
+           && t !~ /^[[:space:]]*$/ && !structure(t))
+    }
+    BEGIN { seen = 0; cand = 0; prevblank = 1 }
+    {
+      blank = ($0 ~ /^[[:space:]]*$/)
+      if (!seen) {
+        if (blank) { next }
+        seen = 1
+        # A title on the opening line is prose; only a LATER heading is a boundary.
+        if ($0 ~ /^[[:space:]]*#+[[:space:]]/) { prevblank = 0; next }
+      }
+      if (structure($0)) { print (cand ? cand : NR); exit }
+      if (blank) { prevblank = 1; next }
+      # A label only counts if structure follows it, so remember it and let the
+      # next line decide. A run of labels keeps the first; any sentence clears it.
+      if (label($0) && (prevblank || cand)) { if (!cand) cand = NR } else { cand = 0 }
+      prevblank = 0
+    }
+  ' 2>/dev/null | head -n1
+}
+
+# The prose half: everything above the boundary. Whole message when there is none.
+_voice_prose() {
+  local n; n="$(_voice_boundary "$1")"
+  case "$n" in ''|0) printf '%s\n' "$1"; return 0 ;; esac
+  printf '%s\n' "$1" | awk -v n="$n" 'NR < n'
+}
+
+# The detail half: the boundary line and everything after it. Empty when the
+# message is prose all the way down.
+_voice_detail() {
+  local n; n="$(_voice_boundary "$1")"
+  case "$n" in ''|0) return 0 ;; esac
+  printf '%s\n' "$1" | awk -v n="$n" 'NR >= n'
 }
 
 # The raw slice of a message that voice-first speaks, BEFORE any prep.
@@ -2402,8 +2513,10 @@ _voice_lead_src() {
 #
 # Length is no longer a reason to truncate: past VOICE_LEAD_MAX the lead is SPLIT
 # across notes by _voice_chunk rather than apologised for. The hard ceiling here is
-# only a rail against pathological input spawning notes forever.
-readonly VOICE_LEAD_HARD_MAX="${ABS_VOICE_LEAD_HARD_CHARS:-12000}"
+# only a rail against pathological input spawning notes forever — 40,000 characters
+# is a quarter of an hour of speech, which no real report reaches. It matches
+# VOICE_MAX_NOTES × VOICE_LEAD_MAX so the chunker never has to cut anything.
+readonly VOICE_LEAD_HARD_MAX="${ABS_VOICE_LEAD_HARD_CHARS:-40000}"
 _voice_lead() {
   local prepped
   prepped="$(_voice_prep "$(_voice_lead_src "$1")")"
@@ -2413,10 +2526,12 @@ _voice_lead() {
   printf '%s' "$prepped"
 }
 
-# How many notes one reply may be split into. A rail, not a target: three notes is
-# already four-plus minutes of audio, and a report that long is a report that went
-# wrong somewhere earlier.
-readonly VOICE_MAX_NOTES="${ABS_VOICE_MAX_NOTES:-3}"
+# How many notes one reply may be split into. A rail against runaway synthesis,
+# not a length policy. It was three, and the third note ended with "that is as much
+# as the notes can carry" — the operator's answer was that a note "can be three
+# minutes if it is required ... it is a recommendation, not a limitation". So the
+# rail sits where no honest report reaches it, and nothing is ever said about it.
+readonly VOICE_MAX_NOTES="${ABS_VOICE_MAX_NOTES:-10}"
 
 # Split an already-prepped, single-line lead into notes, one per line.
 #
@@ -2436,11 +2551,10 @@ _voice_chunk() {
     fi
     cut="${rest:0:$VOICE_LEAD_MAX}"
     if [ "$n" -ge "$VOICE_MAX_NOTES" ]; then
-      # The rail bit. Say so plainly rather than stopping mid-sentence — but note
-      # this is the ONLY place a note defers to the text, and it takes three full
-      # notes of speech to get here.
-      cut="$(printf '%s' "$cut" | sed -E 's/[^ ]*$//')"
-      printf '%s That is as much as the notes can carry; the written message has the rest.\n' "${cut% }"
+      # The rail bit — only pathological input gets here. Stop at a sentence and
+      # say nothing about it: an apology in the audio is the thing being removed.
+      case "$cut" in *[.!?]*) cut="$(printf '%s' "$cut" | sed -E 's/([.!?])[^.!?]*$/\1/')" ;; esac
+      printf '%s\n' "$cut"
       return 0
     fi
     case "$cut" in
@@ -2579,18 +2693,16 @@ _voice_lock_release() { rm -rf "$(_voice_lock_dir)" 2>/dev/null || true; }
 # Returns 0 when a note actually went out, 1 when it did not. That return value
 # is not decoration — voice-first uses it to tell the operator why he waited.
 _voice_mirror() {
-  local original="$1" ceiling="${2:-$VOICE_MIRROR_MAX}" budget="${3:-$VOICE_SYNTH_TIMEOUT}"
+  local original="$1" budget="${3:-$VOICE_SYNTH_TIMEOUT}"
   local prepped hash last_hash last_ts now rc=0
   prepped="$(_voice_prep "$original")"
   _voice_worth_saying "$prepped" || return 0
-  # The ceiling is a PARAMETER because two callers want different ones, and the
-  # default silently overrode the other for a while: voice-first had already trimmed
-  # its text to VOICE_LEAD_MAX, and this then cut it again at 1200 and appended "the
-  # rest is in the text" — the precise phrase the operator asked never to hear, coming
-  # from a function away from the one that was fixed. In `voice`-only mode 1200 stays
-  # right: there the note REPLACES the text, so an unbounded note is unbounded silence.
-  [ "${#prepped}" -le "$ceiling" ] \
-    || prepped="$(printf '%s' "${prepped:0:$ceiling}" | sed -E 's/[^ ]*$//')… that is as much as one note can carry."
+  # No trimming here, ever. This used to cut at a ceiling and append "that is as
+  # much as one note can carry" — and after voice-first learned to split a long
+  # lead across notes, this line was still reachable through the PostToolUse
+  # mirror (a summary with a link in it takes that path), so the phrase kept
+  # turning up in the audio. Every caller now hands over one note-sized piece,
+  # cut by _voice_chunk; a piece that is still over the ceiling is spoken whole.
 
   hash="$(printf '%s' "$prepped" | cksum | cut -d' ' -f1)"
   now="$(date +%s)"
@@ -2699,12 +2811,26 @@ _voice_announce() {
 # `abs __voice-mirror` — read the reply text on stdin and speak it. Hidden; only
 # _voice_spawn calls it.
 cmd_voice_mirror() {
-  local text; text="$(cat)"
-  # `|| true` because _voice_mirror returns 1 when no note went out, and here
-  # that is information nobody is waiting for: this runs detached, after the text
-  # has already been delivered. Letting it through would trip the ERR trap and
-  # print "Unexpected failure" into a log for a condition that is expected.
-  _voice_mirror "$text" || true
+  local text lead note; text="$(cat)"
+  # In mode `both` the text has already gone, so what is spoken is the prose
+  # half — the same slice voice-first speaks, so a reply that took this path (a
+  # link in the summary, an attachment) sounds like every other reply. In mode
+  # `voice` the note IS the message, so all of it is spoken.
+  case "$(reply_mode)" in
+    both) lead="$(_voice_lead "$text")" ;;
+    *)    lead="$(_voice_prep "$text")" ;;
+  esac
+  [ -n "$lead" ] || return 0
+  # One note if it fits, several in order if not — never a trimmed one. `|| true`
+  # because _voice_mirror returns 1 when no note went out, and here that is
+  # information nobody is waiting for: this runs detached, after the text has
+  # already been delivered. Letting it through would trip the ERR trap and print
+  # "Unexpected failure" into a log for a condition that is expected.
+  while IFS= read -r note; do
+    [ -n "$note" ] || continue
+    _voice_mirror "$note" </dev/null || break
+  done < <(_voice_chunk "$lead")
+  true
 }
 
 # Same idea, but this one owns BOTH halves of the delivery and their order: speak
@@ -2782,19 +2908,40 @@ cmd_voice_then_text() {
   if [ "$spoke" = 0 ] && _voice_worth_saying "$(_voice_prep "$lead")"; then
     text="🔇 (the voice note didn't make it — here it is as text)"$'\n\n'"$text"
   fi
-  # The numbers, appended here rather than left to the model to remember. AFTER
-  # the speech above, deliberately: the note reads `lead`, which came from the
-  # original text, so the footer is never read aloud as "chart increasing, five
-  # H sixty two percent".
-  text="$(with_usage_footer "$text")"
-  # One retry: a single dropped packet must not cost the operator the message.
-  tg_send "$chat" "$text" >/dev/null 2>&1 && return 0
-  sleep 2
-  tg_send "$chat" "$text" >/dev/null 2>&1 && return 0
-  # Both attempts failed. The words are gone, so at minimum leave a trace that
-  # says so — a silently lost reply is the worst outcome this feature can have.
-  log_event "abs" "→ telegram FAILED" "" "$text" 2>/dev/null || true
+  # The words, in two messages when the reply has two halves: first the prose
+  # that was just spoken, so he can read along with the note, then the detail
+  # card on its own, so its headings sit at the top of a bubble rather than
+  # under a wall of paragraphs. His words: "a text message of what you are
+  # speaking should arrive separately and a detailed message should show
+  # point-wise what needs to be done". A reply with no detail half goes as one.
+  #
+  # The numbers go on the LAST message, appended here rather than left to the
+  # model to remember — and AFTER the speech above, deliberately: the note reads
+  # `lead`, which came from the original text, so the footer is never read aloud
+  # as "chart increasing, five H sixty two percent".
+  local prose detail
+  prose="$(_voice_prose "$text")"
+  detail="$(_voice_detail "$text")"
+  if [ -n "$detail" ] && [ "${#prose}" -ge 80 ]; then
+    _tg_deliver "$chat" "$prose" || return 0
+    _tg_deliver "$chat" "$(with_usage_footer "$detail")"
+  else
+    _tg_deliver "$chat" "$(with_usage_footer "$text")"
+  fi
   return 0
+}
+
+# Send one message from the worker, long-safe, with one retry: a single dropped
+# packet must not cost the operator the message. When both attempts fail the
+# words are gone, so at minimum leave a trace that says so — a silently lost
+# reply is the worst outcome this feature can have.
+_tg_deliver() {
+  local chat="$1" text="$2"
+  tg_send_long "$chat" "$text" >/dev/null 2>&1 && return 0
+  sleep 2
+  tg_send_long "$chat" "$text" >/dev/null 2>&1 && return 0
+  log_event "abs" "→ telegram FAILED" "" "$text" 2>/dev/null || true
+  return 1
 }
 
 # Hand a voice-then-text delivery to a detached process, exactly as _voice_spawn
@@ -5088,14 +5235,10 @@ cmd_send() {
   fi
   [ -n "$text" ] || die "Nothing to send. Usage: abs send \"text\"   |   abs send - < file"
 
-  # Telegram's own ceiling is 4096 characters per message; splitting is the caller's
-  # business, but silently sending nothing would be the worst outcome here.
-  if [ "${#text}" -gt 4096 ]; then
-    warn "Message is ${#text} characters; Telegram's limit is 4096. Sending the first 4096."
-    text="${text:0:4096}"
-  fi
-
-  tg_send "$cid" "$text" || die "Telegram rejected it: $TG_ERR"
+  # Telegram's own ceiling is 4096 characters per message. A longer one is split
+  # at paragraphs and sent as several — the model falls back to this command
+  # when the bridge is down, and that is precisely when a report is long.
+  tg_send_long "$cid" "$text" || die "Telegram rejected it: $TG_ERR"
   ok "Sent."
 }
 
