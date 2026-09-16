@@ -180,7 +180,7 @@ goes the persona (tab 2). Source: `_prompt_mechanics_live` and
 - **Asks** when blocked, tell the operator it was blocked as remote-driven and can be run at the terminal.
 - **Never** fight the guard or route around it.
 - **Appears when** always.
-- **Backed by** `_guard_bash` (hook).
+- **Backed by** `cmd_guard_hook` (hook).
 
 **Name** `SAFETY`
 - **Slot** safety
