@@ -135,3 +135,71 @@ async def test_the_status_line_counts_tokens_and_flags_the_cap(home):
         await pilot.pause()
         status = str(app.query_one("#status").render())
         assert "over the cap" in status
+
+
+# ---- quitting — the bug that closed a whole terminal -------------------------
+#
+# "When I press Control-Q it doesn't do anything. If I do Command-Q it closes the
+# whole terminal and all the IDs." Two things were wrong: the app's bindings had
+# no priority, so the focused editor swallowed the key; and load_text() had
+# marked the memory tab dirty on open, so when the key DID land it put up a
+# "quit anyway?" dialog on a page nobody had touched.
+
+async def test_the_page_opens_clean(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not any(app.dirty.values()), app.dirty
+
+
+async def test_ctrl_q_quits_an_untouched_page_at_once(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+        assert app._exit
+
+
+async def test_escape_quits_too(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app._exit
+
+
+async def test_ctrl_q_reaches_the_app_while_an_editor_has_focus(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#persona-text").focus()
+        await pilot.pause()
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+        assert app._exit
+
+
+async def test_unsaved_changes_ask_first_and_n_keeps_the_page(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ta = app.query_one("#persona-text")
+        ta.focus()
+        await pilot.press("end", "x")               # a real keystroke, not a load
+        await pilot.pause()
+        assert app.dirty["persona"]
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+        assert type(app.screen).__name__ == "Confirm"
+        assert not app._exit
+        await pilot.press("n")
+        await pilot.pause()
+        assert type(app.screen).__name__ == "Screen"
+        assert not app._exit
+        await pilot.press("ctrl+q")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert app._exit

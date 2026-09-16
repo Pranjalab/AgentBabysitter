@@ -35,7 +35,9 @@ ABS setup."
 
 - **`abs prompt` — a tabbed page in the terminal.** System (locked, read-only),
   Persona, Hooks, Global, Memory. F1–F5 switch tabs; ^S saves, ^R resets to the
-  shipped text, ^N adds a hook phrase or a memory fact, ^D deletes one. A status
+  shipped text, ^N adds a hook phrase or a memory fact, ^T deletes one, ^Q or
+  Esc quits (⌘Q on a Mac closes the terminal, not the page). Styled in the
+  website's palette, with round borders where a terminal can draw them. A status
   line shows characters and an approximate token count for what you are editing.
   Built on Textual, which `abs src install` now puts in the venv next to aiohttp.
   Without it, `abs prompt` prints a table and the plain subcommands do the work:

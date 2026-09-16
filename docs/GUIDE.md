@@ -606,7 +606,7 @@ non-negotiables. Only the persona in the middle is yours: tone, the emoji table,
 the three message types (ack, fork, update) and the shape of the update card.
 
 ```
-abs prompt                    # the page: F1–F5 tabs · ^S save · ^R reset · ^N new · ^D delete
+abs prompt                    # the page: F1–F5 tabs · ^S save · ^R reset · ^N new · ^T delete · ^Q or Esc quit
 abs prompt show built         # exactly what the next launch passes
 abs prompt show persona|hooks|system|global|memory
 abs prompt edit persona       # in $EDITOR; seeded with the shipped text
@@ -624,7 +624,9 @@ phone and the model receives whatever you wrote for it. `{profile}` in any
 wording is replaced at injection time. **Global** edits `~/.claude/CLAUDE.md`.
 **Memory** shows the index Claude Code loads at the start of every session in
 the project and the one-fact files behind it; `^N` starts a new fact with the
-frontmatter Claude Code expects and adds its index line.
+frontmatter Claude Code expects and adds its index line. `^Q` or `Esc` quits, asking
+first if anything is unsaved — on a Mac, `⌘Q` is the terminal's own quit and closes
+every session in it, so it is not the key.
 
 Two things are refused at save, the same way a launch refuses them: a persona
 over the cap (16,000 characters by default) and any persona or hook wording

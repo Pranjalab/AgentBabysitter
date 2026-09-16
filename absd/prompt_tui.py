@@ -20,8 +20,8 @@ Tabs:
   Global   ~/.claude/CLAUDE.md — Claude Code's own personal instructions
   Memory   Claude Code's per-project memory: the index and one file per fact
 
-Keys: F1–F5 switch tabs · ^S save · ^R reset to shipped · ^N new · ^D delete ·
-^Q quit. Saving validates the same way a launch does: a persona over the cap
+Keys: F1–F5 switch tabs · ^S save · ^R reset to shipped · ^N new · ^T delete ·
+^Q or Esc quit. Saving validates the same way a launch does: a persona over the cap
 or carrying `<channel` is refused here rather than silently ignored later.
 """
 
@@ -111,6 +111,12 @@ def forged(text: str) -> bool:
 
 
 class Confirm(ModalScreen[bool]):
+    BINDINGS = [
+        Binding("y", "answer(True)", "Yes", priority=True),
+        Binding("enter", "answer(True)", "Yes", priority=True, show=False),
+        Binding("n", "answer(False)", "No", priority=True),
+        Binding("escape", "answer(False)", "No", priority=True, show=False),
+    ]
     DEFAULT_CSS = """
     Confirm { align: center middle; }
     Confirm > Vertical { width: 60; height: auto; border: thick $accent; padding: 1 2; background: $surface; }
@@ -133,9 +139,17 @@ class Confirm(ModalScreen[bool]):
     def _answer(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
 
+    def action_answer(self, yes: bool) -> None:
+        self.dismiss(yes)
+
 
 class Ask(ModalScreen[Optional[str]]):
     """One line of input — a new hook phrase, a new memory file name."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True, show=False)]
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
     DEFAULT_CSS = """
     Ask { align: center middle; }
@@ -177,25 +191,60 @@ class Ask(ModalScreen[Optional[str]]):
 
 class PromptApp(App[None]):
     TITLE = "abs prompt"
+    # The website's palette (agentbabysitter.com: --bg, --violet, --violet-2,
+    # --cyan, --green, --orange, --text, --muted, --line), so the page looks like
+    # the thing it belongs to. Corners are `round` wherever a terminal can draw
+    # them — box characters, not pixels, but it reads as rounded.
     CSS = """
-    #status { height: 1; padding: 0 1; color: $text-muted; }
-    TextArea { height: 1fr; }
-    .hint { color: $text-muted; padding: 0 1; height: auto; }
-    #hooks-list, #memory-list { width: 34; border-right: solid $accent; }
+    Screen { background: #0a0d17; color: #eef1f8; }
+    Header { background: #0f1320; color: #a78bfa; text-style: bold; }
+    Footer { background: #0f1320; }
+    Footer > .footer--key { background: #8b5cf6; color: #eef1f8; }
+    Footer > .footer--description { color: #aab3c8; }
+    Tabs { background: #0f1320; }
+    Tab { color: #6b7590; }
+    Tab.-active { color: #eef1f8; text-style: bold; }
+    Underline > .underline--bar { color: #8b5cf6; background: #212842; }
+    TabPane { padding: 0 1; }
+    #status { height: 1; padding: 0 1; color: #6b7590; background: #0f1320; }
+    TextArea { height: 1fr; background: #0f1320; border: round #2c3450; }
+    TextArea:focus { border: round #8b5cf6; }
+    TextArea > .text-area--cursor-line { background: #141a2b; }
+    .hint { color: #6b7590; padding: 0 1; height: auto; }
+    #hooks-list, #memory-list { width: 34; background: #0f1320; border: round #2c3450; margin-right: 1; }
+    #hooks-list:focus, #memory-list:focus { border: round #8b5cf6; }
+    ListView > ListItem { background: #0f1320; color: #aab3c8; }
+    ListView > ListItem.-highlight { background: #141a2b; color: #eef1f8; }
+    ListView:focus > ListItem.-highlight { background: #2c3450; color: #eef1f8; }
     .pane { height: 1fr; }
+    Button { border: round #2c3450; background: #141a2b; color: #eef1f8; min-width: 10; }
+    Button:hover { background: #212842; }
+    Button.-primary { border: round #8b5cf6; background: #8b5cf6; color: #0a0d17; }
+    Button.-warning { border: round #f5a623; background: #f5a623; color: #0a0d17; }
+    Toast { background: #141a2b; border: round #8b5cf6; }
+    Confirm > Vertical, Ask > Vertical { border: round #8b5cf6; background: #0f1320; }
+    Input { background: #141a2b; border: round #2c3450; }
+    Input:focus { border: round #8b5cf6; }
     """
 
+    # priority=True on every one of these: the editors have focus almost all the
+    # time, and a non-priority app binding is only consulted after the focused
+    # widget declines the key. In practice that meant ^Q did nothing — reported
+    # from a Mac, where the next thing tried was ⌘Q, which closes the terminal
+    # and every session in it. None of these keys is used by TextArea (^D is,
+    # which is why delete is ^T), and none is a tmux prefix (^B).
     BINDINGS = [
-        Binding("f1", "tab('system')", "System"),
-        Binding("f2", "tab('persona')", "Persona"),
-        Binding("f3", "tab('hooks')", "Hooks"),
-        Binding("f4", "tab('global')", "Global"),
-        Binding("f5", "tab('memory')", "Memory"),
-        Binding("ctrl+s", "save", "Save"),
-        Binding("ctrl+r", "reset", "Reset to shipped"),
-        Binding("ctrl+n", "new", "New"),
-        Binding("ctrl+d", "delete", "Delete"),
-        Binding("ctrl+q", "quit_page", "Quit"),
+        Binding("f1", "tab('system')", "System", priority=True),
+        Binding("f2", "tab('persona')", "Persona", priority=True),
+        Binding("f3", "tab('hooks')", "Hooks", priority=True),
+        Binding("f4", "tab('global')", "Global", priority=True),
+        Binding("f5", "tab('memory')", "Memory", priority=True),
+        Binding("ctrl+s", "save", "Save", priority=True),
+        Binding("ctrl+r", "reset", "Reset", priority=True),
+        Binding("ctrl+n", "new", "New", priority=True),
+        Binding("ctrl+t", "delete", "Delete", priority=True),
+        Binding("ctrl+q", "quit_page", "Quit", priority=True),
+        Binding("escape", "quit_page", "Quit", priority=True, show=False),
     ]
 
     def __init__(self, profile: str) -> None:
@@ -273,7 +322,7 @@ class PromptApp(App[None]):
             with TabPane("Memory", id="memory"):
                 yield Static(f"{self.memory_dir} — what Claude Code remembers about this project: "
                              "MEMORY.md is the index it loads; each other file is one fact. "
-                             "^N new fact · ^D delete the selected file.", classes="hint")
+                             "^N new fact · ^T delete the selected file.", classes="hint")
                 with Horizontal(classes="pane"):
                     yield ListView(id="memory-list")
                     yield TextArea("", id="memory-text")
@@ -281,6 +330,9 @@ class PromptApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        for wid in ("system-text", "persona-text", "global-text", "hooks-text", "memory-text"):
+            ta = self.query_one(f"#{wid}", TextArea)
+            self._baseline[wid] = ta.text
         self._refresh_hooks_list()
         self._refresh_memory_list()
         self._update_status()
@@ -325,12 +377,12 @@ class PromptApp(App[None]):
         self.hook_selected = phrase
         ta = self.query_one("#hooks-text", TextArea)
         if self._hook_kind(phrase) == "enforced":
-            ta.load_text(f"{phrase} is enforced by the hook itself and never reaches the model.\n"
-                         "There is nothing to word. It cannot be edited or removed.")
+            self._load(ta, f"{phrase} is enforced by the hook itself and never reaches the model.\n"
+                           "There is nothing to word. It cannot be edited or removed.")
             ta.read_only = True
         else:
             ta.read_only = False
-            ta.load_text(self.hooks.get(phrase, ""))
+            self._load(ta, self.hooks.get(phrase, ""))
         self._update_status()
 
     @on(ListView.Highlighted, "#memory-list")
@@ -340,7 +392,7 @@ class PromptApp(App[None]):
         self._commit_memory_editor()
         self.memory_selected = Path(event.item.name or "")
         ta = self.query_one("#memory-text", TextArea)
-        ta.load_text(self.memory_selected.read_text() if self.memory_selected.exists() else "")
+        self._load(ta, self.memory_selected.read_text() if self.memory_selected.exists() else "")
         self._update_status()
 
     def _commit_hook_editor(self) -> None:
@@ -360,8 +412,25 @@ class PromptApp(App[None]):
 
     # ---- dirty tracking and the status line ------------------------------------
 
+    # What each editor last had LOADED into it, keyed by widget id. TextArea.Changed
+    # fires for load_text() exactly as it does for a keystroke — and it fires
+    # later, as a posted message, so a flag set around the call does not cover it.
+    # Without this the memory tab was "unsaved" the moment it opened, so ^Q put up
+    # a "quit anyway?" dialog on a page nobody had touched — which from the
+    # operator's chair looked like ^Q doing nothing at all. Dirty means: the text
+    # differs from what was loaded, or a list operation (new / delete) happened.
+    _baseline: Dict[str, str] = {}
+
+    def _load(self, ta: TextArea, text: str) -> None:
+        self._baseline[ta.id or ""] = text
+        ta.load_text(text)
+
     @on(TextArea.Changed)
     def _changed(self, event: TextArea.Changed) -> None:
+        wid = event.text_area.id or ""
+        if event.text_area.text == self._baseline.get(wid, event.text_area.text):
+            self._update_status()
+            return
         wid = event.text_area.id or ""
         if wid == "persona-text":
             self.dirty["persona"] = True
@@ -424,6 +493,7 @@ class PromptApp(App[None]):
                 self.notify(f"Refused: {len(text):,} characters is over the {cap:,} cap.", severity="error")
                 return
             write_private(self.persona_path, text if text.endswith("\n") else text + "\n")
+            self._baseline["persona-text"] = text
             self.dirty["persona"] = False
             self.notify(f"Saved {self.persona_path}. Takes effect at the next launch.")
         elif tab == "hooks":
@@ -433,6 +503,7 @@ class PromptApp(App[None]):
                 self.notify(f"Refused: {', '.join(bad)} contains '<channel'.", severity="error")
                 return
             write_private(self.hooks_path, json.dumps(self.hooks, indent=2, ensure_ascii=False) + "\n")
+            self._baseline["hooks-text"] = self.query_one("#hooks-text", TextArea).text
             self.dirty["hooks"] = False
             self._refresh_hooks_list()
             self.notify(f"Saved {self.hooks_path}. Live for the next control phrase.")
@@ -440,6 +511,7 @@ class PromptApp(App[None]):
             text = self.query_one("#global-text", TextArea).text
             self.global_path.parent.mkdir(parents=True, exist_ok=True)
             self.global_path.write_text(text if text.endswith("\n") else text + "\n")
+            self._baseline["global-text"] = text
             self.dirty["global"] = False
             self.notify(f"Saved {self.global_path}. Claude Code reads it at the next session.")
         elif tab == "memory":
@@ -449,6 +521,7 @@ class PromptApp(App[None]):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(text if text.endswith("\n") else text + "\n")
             self._memory_buffer.clear()
+            self._baseline["memory-text"] = self.query_one("#memory-text", TextArea).text
             self.dirty["memory"] = False
             self._refresh_memory_list()
             self.notify("Saved memory.")
@@ -464,7 +537,7 @@ class PromptApp(App[None]):
                     return
                 if self.persona_path.exists():
                     self.persona_path.unlink()
-                self.query_one("#persona-text", TextArea).load_text(self.defaults["persona"])
+                self._load(self.query_one("#persona-text", TextArea), self.defaults["persona"])
                 self.dirty["persona"] = False
                 self._update_status()
                 self.notify("Back on the shipped persona.")
@@ -562,7 +635,7 @@ class PromptApp(App[None]):
                 self.hook_selected = None
                 self.dirty["hooks"] = True
                 self._refresh_hooks_list()
-                self.query_one("#hooks-text", TextArea).load_text("")
+                self._load(self.query_one("#hooks-text", TextArea), "")
                 self._update_status()
             self.push_screen(Confirm(f"Remove {phrase}? (^S afterwards to write the file.)"), done)
         elif tab == "memory":
@@ -582,7 +655,7 @@ class PromptApp(App[None]):
                     index.write_text("\n".join(kept) + "\n")
                 self.memory_selected = None
                 self._refresh_memory_list()
-                self.query_one("#memory-text", TextArea).load_text("")
+                self._load(self.query_one("#memory-text", TextArea), "")
                 self._update_status()
                 self.notify(f"Deleted {path.name} and its index line.")
             self.push_screen(Confirm(f"Delete {path.name} and its line in MEMORY.md?"), done_m)
@@ -590,12 +663,14 @@ class PromptApp(App[None]):
             self.notify("Delete is for a phrase of your own or a memory file.", severity="warning")
 
     def action_quit_page(self) -> None:
+        if isinstance(self.screen, (Confirm, Ask)):
+            return                                   # a dialog is already up; answer it
         if any(self.dirty.values()):
             unsaved = ", ".join(k for k, v in self.dirty.items() if v)
             def done(yes: bool) -> None:
                 if yes:
                     self.exit()
-            self.push_screen(Confirm(f"Unsaved changes in: {unsaved}. Quit anyway?"), done)
+            self.push_screen(Confirm(f"Unsaved changes in: {unsaved}. Quit anyway?  (y / n)"), done)
         else:
             self.exit()
 
