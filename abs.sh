@@ -1769,6 +1769,11 @@ note cannot carry them; put anything they need to copy or tap in one of those.
     offer="${offer//PROFILE_HERE/$PROFILE}"
     voice_section="${voice_section}
 ${offer}"
+    # "Once, then never again" has to mean once OFFERED, not once answered. The
+    # flag used to be set only by an answer, so an operator who ignored the offer
+    # got it again at every launch. It is set here, when a LAUNCH includes it —
+    # `abs prompt show` builds the same text and must not spend the offer.
+    [ "${PROMPT_FOR_LAUNCH:-0}" = "1" ] && state_set '.voice_offer_done = true' 2>/dev/null || true
   fi
 
   _prompt_mechanics "$cid" "$reply_mode_section" "$voice_section"
@@ -6391,7 +6396,7 @@ cmd_run() {
   # both apply). The in-container launcher uses this to add the restricted-assistant
   # persona on top of the normal ABS instructions; unset everywhere else.
   local sys_prompt
-  sys_prompt="$(build_prompt "$cid")"
+  sys_prompt="$(PROMPT_FOR_LAUNCH=1 build_prompt "$cid")"
   [ -n "${ABS_EXTRA_SYSTEM_PROMPT:-}" ] \
     && sys_prompt="${sys_prompt}"$'\n\n'"${ABS_EXTRA_SYSTEM_PROMPT}"
 

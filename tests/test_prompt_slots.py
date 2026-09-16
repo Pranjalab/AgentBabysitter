@@ -246,3 +246,22 @@ def test_a_file_name_is_spoken_as_name_dot_ext():
     """
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert r.stdout.strip() == "It is your own CLAUDE dot md in your home directory; edit abs dot sh and 3 point 6 point 2."
+
+
+# ---- the voice offer is made once, not once per launch until answered --------
+
+def test_a_launch_that_includes_the_voice_offer_marks_it_done(box):
+    """"Once, then never again" was only true if the operator ANSWERED. Ignoring
+    the offer meant hearing it again at the next launch, and the one after."""
+    r = box.run("prompt", "show", "built", PROMPT_FOR_LAUNCH="1")
+    rc = json.loads((box.abs_home / "profiles" / PROFILE / "rc.json").read_text())
+    if "PICK A VOICE" in r.stdout:
+        assert rc.get("voice_offer_done") is True
+    else:
+        pytest.skip("no speech engine on this box, so no offer was made")
+
+
+def test_showing_the_prompt_does_not_spend_the_offer(box):
+    box.run("prompt", "show", "built")
+    rc = json.loads((box.abs_home / "profiles" / PROFILE / "rc.json").read_text())
+    assert rc.get("voice_offer_done") is not True
