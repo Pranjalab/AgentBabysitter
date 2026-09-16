@@ -14,15 +14,18 @@ launch actually passes. This file is the editor, not the source.
 
 Tabs:
 
+  Overview what the page is, the three slots with their sizes, where every file is
   System   read-only: the mechanics and the safety epilogue, as built
   Persona  ~/.abs/persona.md — tone, message types, the update card
   Hooks    ~/.abs/hooks.json — what a control phrase injects; add your own
-  Global   ~/.claude/CLAUDE.md — Claude Code's own personal instructions
+  Project  <project>/CLAUDE.md — this repository's instructions (committed, shared)
+  Global   ~/.claude/CLAUDE.md — read-only here; it shapes every Claude session
   Memory   Claude Code's per-project memory: the index and one file per fact
 
-Keys: F1–F5 switch tabs · ^S save · ^R reset to shipped · ^N new · ^T delete ·
-^Q or Esc quit. Saving validates the same way a launch does: a persona over the cap
-or carrying `<channel` is refused here rather than silently ignored later.
+Keys: F1–F7 or ^PgUp/^PgDn switch tabs (tabs are clickable too) · ^S save ·
+^R reset to shipped · ^N new · ^T delete · ^Q or Esc quit. Saving validates the
+same way a launch does: a persona over the cap or carrying `<channel` is refused
+here rather than silently ignored later.
 """
 
 from __future__ import annotations
@@ -143,6 +146,46 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(yes)
 
 
+class QuitDialog(ModalScreen[str]):
+    """Unsaved changes: save everything and quit, quit without saving, or stay.
+
+    The two-button version offered quit-or-stay, and "save all, then quit" is
+    what most people actually want when they reach for ^Q with edits open."""
+
+    BINDINGS = [
+        Binding("s", "answer('save')", "Save all & quit", priority=True),
+        Binding("enter", "answer('save')", "Save all & quit", priority=True, show=False),
+        Binding("q", "answer('quit')", "Quit without saving", priority=True),
+        Binding("n", "answer('stay')", "Stay", priority=True),
+        Binding("escape", "answer('stay')", "Stay", priority=True, show=False),
+    ]
+    DEFAULT_CSS = """
+    QuitDialog { align: center middle; }
+    QuitDialog > Vertical { width: 70; height: auto; padding: 1 2; }
+    QuitDialog Horizontal { height: auto; align: center middle; margin-top: 1; }
+    QuitDialog Button { margin: 0 1; }
+    """
+
+    def __init__(self, unsaved: str) -> None:
+        super().__init__()
+        self.unsaved = unsaved
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(f"Unsaved changes in: {self.unsaved}.")
+            with Horizontal():
+                yield Button("Save all & quit (s)", id="save", variant="primary")
+                yield Button("Quit without saving (q)", id="quit", variant="warning")
+                yield Button("Stay (n)", id="stay")
+
+    @on(Button.Pressed)
+    def _pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id or "stay")
+
+    def action_answer(self, what: str) -> None:
+        self.dismiss(what)
+
+
 class Ask(ModalScreen[Optional[str]]):
     """One line of input — a new hook phrase, a new memory file name."""
 
@@ -233,12 +276,24 @@ class PromptApp(App[None]):
     # from a Mac, where the next thing tried was ⌘Q, which closes the terminal
     # and every session in it. None of these keys is used by TextArea (^D is,
     # which is why delete is ^T), and none is a tmux prefix (^B).
+    # The tab bar already names the tabs, and the Overview lists the keys, so the
+    # footer keeps only the actions — seven F-keys plus five actions overflowed a
+    # 110-column terminal and cut "Save" in half. The command palette is off for
+    # the same reason: one more key in the footer, nothing in it we need.
+    ENABLE_COMMAND_PALETTE = False
+    TAB_ORDER = ["overview", "system", "persona", "hooks", "project", "global", "memory"]
     BINDINGS = [
-        Binding("f1", "tab('system')", "System", priority=True),
-        Binding("f2", "tab('persona')", "Persona", priority=True),
-        Binding("f3", "tab('hooks')", "Hooks", priority=True),
-        Binding("f4", "tab('global')", "Global", priority=True),
-        Binding("f5", "tab('memory')", "Memory", priority=True),
+        Binding("f1", "tab('overview')", "Overview", priority=True, show=False),
+        Binding("f2", "tab('system')", "System", priority=True, show=False),
+        Binding("f3", "tab('persona')", "Persona", priority=True, show=False),
+        Binding("f4", "tab('hooks')", "Hooks", priority=True, show=False),
+        Binding("f5", "tab('project')", "Project", priority=True, show=False),
+        Binding("f6", "tab('global')", "Global", priority=True, show=False),
+        Binding("f7", "tab('memory')", "Memory", priority=True, show=False),
+        # F-keys need Fn on most Mac keyboards, so tabs are also reachable
+        # without them (and by mouse).
+        Binding("ctrl+pagedown", "tab_step(1)", "Next tab", priority=True, show=False),
+        Binding("ctrl+pageup", "tab_step(-1)", "Prev tab", priority=True, show=False),
         Binding("ctrl+s", "save", "Save", priority=True),
         Binding("ctrl+r", "reset", "Reset", priority=True),
         Binding("ctrl+n", "new", "New", priority=True),
@@ -255,11 +310,13 @@ class PromptApp(App[None]):
         self.persona_path = Path(self.paths["persona"])
         self.hooks_path = Path(self.paths["hooks"])
         self.global_path = Path(self.paths["global"])
+        self.project_dir = Path(self.paths["project"])
+        self.project_claude = Path(self.paths.get("project_claude", str(self.project_dir / "CLAUDE.md")))
         self.memory_dir = Path(self.paths["memory_dir"])
         self.hooks: Dict[str, str] = self._load_hooks()
         self.hook_selected: Optional[str] = None
         self.memory_selected: Optional[Path] = None
-        self.dirty: Dict[str, bool] = {"persona": False, "hooks": False, "global": False, "memory": False}
+        self.dirty: Dict[str, bool] = {"persona": False, "hooks": False, "project": False, "memory": False}
 
     # ---- data ------------------------------------------------------------------
 
@@ -288,41 +345,122 @@ class PromptApp(App[None]):
             files.insert(0, index)
         return files
 
+    def _other_memory_projects(self) -> List[Path]:
+        """Projects on this machine that have a memory, for when the one we were
+        launched from has none — the directory is keyed on the cwd, and running
+        the page from the wrong place shows an empty tab with no explanation."""
+        root = self.memory_dir.parent.parent
+        if not root.exists():
+            return []
+        return sorted(p for p in root.glob("*/memory") if (p / "MEMORY.md").exists())[:8]
+
+    def _memory_hint(self) -> str:
+        base = (f"Project: {self.project_dir} — what Claude Code remembers about it, in "
+                f"{self.memory_dir}. MEMORY.md is the index it loads at the start of every session "
+                "here; each other file is one fact. ^N new fact · ^T delete the selected file. "
+                "Takes effect at the next session.")
+        if self._memory_files():
+            return base
+        others = self._other_memory_projects()
+        if others:
+            names = ", ".join(p.parent.name for p in others)
+            return (base + f"  ⚠ Nothing here yet — the memory is keyed on the directory you ran "
+                    f"`abs prompt` from. Projects that do have one: {names}. Run it from there.")
+        return base + "  Nothing here yet: Claude Code writes the first fact when there is something worth keeping."
+
+    def _overview_text(self) -> str:
+        system = abs_text(self.profile, "show", "system")
+        persona = self._persona_text()
+        safety = abs_text(self.profile, "show", "safety")
+        mech_tokens = approx_tokens(system) - approx_tokens(safety)
+        yours = "yours" if self.persona_path.exists() else "shipped"
+        hooks_state = "yours" if self.hooks_path.exists() else "shipped"
+        n_custom = sum(1 for k in self.hooks if self._hook_kind(k) == "custom")
+        mem_n = len(self._memory_files())
+        lines = [
+            "WHAT THIS PAGE IS",
+            "Everything ABS says to Claude is plain text — no fine-tuning, no custom model.",
+            "It enters a session at three moments, and this page shows all of it and lets",
+            "you edit the parts that are yours.",
+            "",
+            "THE SYSTEM PROMPT, added once at launch, in this fixed order:",
+            "",
+            f"   ┌─ mechanics  {mech_tokens:>5,} tokens   locked    who is on the other end, the reply",
+            "   │                                      tool, voice, quiet mode, the fallback",
+            f"   ├─ persona    {approx_tokens(persona):>5,} tokens   {yours:<9} tone, the three message types, the card",
+            f"   └─ safety     {approx_tokens(safety):>5,} tokens   locked    kill ladder, command guard, no secrets",
+            "",
+            "   The order is the security model: whatever the persona says, safety comes",
+            "   after it. Only the middle is yours to change:",
+            f"   persona  {self.persona_path}  {yours}",
+            "",
+            "ALSO AT LAUNCH, read by Claude Code itself (not by ABS):",
+            f"   project  {self.project_claude}  {'present' if self.project_claude.exists() else 'none'}",
+            f"   global   {self.global_path}  {'present' if self.global_path.exists() else 'none'}  (view only here)",
+            f"   memory   {self.memory_dir}  ({mem_n} files)",
+            "",
+            "PER TURN, when a control phrase arrives from Telegram:",
+            f"   hooks    {self.hooks_path}  {hooks_state}, {n_custom} phrase(s) of your own",
+            "",
+            "TABS",
+            "   F2 System   read the two locked slots exactly as the next launch builds them",
+            "   F3 Persona  edit how the model writes and when it speaks — takes effect at the next launch",
+            "   F4 Hooks    edit what a phrase injects, add your own — live for the next phrase",
+            "   F5 Project  edit this repository's CLAUDE.md — committed, everyone who clones gets it",
+            "   F6 Global   read ~/.claude/CLAUDE.md — edit it with Claude Code or your editor",
+            "   F7 Memory   edit what Claude Code remembers about this project — next session",
+            "",
+            "KEYS   F1–F7 or ^PgUp/^PgDn tabs (click works too) · ^S save · ^R reset · ^N new · ^T delete · ^Q quit",
+            "",
+            f"profile {self.profile} · persona and hooks are global to every profile and project",
+        ]
+        return "\n".join(lines)
+
     # ---- layout ----------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        with TabbedContent(initial="persona", id="tabs"):
+        with TabbedContent(initial="overview", id="tabs"):
+            with TabPane("Overview", id="overview"):
+                yield TextArea(self._overview_text(), read_only=True, id="overview-text")
             with TabPane("System (locked)", id="system"):
                 yield Static(
-                    "The bridge mechanics and the safety epilogue. Built into abs.sh and not "
-                    "editable: a persona must not be able to tell the model to stop replying to "
-                    "Telegram, and whatever the persona says, this text comes after it.",
+                    "The bridge mechanics and the safety epilogue, exactly as the next launch builds "
+                    "them. Not editable: a persona must not be able to tell the model to stop replying "
+                    "to Telegram, and whatever the persona says, this text comes after it.",
                     classes="hint",
                 )
                 yield TextArea(abs_text(self.profile, "show", "system"), read_only=True, id="system-text")
             with TabPane("Persona", id="persona"):
                 yield Static(f"{self.persona_path} — how the model writes and when it speaks. "
-                             "Missing file = the shipped persona.", classes="hint", id="persona-hint")
+                             "Missing file = the shipped persona. Global to every profile and project. "
+                             "Takes effect at the NEXT LAUNCH.", classes="hint", id="persona-hint")
                 yield TextArea(self._persona_text(), id="persona-text")
             with TabPane("Hooks", id="hooks"):
-                yield Static("What a control phrase sent from Telegram injects into the model. "
-                             "MUTE / OFF / BLOCK act in the hook and never reach the model, so they "
-                             "have no wording. ^N adds a phrase of your own; {profile} is substituted.",
+                yield Static("What a control phrase, sent as a WHOLE MESSAGE from Telegram while a session "
+                             "is live, injects into the model. MUTE / OFF / BLOCK act in the hook and never "
+                             "reach the model, so they have no wording. ^N adds a phrase of your own; "
+                             "{profile} is substituted. Live for the NEXT PHRASE after saving.",
                              classes="hint")
                 with Horizontal(classes="pane"):
                     yield ListView(id="hooks-list")
                     yield TextArea("", id="hooks-text")
-            with TabPane("Global", id="global"):
-                yield Static(f"{self.global_path} — Claude Code's own personal instructions, "
-                             "loaded in every session on this machine. Not an ABS file; edited here "
-                             "for convenience.", classes="hint")
-                yield TextArea(self.global_path.read_text() if self.global_path.exists() else "",
-                               id="global-text")
+            with TabPane("Project", id="project"):
+                yield Static(f"⚠ {self.project_claude} — this repository's instructions to Claude Code. "
+                             "It is COMMITTED with the repo: everyone who clones it gets what you write "
+                             "here, and every Claude Code session in this directory reads it, ABS or not. "
+                             "Takes effect at the next session.", classes="hint")
+                yield TextArea(self.project_claude.read_text() if self.project_claude.exists() else "",
+                               id="project-text")
+            with TabPane("Global (view)", id="global"):
+                yield Static(f"{self.global_path} — Claude Code's own global instructions, loaded by EVERY "
+                             "Claude Code session on this machine. Shown here so you can see what else "
+                             "shapes the model; not edited from ABS. To change it: Claude Code's /memory, "
+                             f"or your editor — nano {self.global_path}", classes="hint")
+                yield TextArea(self.global_path.read_text() if self.global_path.exists() else "(no file yet)",
+                               read_only=True, id="global-text")
             with TabPane("Memory", id="memory"):
-                yield Static(f"{self.memory_dir} — what Claude Code remembers about this project: "
-                             "MEMORY.md is the index it loads; each other file is one fact. "
-                             "^N new fact · ^T delete the selected file.", classes="hint")
+                yield Static(self._memory_hint(), classes="hint", id="memory-hint")
                 with Horizontal(classes="pane"):
                     yield ListView(id="memory-list")
                     yield TextArea("", id="memory-text")
@@ -330,7 +468,7 @@ class PromptApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        for wid in ("system-text", "persona-text", "global-text", "hooks-text", "memory-text"):
+        for wid in ("overview-text", "system-text", "persona-text", "global-text", "project-text", "hooks-text", "memory-text"):
             ta = self.query_one(f"#{wid}", TextArea)
             self._baseline[wid] = ta.text
         self._refresh_hooks_list()
@@ -434,8 +572,8 @@ class PromptApp(App[None]):
         wid = event.text_area.id or ""
         if wid == "persona-text":
             self.dirty["persona"] = True
-        elif wid == "global-text":
-            self.dirty["global"] = True
+        elif wid == "project-text":
+            self.dirty["project"] = True
         elif wid == "hooks-text" and not event.text_area.read_only:
             self.dirty["hooks"] = True
         elif wid == "memory-text":
@@ -460,10 +598,15 @@ class PromptApp(App[None]):
             n_custom = sum(1 for k in self.hooks if self._hook_kind(k) == "custom")
             st.update(f"hooks · {self.hooks_path if self.hooks_path.exists() else 'shipped wording'} · "
                       f"{n_custom} of your own{'  · unsaved' if self.dirty['hooks'] else ''}")
+        elif tab == "project":
+            text = self.query_one("#project-text", TextArea).text
+            st.update(f"project · {self.project_claude} · ~{approx_tokens(text):,} tokens · committed with the repo"
+                      f"{'  · unsaved' if self.dirty['project'] else ''}")
         elif tab == "global":
             text = self.query_one("#global-text", TextArea).text
-            st.update(f"global · {self.global_path} · ~{approx_tokens(text):,} tokens"
-                      f"{'  · unsaved' if self.dirty['global'] else ''}")
+            st.update(f"global · {self.global_path} · ~{approx_tokens(text):,} tokens · view only — edit with Claude Code or nano")
+        elif tab == "overview":
+            st.update(f"overview · profile {self.profile} · F2–F7 to open a tab")
         elif tab == "memory":
             sel = self.memory_selected.name if self.memory_selected else "—"
             st.update(f"memory · {len(self._memory_files())} files · editing {sel}"
@@ -480,6 +623,10 @@ class PromptApp(App[None]):
 
     def action_tab(self, name: str) -> None:
         self.query_one("#tabs", TabbedContent).active = name
+
+    def action_tab_step(self, step: int) -> None:
+        i = self.TAB_ORDER.index(self._active())
+        self.action_tab(self.TAB_ORDER[(i + step) % len(self.TAB_ORDER)])
 
     def action_save(self) -> None:
         tab = self._active()
@@ -507,13 +654,14 @@ class PromptApp(App[None]):
             self.dirty["hooks"] = False
             self._refresh_hooks_list()
             self.notify(f"Saved {self.hooks_path}. Live for the next control phrase.")
+        elif tab == "project":
+            text = self.query_one("#project-text", TextArea).text
+            self.project_claude.write_text(text if text.endswith("\n") else text + "\n")
+            self._baseline["project-text"] = text
+            self.dirty["project"] = False
+            self.notify(f"Saved {self.project_claude}. Remember it is committed with the repo.")
         elif tab == "global":
-            text = self.query_one("#global-text", TextArea).text
-            self.global_path.parent.mkdir(parents=True, exist_ok=True)
-            self.global_path.write_text(text if text.endswith("\n") else text + "\n")
-            self._baseline["global-text"] = text
-            self.dirty["global"] = False
-            self.notify(f"Saved {self.global_path}. Claude Code reads it at the next session.")
+            self.notify(f"Not edited from ABS. Use Claude Code's /memory, or: nano {self.global_path}", severity="warning")
         elif tab == "memory":
             self._commit_memory_editor()
             for path, text in self._memory_buffer.items():
@@ -662,15 +810,31 @@ class PromptApp(App[None]):
         else:
             self.notify("Delete is for a phrase of your own or a memory file.", severity="warning")
 
+    def _save_all(self) -> bool:
+        """Save every dirty tab in turn; False if one was refused."""
+        current = self._active()
+        for tab, dirty in list(self.dirty.items()):
+            if not dirty:
+                continue
+            self.action_tab(tab)
+            self.action_save()
+            if self.dirty[tab]:                      # refused (forged, over the cap)
+                return False
+        self.action_tab(current)
+        return True
+
     def action_quit_page(self) -> None:
-        if isinstance(self.screen, (Confirm, Ask)):
+        if isinstance(self.screen, (Confirm, Ask, QuitDialog)):
             return                                   # a dialog is already up; answer it
         if any(self.dirty.values()):
             unsaved = ", ".join(k for k, v in self.dirty.items() if v)
-            def done(yes: bool) -> None:
-                if yes:
+            def done(answer: str) -> None:
+                if answer == "quit":
                     self.exit()
-            self.push_screen(Confirm(f"Unsaved changes in: {unsaved}. Quit anyway?  (y / n)"), done)
+                elif answer == "save":
+                    if self._save_all():
+                        self.exit()
+            self.push_screen(QuitDialog(unsaved), done)
         else:
             self.exit()
 

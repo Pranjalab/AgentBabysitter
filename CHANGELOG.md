@@ -33,10 +33,13 @@ ABS setup."
 
 ### Added
 
-- **`abs prompt` — a tabbed page in the terminal.** System (locked, read-only),
-  Persona, Hooks, Global, Memory. F1–F5 switch tabs; ^S saves, ^R resets to the
-  shipped text, ^N adds a hook phrase or a memory fact, ^T deletes one, ^Q or
-  Esc quits (⌘Q on a Mac closes the terminal, not the page). Styled in the
+- **`abs prompt` — a tabbed page in the terminal.** Overview, System (locked,
+  read-only), Persona, Hooks, Project (this repo's `CLAUDE.md`, with a warning
+  that it is committed), Global (`~/.claude/CLAUDE.md`, view only — it shapes
+  every Claude session, so it is edited with Claude Code or your editor), Memory. F1–F7 or ^PgUp/^PgDn switch tabs; ^S saves, ^R
+  resets to the shipped text, ^N adds a hook phrase or a memory fact, ^T deletes
+  one, ^Q or Esc quits — with unsaved changes: save all and quit, quit without
+  saving, or stay (⌘Q on a Mac closes the terminal, not the page). Styled in the
   website's palette, with round borders where a terminal can draw them. A status
   line shows characters and an approximate token count for what you are editing.
   Built on Textual, which `abs src install` now puts in the venv next to aiohttp.

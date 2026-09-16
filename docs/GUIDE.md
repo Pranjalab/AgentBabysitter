@@ -606,27 +606,36 @@ non-negotiables. Only the persona in the middle is yours: tone, the emoji table,
 the three message types (ack, fork, update) and the shape of the update card.
 
 ```
-abs prompt                    # the page: F1–F5 tabs · ^S save · ^R reset · ^N new · ^T delete · ^Q or Esc quit
+abs prompt                    # the page: F1–F7 or ^PgUp/^PgDn tabs · ^S save · ^R reset · ^N new · ^T delete · ^Q quit
 abs prompt show built         # exactly what the next launch passes
-abs prompt show persona|hooks|system|global|memory
-abs prompt edit persona       # in $EDITOR; seeded with the shipped text
+abs prompt show persona|hooks|system|project|global|memory
+abs prompt edit persona       # in $EDITOR; seeded with the shipped text (also: hooks, project, memory)
 abs prompt reset persona      # back to shipped (also: hooks)
 abs prompt diff persona       # yours against shipped
 ```
 
-The page has five tabs. **System** is read-only and shows the two locked slots
-as built. **Persona** edits `~/.abs/persona.md`, with a live character and token
-count against the cap. **Hooks** lists every control phrase: `ABS MUTE`, `ABS
-OFF` and `ABS BLOCK` are shown locked, because they act inside the hook and
-never reach the model; `ABS UNMUTE`, `ABS STOP` and `ABS EXIT` have wording you
-can change; and `^N` adds a phrase of your own — send `ABS REVIEW` from your
-phone and the model receives whatever you wrote for it. `{profile}` in any
-wording is replaced at injection time. **Global** edits `~/.claude/CLAUDE.md`.
-**Memory** shows the index Claude Code loads at the start of every session in
-the project and the one-fact files behind it; `^N` starts a new fact with the
-frontmatter Claude Code expects and adds its index line. `^Q` or `Esc` quits, asking
-first if anything is unsaved — on a Mac, `⌘Q` is the terminal's own quit and closes
-every session in it, so it is not the key.
+The page has seven tabs. **Overview** is where it opens: the three slots with
+their token counts, every file with its path and whether it is yours or
+shipped, and one line per tab. **System** is read-only and shows the two locked
+slots as built. **Persona** edits `~/.abs/persona.md`, with a live character and
+token count against the cap; it takes effect at the next launch. **Hooks** lists
+every control phrase: `ABS MUTE`, `ABS OFF` and `ABS BLOCK` are shown locked,
+because they act inside the hook and never reach the model; `ABS UNMUTE`, `ABS
+STOP` and `ABS EXIT` have wording you can change; and `^N` adds a phrase of your
+own — send `ABS REVIEW` from your phone, as a whole message while a session is
+live, and the model receives whatever you wrote for it. `{profile}` in any
+wording is replaced at injection time. **Project** edits the `CLAUDE.md` of the
+directory you ran `abs prompt` from — it is committed with the repository, so
+everyone who clones it gets what you write, and the tab says so. **Global** shows
+`~/.claude/CLAUDE.md` but does not edit it: that file shapes every Claude Code
+session on the machine, ABS or not, so change it with Claude Code's `/memory` or
+your editor. **Memory** shows the index Claude Code loads at the start of every
+session in the project and the one-fact files behind it; `^N` starts a new fact
+with the frontmatter Claude Code expects and adds its index line. It is keyed on
+the directory you ran the page from, and says so when that directory has none.
+`^S` saves the tab you are on; `^Q` or `Esc` quits, and with unsaved changes
+offers save-all-and-quit, quit without saving, or stay — on a Mac, `⌘Q` is the
+terminal's own quit and closes every session in it, so it is not the key.
 
 Two things are refused at save, the same way a launch refuses them: a persona
 over the cap (16,000 characters by default) and any persona or hook wording

@@ -6898,7 +6898,8 @@ _prompt_paths_json() {
         --arg global "$(_prompt_global_file)" --arg memory "$(_prompt_memory_dir)" \
         --arg project "$(pwd -P)" --arg profile "$PROFILE" \
         '{persona:$persona, hooks:$hooks, global:$global, memory_dir:$memory,
-          memory_index:($memory + "/MEMORY.md"), project:$project, profile:$profile}'
+          memory_index:($memory + "/MEMORY.md"), project:$project,
+          project_claude:($project + "/CLAUDE.md"), profile:$profile}'
 }
 
 _prompt_defaults_json() {
@@ -6931,8 +6932,9 @@ _prompt_show() {
       local f; f="$(hooks_file)"
       if [ -f "$f" ]; then jq . "$f"; else _prompt_defaults_json | jq '.hooks'; fi ;;
     global)    local g; g="$(_prompt_global_file)"; [ -f "$g" ] && cat "$g" || info "No $g yet." ;;
+    project)   local pc; pc="$(pwd -P)/CLAUDE.md"; [ -f "$pc" ] && cat "$pc" || info "No $pc yet." ;;
     memory)    local m; m="$(_prompt_memory_dir)/MEMORY.md"; [ -f "$m" ] && cat "$m" || info "No memory for this project yet ($m)." ;;
-    *) die "Usage: abs prompt show [built|system|mechanics|safety|persona|hooks|global|memory]" ;;
+    *) die "Usage: abs prompt show [built|system|mechanics|safety|persona|hooks|project|global|memory]" ;;
   esac
 }
 
@@ -6955,10 +6957,19 @@ _prompt_edit() {
       jq -e 'type == "object" and all(.[]; type == "string")' "$f" >/dev/null 2>&1 \
         || warn "$f is not a JSON object of phrase → text; it will be ignored until it is." ;;
     global)
-      f="$(_prompt_global_file)"; mkdir -p "$(dirname "$f")"; $editor "$f" ;;
+      # Deliberately not from here. That file shapes EVERY Claude Code session
+      # on the machine, ABS or not, and the operator's call was that ABS should
+      # show it and point at the door rather than hold the pen.
+      info "$(_prompt_global_file) is Claude Code's own global file and is not edited from abs."
+      info "  Edit it with Claude Code (/memory), or in your editor: ${c_bold}nano $(_prompt_global_file)${c_reset}"
+      return 0 ;;
+    project)
+      f="$(pwd -P)/CLAUDE.md"
+      warn "$f is committed with the repository: everyone who clones it gets these instructions."
+      $editor "$f" ;;
     memory)
       f="$(_prompt_memory_dir)/MEMORY.md"; mkdir -p "$(dirname "$f")"; $editor "$f" ;;
-    *) die "Usage: abs prompt edit [persona|hooks|global|memory]" ;;
+    *) die "Usage: abs prompt edit [persona|hooks|project|memory]" ;;
   esac
 }
 
@@ -7007,10 +7018,11 @@ _prompt_tui() {
   printf '  %-9s %-9s %s\n' "system"  "locked"   "abs.sh (mechanics + safety)"
   printf '  %-9s %-9s %s\n' "persona" "$([ -f "$(persona_file)" ] && echo yours || echo shipped)" "$(persona_file)"
   printf '  %-9s %-9s %s\n' "hooks"   "$([ -f "$(hooks_file)" ] && echo yours || echo shipped)" "$(hooks_file)"
-  printf '  %-9s %-9s %s\n' "global"  "$([ -f "$(_prompt_global_file)" ] && echo present || echo none)" "$(_prompt_global_file)"
+  printf '  %-9s %-9s %s\n' "project" "$([ -f "$(pwd -P)/CLAUDE.md" ] && echo present || echo none)" "$(pwd -P)/CLAUDE.md"
+  printf '  %-9s %-9s %s\n' "global"  "$([ -f "$(_prompt_global_file)" ] && echo view-only || echo none)" "$(_prompt_global_file)"
   printf '  %-9s %-9s %s\n' "memory"  "$([ -f "$(_prompt_memory_dir)/MEMORY.md" ] && echo present || echo none)" "$(_prompt_memory_dir)"
   printf '\n'
-  info "  abs prompt show <section>   abs prompt edit persona|hooks|global|memory"
+  info "  abs prompt show <section>   abs prompt edit persona|hooks|project|memory"
   info "  abs prompt reset persona|hooks   abs prompt diff persona|hooks"
   printf '\n'
   if ! abs_src_have; then
