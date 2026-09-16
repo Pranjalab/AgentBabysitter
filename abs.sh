@@ -1719,7 +1719,13 @@ SAFETY
 EOF
 }
 
-build_prompt() {
+# The mechanics as a LAUNCH would build them: the reply-mode block for the mode
+# in force, the VOICE block for whether the engine exists, the one-time voice
+# offer if it has not been made. `abs prompt show system` goes through here too,
+# so what the page calls "system" is what a session is actually given — an
+# earlier version passed empty sections there and showed a VOICE heading with
+# nothing under it.
+_prompt_mechanics_live() {
   local cid="$1"
   local VROOT; VROOT="$(voice_root)"
 
@@ -1766,6 +1772,11 @@ ${offer}"
   fi
 
   _prompt_mechanics "$cid" "$reply_mode_section" "$voice_section"
+}
+
+build_prompt() {
+  local cid="$1"
+  _prompt_mechanics_live "$cid"
   printf '\n'
   persona_text
   printf '\n'
@@ -6907,8 +6918,8 @@ _prompt_built() {
 _prompt_show() {
   case "${1:-built}" in
     built)     _prompt_built ;;
-    system)    _prompt_mechanics "$(state_get '.chat_id')" "" ""; printf '\n'; _prompt_safety ;;
-    mechanics) _prompt_mechanics "$(state_get '.chat_id')" "" "" ;;
+    system)    _prompt_mechanics_live "$(state_get '.chat_id')"; printf '\n'; _prompt_safety ;;
+    mechanics) _prompt_mechanics_live "$(state_get '.chat_id')" ;;
     safety)    _prompt_safety ;;
     persona)   persona_text ;;
     hooks)
