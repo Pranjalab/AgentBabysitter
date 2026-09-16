@@ -137,9 +137,15 @@ def test_daemon_start_paired_skips_prompts_and_launches(
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
-def test_daemon_start_away_sets_accept_edits(tmp_path: Path, stub_bin: Path) -> None:
-    # --away must reach the perm_args (acceptEdits). The stub claude records its
-    # argv so we can assert the launcher forwarded --permission-mode acceptEdits.
+def test_daemon_start_away_sets_bypass_permissions(tmp_path: Path, stub_bin: Path) -> None:
+    # --away must reach the perm_args. Away is `--permission-mode bypassPermissions`
+    # (it was acceptEdits once; a Bash approval is what actually halts a session).
+    # The stub claude records its argv so we can assert the flag was forwarded.
+    #
+    # Asserted on the flag's VALUE, not on the word appearing anywhere in argv:
+    # the system prompt is in argv too, and until 3.7.0 it happened to contain the
+    # word "acceptEdits" in a comment, which kept the old assertion green for two
+    # releases after the mode changed.
     home = tmp_path / "home"
     home.mkdir()
     abs_home = tmp_path / "abs"
@@ -167,8 +173,9 @@ def test_daemon_start_away_sets_accept_edits(tmp_path: Path, stub_bin: Path) -> 
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert argv_dump.exists(), proc.stdout + proc.stderr
-    forwarded = argv_dump.read_text()
-    assert "acceptEdits" in forwarded
+    forwarded = argv_dump.read_text().splitlines()
+    assert "--permission-mode" in forwarded
+    assert forwarded[forwarded.index("--permission-mode") + 1] == "bypassPermissions"
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
@@ -356,9 +363,9 @@ def test_resume_bypass_resumes_top_recent(tmp_path: Path, stub_bin: Path) -> Non
     assert proc.returncode == 0, proc.stdout + proc.stderr
     # cd'd to the recorded path and resumed with --continue
     assert cwd_file.read_text().strip() == str(recent.resolve())
-    argv = argv_file.read_text()
+    argv = argv_file.read_text().splitlines()
     assert "--continue" in argv
-    assert "acceptEdits" in argv  # recorded mode was away
+    assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"  # recorded mode was away
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")

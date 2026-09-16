@@ -25,6 +25,54 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.7.0] — 2026-09-16 — `abs prompt`: see and edit what goes into Claude
+
+"What are we adding into the prompt? I would like to see that." Then: "one
+editable interactive page which can open and we can edit and personalize our own
+ABS setup."
+
+### Added
+
+- **`abs prompt` — a tabbed page in the terminal.** System (locked, read-only),
+  Persona, Hooks, Global, Memory. F1–F5 switch tabs; ^S saves, ^R resets to the
+  shipped text, ^N adds a hook phrase or a memory fact, ^D deletes one. A status
+  line shows characters and an approximate token count for what you are editing.
+  Built on Textual, which `abs src install` now puts in the venv next to aiohttp.
+  Without it, `abs prompt` prints a table and the plain subcommands do the work:
+  `show`, `edit`, `reset`, `diff`, plus `defaults` and `paths` (JSON) that the
+  page itself uses — so the shipped text lives in exactly one place, `abs.sh`.
+- **The persona slot.** The system prompt is now assembled mechanics → persona →
+  safety. `~/.abs/persona.md` replaces the middle; missing means the shipped
+  persona, byte for byte. Over 16,000 characters or containing `<channel` is
+  refused at save and reported (not silently swapped) at launch. One file, global
+  — never project-local, per docs/PERSONA-AND-MEMORY.md.
+- **Hook wording on disk, and phrases of your own.** `~/.abs/hooks.json` holds what
+  `ABS UNMUTE`, `ABS STOP` and `ABS EXIT` inject, and any phrase you add
+  (`"ABS REVIEW": "…"`), sent as a whole message from Telegram. `{profile}` is
+  substituted. `ABS MUTE`, `ABS OFF` and `ABS BLOCK` cannot be reworded: they act
+  in the hook and never reach the model, and an entry under those names is ignored.
+- **`abs prompt show built`** prints exactly what the next launch will pass.
+
+### Changed
+
+- **The prompt is a fifth shorter.** WHEN TO SEND, WHAT MAKES A REPORT WORTH
+  HEARING and MESSAGE TYPES said overlapping things; they are one section now,
+  inside the persona. The reply-mode, command-menu and bridge-down sections were
+  trimmed to what the model needs to act. 3,222 → 2,534 words on a paired profile
+  with voice, with no rule dropped.
+
+### Fixed
+
+- **A file name is spoken whole.** "It is your own CLAUDE.md in your home
+  directory" was heard from "md in your home directory": the engine's sentence
+  splitter took the dot as a full stop and dropped the words before it.
+  `name.ext` is now spoken as "name dot ext" for the extensions that turn up in
+  reports, the same way a version number became "three point six point two".
+- **A test that passed by accident.** The daemon's Away launch has used
+  `bypassPermissions` since 3.5; its test still asserted `acceptEdits` and stayed
+  green because that word appeared in a comment inside the system prompt, which
+  is also in argv. It asserts the flag's value now.
+
 ## [3.6.2] — 2026-09-16 — the text behind the voice note, and a shape for updates
 
 Two reports from the phone, both about the same conversation: "sometimes only the

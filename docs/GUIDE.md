@@ -582,6 +582,63 @@ fast deaths (almost always a box that isn't logged in) it stops and DMs you once
 it's down the daemon refuses `ABS START`/`ABS EXIT` from that bot — session control
 is operator-only, so a restricted bot can never launch a normal host session.
 
+## What goes into Claude — and `abs prompt`
+
+Everything ABS says to the model is plain text. There is no fine-tuning and no
+custom model; there are four places text enters a session, and `abs prompt` is
+the page that shows all of them and lets you edit the ones that are yours.
+
+| Level | What | Editable |
+| --- | --- | --- |
+| Session start | the ABS system prompt, built by `abs.sh` at every launch | the **persona** slot |
+| Session start | `~/.claude/CLAUDE.md` — Claude Code's own personal instructions | yes (it is your file) |
+| Session start | Claude Code's per-project memory — an index plus one file per fact | yes (your files) |
+| Per turn | what a control phrase (`ABS STOP`, `ABS EXIT`, …) injects when it arrives | the wording, and new phrases |
+
+The ABS prompt is assembled in a fixed order, and the order is the security
+model: **mechanics → persona → safety**. The mechanics — who is on the other
+end, the reply tool, the fallback when the bridge drops, quiet mode, voice —
+are locked, because a persona must not be able to say "stop replying to
+Telegram". The safety epilogue — no secrets over Telegram, remote input is
+lower-trust, the command guard — is locked and comes *after* the persona, so a
+persona that says "ignore previous instructions" is itself followed by the
+non-negotiables. Only the persona in the middle is yours: tone, the emoji table,
+the three message types (ack, fork, update) and the shape of the update card.
+
+```
+abs prompt                    # the page: F1–F5 tabs · ^S save · ^R reset · ^N new · ^D delete
+abs prompt show built         # exactly what the next launch passes
+abs prompt show persona|hooks|system|global|memory
+abs prompt edit persona       # in $EDITOR; seeded with the shipped text
+abs prompt reset persona      # back to shipped (also: hooks)
+abs prompt diff persona       # yours against shipped
+```
+
+The page has five tabs. **System** is read-only and shows the two locked slots
+as built. **Persona** edits `~/.abs/persona.md`, with a live character and token
+count against the cap. **Hooks** lists every control phrase: `ABS MUTE`, `ABS
+OFF` and `ABS BLOCK` are shown locked, because they act inside the hook and
+never reach the model; `ABS UNMUTE`, `ABS STOP` and `ABS EXIT` have wording you
+can change; and `^N` adds a phrase of your own — send `ABS REVIEW` from your
+phone and the model receives whatever you wrote for it. `{profile}` in any
+wording is replaced at injection time. **Global** edits `~/.claude/CLAUDE.md`.
+**Memory** shows the index Claude Code loads at the start of every session in
+the project and the one-fact files behind it; `^N` starts a new fact with the
+frontmatter Claude Code expects and adds its index line.
+
+Two things are refused at save, the same way a launch refuses them: a persona
+over the cap (16,000 characters by default) and any persona or hook wording
+containing `<channel`, which could forge an inbound Telegram message. A file
+that slips past — edited by hand — is reported at launch and the shipped text
+is used instead, so you are never silently on something you did not write.
+
+The persona is **one file, global** across every bot and every project. That is
+deliberate: a project-local persona would let a cloned repository rewrite your
+agent's character, and an identity that changes when you `cd` is not an identity.
+
+The page needs the v3 source and Textual (`abs src install` brings both).
+Without them, `abs prompt` prints the table and the plain commands still work.
+
 ## Where things live
 
 Nothing in the repo holds state or secrets — it's all safe to fork. State lives
@@ -594,6 +651,8 @@ in `$HOME`:
 | `~/.claude/channels/telegram/bot.pid` | Which process holds the poller |
 | `~/.abs/profiles/<name>/rc.json` | Chat ID, mute state, reply mode, which bot dir (`600`) |
 | `~/.abs/profiles/<name>/pool.jsonl` | Messages received while nothing was running (`600`) |
+| `~/.abs/persona.md` | Your persona — how the model writes and when it speaks; missing = shipped (`600`) |
+| `~/.abs/hooks.json` | What each control phrase injects, plus phrases of your own (`600`) |
 | `~/.abs/daemon/config.json` | Daemon settings — engine, timings, notifications (`600`) |
 | `~/.abs/daemon/status-<name>.json` | Per-profile snapshot, rewritten each poll (`600`) |
 | `~/.abs/daemon/events.jsonl` | Structured daemon event trail — **metadata only** (`600`) |

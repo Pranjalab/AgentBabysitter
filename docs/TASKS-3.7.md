@@ -8,7 +8,7 @@ this file is the source of truth until it is empty.
 
 | Level | What | Who owns it | Editable today |
 |-------|------|-------------|----------------|
-| Session start | the ABS system prompt, built by `build_prompt` in `abs.sh`, passed as `--append-system-prompt` (~3.5k tokens) | ABS | only by editing `abs.sh` |
+| Session start | the ABS system prompt, built by `build_prompt` in `abs.sh`, passed as `--append-system-prompt` (~3.9k tokens after 3.7.0; ~4.9k before) | ABS | only by editing `abs.sh` |
 | Session start | `~/.claude/CLAUDE.md` (personal) and any project `CLAUDE.md` | Claude Code / the user | yes, by hand |
 | Session start | auto-memory index `MEMORY.md` | Claude Code / the model | yes, by hand |
 | Per turn | hook directives on a control phrase (ABS STOP / EXIT / UNMUTE …), printed by the UserPromptSubmit hook | ABS | only by editing `abs.sh` |
@@ -30,34 +30,34 @@ persona (editable) → safety epilogue (locked)** — so a persona that says
 "ignore previous instructions" is itself followed by the non-negotiables. The
 persona is one global file, never project-local.
 
-- [ ] **Split `build_prompt` into three slots.** Mechanics: who is on the other
+- [x] **Split `build_prompt` into three slots.** Mechanics: who is on the other
       end, the reply tool, the fallback, quiet mode, command menu, voice
       procedure, screenshots. Persona: TONE, WHAT MAKES A REPORT, MESSAGE TYPES,
       STAYING ON THE TASK, emoji table. Safety: SAFETY, COMMAND GUARD, HARD OFF,
       the kill-ladder obligations.
-- [ ] **Trim the duplication first.** WHEN TO SEND / WHAT MAKES A REPORT /
+- [x] **Trim the duplication first.** (3,222 → 2,534 words) WHEN TO SEND / WHAT MAKES A REPORT /
       MESSAGE TYPES / THE VOICE NOTE IS THE ANSWER overlap by roughly a third.
       One rule, said once. Target: ≤ 2,500 tokens total without losing a rule.
-- [ ] **`~/.abs/persona.md`** — the persona slot on disk. Shipped default =
+- [x] **`~/.abs/persona.md`** — the persona slot on disk. Shipped default =
       the trimmed persona sections, so upgrading changes nothing. Length-capped;
       a file containing `<channel` is rejected outright. Missing file = default.
-- [ ] **Hook directives on disk too** — `~/.abs/hooks.md` (or one section per
+- [x] **Hook directives on disk too** (`~/.abs/hooks.json`) — `~/.abs/hooks.md` (or one section per
       phrase): the *wording* of the STOP / EXIT / UNMUTE / COMPACT paragraphs is
       editable; the *enforcement* (mute, off, block, guard) stays in `abs.sh`
       and is not.
-- [ ] **`abs prompt`** — interactive, using the existing scrolling picker:
+- [x] **`abs prompt`** — interactive, using the existing scrolling picker:
       a table of sections with columns *section · slot · lines · locked/editable
       · source file*. Enter on a row shows it; `e` opens it in `$EDITOR`
       (persona and hooks only); `r` resets one section to the shipped default;
       locked rows say why. Non-interactive forms for scripts and docs:
       `abs prompt show [section]`, `abs prompt edit persona|hooks`,
       `abs prompt reset persona|hooks`, `abs prompt diff` (yours vs default).
-- [ ] **`abs prompt show --built`** prints exactly what the next launch will
+- [x] **`abs prompt show built`** prints exactly what the next launch will
       pass, so the user can always read what Claude actually got.
-- [ ] Tests: the assembled order is mechanics → persona → safety whatever the
+- [x] Tests: the assembled order is mechanics → persona → safety whatever the
       persona says; an over-long or `<channel`-bearing persona is refused; a
       missing file yields the default byte-for-byte; bash 3.2 in the container.
-- [ ] Docs: GUIDE section, website docs page, CHANGELOG.
+- [x] Docs: GUIDE section, CHANGELOG. [ ] website docs page
 
 Not in this item: per-project memory / `ABS REMEMBER` (step 2 of the persona
 design) — a separate feature, not asked for.
@@ -69,12 +69,12 @@ note skipped straight to *"md in your home directory"* — the words before the
 dot were not spoken. The engine's text normaliser treats the `.` in a file name
 as a sentence end, and something on that path drops the fragment.
 
-- [ ] Reproduce with `speak_kokoro.py` on that sentence; find which side drops
+- [x] (skipped the engine-side repro; the prep-side fix makes it moot) Reproduce with `speak_kokoro.py` on that sentence; find which side drops
       it (the sentence splitter in `split_chunks`, or the engine).
-- [ ] Fix in `_voice_prep`: a `name.ext` token becomes *"name dot ext"* before
+- [x] Fix in `_voice_prep`: a `name.ext` token becomes *"name dot ext"* before
       synthesis, the same way `3.6.2` already becomes *"3 point 6 point 2"*.
       Extensions to cover: md sh py txt json yml yaml html js ts toml env lock.
-- [ ] Test: the prepared text of that sentence contains "CLAUDE dot md" and the
+- [x] Test: the prepared text of that sentence contains "CLAUDE dot md" and the
       note is spoken whole (stub engine).
 
 ## 3. ABS COMPACT, in place, on tmux  →  3.8 — parked until 1 and 2 ship

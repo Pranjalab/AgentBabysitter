@@ -179,7 +179,7 @@ def test_installing_unpacks_the_tarball_and_builds_a_working_venv(lone, abs_home
     assert (src / ".venv" / "bin" / "python").exists(), "no venv"
     # The claim the command makes when it says "installed": absd imports.
     proof = subprocess.run(
-        [str(src / ".venv" / "bin" / "python"), "-c", "import absd, aiohttp"],
+        [str(src / ".venv" / "bin" / "python"), "-c", "import absd, aiohttp, textual"],
         capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(src)),
     )
     assert proof.returncode == 0, proof.stderr
