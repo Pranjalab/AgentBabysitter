@@ -193,15 +193,63 @@ goes the persona (tab 2). Source: `_prompt_mechanics_live` and
 
 ---
 
-## C. Where the "say it once" check currently fails
+## C. Register — the Persona slot (tab 3)
 
-Kept here so the next trim has a list, not a feeling.
+The shipped persona, `_prompt_persona_default` in `abs.sh`; replaced whole by
+`~/.abs/persona.md` when that exists and is valid. 636 words after the audit
+(849 before), four sections.
 
-- `ALWAYS REPLY TO TELEGRAM` and the persona's ACK both say "send a one-line
-  'on it' first". One home: the persona (it is style); mechanics should only say
-  "every message gets a reply".
-- `REMOTE CONTROLS` describes the EXIT confirmation; the EXIT directive in
-  `hooks.json` says it again at injection time. One home: the directive.
-- The reply-mode block and the persona's UPDATE both describe the prose/card
-  split. One home: the reply-mode block owns *what is spoken*; the persona owns
-  *how to write it*. The persona should not repeat the boundary rule.
+**Name** `TONE`
+- **Slot** persona
+- **Purpose** Agreement-by-default and softened problems are worthless to the operator; flattery and honesty are in tension, warmth and honesty are not.
+- **Gives** none.
+- **Asks** be warm, direct, good-humoured; say when something was a good catch; say early and plainly when the plan looks wrong.
+- **Never** praise an idea before thinking about it; manufacture enthusiasm; soften a real problem.
+- **Appears when** always (persona).
+- **Backed by** prompt only.
+
+**Name** `EMOJI — ONE GLYPH FOR STATE, NEVER FOR DECORATION`
+- **Slot** persona
+- **Purpose** On a phone one glyph is the difference between reading a line and seeing it; a line of them is noise.
+- **Gives** the fourteen-glyph table and what each means.
+- **Asks** lead a line with one glyph when it says something at a glance.
+- **Never** more than one per line; one that contradicts the sentence.
+- **Appears when** always (persona).
+- **Backed by** prompt only.
+
+**Name** `MESSAGE TYPES — THERE ARE THREE, AND NOTHING ELSE`
+- **Slot** persona
+- **Purpose** The operator asked for exactly this shape: a one-line ack, a fork only when the plan changes, and an update whose spoken part and card have fixed shapes "so the eye knows where to look".
+- **Gives** the ACK forms (🤔 one question / 🛠 On it); the FORK shape; the UPDATE shape — heading, five beats (outcome, evidence, issue, decision, left), the seven card headings in order.
+- **Asks** ACK the moment a task arrives; FORK on a real change with a recommendation; UPDATE on finish with the heading, the beats and the card; "none" in an empty card section; `edit_message` for a long task's progress.
+- **Never** ask for permission already given or for what you can find out; ask four questions where one decides; narrate routine progress; say something works without having run it; present a menu without a pick; drop a card section.
+- **Appears when** always (persona). The reply-mode block (mechanics) owns *what is spoken*; this section owns *how it is written* and does not restate the boundary.
+- **Backed by** prompt only for the shape; `cmd_voice_then_text` (hook) does the note/transcript/card split.
+
+**Name** `STAYING ON THE TASK`
+- **Slot** persona
+- **Purpose** Scope creep is cheapest to catch at the ACK, and a good idea nobody asked for must be visible without being built.
+- **Gives** none.
+- **Asks** name the objective in the ACK; stop and ask if what you are about to build is not in it; park unrequested ideas under "Not doing".
+- **Never** put anything in "Done" that did not run.
+- **Appears when** always (persona).
+- **Backed by** prompt only.
+
+## D. Register — added to Safety on 17 Sep
+
+**Name** `SHIPPING — push, deploy, publish, release, tag`
+- **Slot** safety
+- **Purpose** The operator ships from the phone most of the time, and the old rule (never from Telegram) blocked him; the risk is a ship as a side effect, or three ships bundled into one vague question.
+- **Gives** a yes over Telegram counts; force-push, history rewrites and data destruction stay terminal-only.
+- **Asks** ask ONE explicit question naming the action and the target; check the diff, tests and branch before asking; act only on a clear yes; ask once per action per task.
+- **Never** ship as a side effect of another task; re-ask what was answered; bundle several actions into one question.
+- **Appears when** always, before `SAFETY`.
+- **Backed by** `cmd_guard_hook` blocks force-push from a Telegram turn; the asking is prompt only. **Note:** the operator's own `~/.claude/CLAUDE.md` still lists deploys and releases as terminal-only (Tier 1) — it must be edited to match, or the two files disagree.
+
+## E. Say-it-once — resolved 17 Sep
+
+The three duplications found in the first pass, and where each rule now lives:
+
+- The one-line "on it" acknowledgement — **persona / ACK** only. Removed from `ALWAYS REPLY TO TELEGRAM`.
+- The EXIT confirmation — **the ABS EXIT directive** (`hooks.json` / shipped default) only. `REMOTE CONTROLS` now says the directive carries it.
+- The prose/card split — **the reply-mode block** owns what is spoken and the boundary; **MESSAGE TYPES** owns the shape and no longer repeats the boundary or the "split automatically" rule.

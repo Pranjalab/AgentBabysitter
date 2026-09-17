@@ -385,10 +385,10 @@ class PromptApp(App[None]):
             "",
             "THE SYSTEM PROMPT, added once at launch, in this fixed order:",
             "",
-            f"   ┌─ mechanics  {mech_tokens:>5,} tokens   locked    who is on the other end, the reply",
-            "   │                                      tool, voice, quiet mode, the fallback",
-            f"   ├─ persona    {approx_tokens(persona):>5,} tokens   {yours:<9} tone, the three message types, the card",
-            f"   └─ safety     {approx_tokens(safety):>5,} tokens   locked    kill ladder, command guard, no secrets",
+            f"   ┌─ mechanics ≈{mech_tokens:>5,} tokens   locked    who is on the other end, the reply",
+            "   │                                       tool, voice, quiet mode, the fallback",
+            f"   ├─ persona   ≈{approx_tokens(persona):>5,} tokens   {yours:<9} tone, the three message types, the card",
+            f"   └─ safety    ≈{approx_tokens(safety):>5,} tokens   locked    kill ladder, command guard, no secrets",
             "",
             "   The order is the security model: whatever the persona says, safety comes",
             "   after it. Only the middle is yours to change:",
@@ -592,7 +592,7 @@ class PromptApp(App[None]):
             source = "yours" if self.persona_path.exists() else "shipped default"
             flag = "  ⚠ over the cap" if len(text) > cap else ""
             flag += "  ⚠ contains <channel — will be refused" if forged(text) else ""
-            st.update(f"persona · {source} · {len(text):,}/{cap:,} chars · ~{approx_tokens(text):,} tokens"
+            st.update(f"persona · {source} · {len(text):,}/{cap:,} chars · ≈{approx_tokens(text):,} tokens"
                       f"{'  · unsaved' if self.dirty['persona'] else ''}{flag}")
         elif tab == "hooks":
             n_custom = sum(1 for k in self.hooks if self._hook_kind(k) == "custom")
@@ -600,11 +600,11 @@ class PromptApp(App[None]):
                       f"{n_custom} of your own{'  · unsaved' if self.dirty['hooks'] else ''}")
         elif tab == "project":
             text = self.query_one("#project-text", TextArea).text
-            st.update(f"project · {self.project_claude} · ~{approx_tokens(text):,} tokens · committed with the repo"
+            st.update(f"project · {self.project_claude} · ≈{approx_tokens(text):,} tokens · committed with the repo"
                       f"{'  · unsaved' if self.dirty['project'] else ''}")
         elif tab == "global":
             text = self.query_one("#global-text", TextArea).text
-            st.update(f"global · {self.global_path} · ~{approx_tokens(text):,} tokens · view only — edit with Claude Code or nano")
+            st.update(f"global · {self.global_path} · ≈{approx_tokens(text):,} tokens · view only — edit with Claude Code or nano")
         elif tab == "overview":
             st.update(f"overview · profile {self.profile} · F2–F7 to open a tab")
         elif tab == "memory":
@@ -613,7 +613,7 @@ class PromptApp(App[None]):
                       f"{'  · unsaved' if self.dirty['memory'] else ''}")
         else:
             text = self.query_one("#system-text", TextArea).text
-            st.update(f"system · locked · ~{approx_tokens(text):,} tokens")
+            st.update(f"system · locked · ≈{approx_tokens(text):,} tokens")
 
     @on(TabbedContent.TabActivated)
     def _tab_changed(self) -> None:
