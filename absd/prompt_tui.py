@@ -254,8 +254,8 @@ class PromptApp(App[None]):
     TextArea:focus { border: round #8b5cf6; }
     TextArea > .text-area--cursor-line { background: #141a2b; }
     .hint { color: #6b7590; padding: 0 1; height: auto; }
-    #hooks-list, #memory-list { width: 34; background: #0f1320; border: round #2c3450; margin-right: 1; }
-    #hooks-list:focus, #memory-list:focus { border: round #8b5cf6; }
+    #hooks-list, #memory-list, #persona-list { width: 34; background: #0f1320; border: round #2c3450; margin-right: 1; }
+    #hooks-list:focus, #memory-list:focus, #persona-list:focus { border: round #8b5cf6; }
     ListView > ListItem { background: #0f1320; color: #aab3c8; }
     ListView > ListItem.-highlight { background: #141a2b; color: #eef1f8; }
     ListView:focus > ListItem.-highlight { background: #2c3450; color: #eef1f8; }
@@ -298,6 +298,7 @@ class PromptApp(App[None]):
         Binding("ctrl+r", "reset", "Reset", priority=True),
         Binding("ctrl+n", "new", "New", priority=True),
         Binding("ctrl+t", "delete", "Delete", priority=True),
+        Binding("ctrl+u", "use", "Use persona", priority=True),
         Binding("ctrl+q", "quit_page", "Quit", priority=True),
         Binding("escape", "quit_page", "Quit", priority=True, show=False),
     ]
@@ -313,6 +314,11 @@ class PromptApp(App[None]):
         self.project_dir = Path(self.paths["project"])
         self.project_claude = Path(self.paths.get("project_claude", str(self.project_dir / "CLAUDE.md")))
         self.memory_dir = Path(self.paths["memory_dir"])
+        self.personas_dir = Path(self.paths.get("personas_dir", str(Path(self.paths["persona"]).parent / "personas")))
+        self.persona_active = self.paths.get("persona_active", "default")
+        self.shipped_personas: Dict[str, str] = dict(self.defaults.get("shipped_personas", {}))
+        self.persona_selected = "default"
+        self._persona_buffer: Dict[str, str] = {}
         self.hooks: Dict[str, str] = self._load_hooks()
         self.hook_selected: Optional[str] = None
         self.memory_selected: Optional[Path] = None
@@ -331,9 +337,44 @@ class PromptApp(App[None]):
         return dict(self.defaults["hooks"])
 
     def _persona_text(self) -> str:
-        if self.persona_path.exists():
-            return self.persona_path.read_text()
-        return self.defaults["persona"]
+        return self._persona_read(self.persona_active)
+
+    def _persona_names(self) -> List[str]:
+        names = ["default"] + list(self.shipped_personas)
+        if self.personas_dir.exists():
+            for f in sorted(self.personas_dir.glob("*.md")):
+                if f.stem not in names:
+                    names.append(f.stem)
+        return names
+
+    def _persona_path(self, name: str) -> Path:
+        return self.persona_path if name == "default" else self.personas_dir / f"{name}.md"
+
+    def _persona_state(self, name: str) -> str:
+        if self._persona_path(name).exists():
+            return "yours"
+        return "shipped"
+
+    def _persona_read(self, name: str) -> str:
+        if name in self._persona_buffer:
+            return self._persona_buffer[name]
+        p = self._persona_path(name)
+        if p.exists():
+            return p.read_text()
+        if name == "default":
+            return self.defaults["persona"]
+        return self.shipped_personas.get(name, "")
+
+    def _refresh_persona_list(self) -> None:
+        lv = self.query_one("#persona-list", ListView)
+        lv.clear()
+        for name in self._persona_names():
+            tag = "● active" if name == self.persona_active else self._persona_state(name)
+            lv.append(ListItem(Label(f"{name:<12} {tag}"), name=name))
+        for i, item in enumerate(lv.children):
+            if getattr(item, "name", None) == self.persona_selected:
+                lv.index = i
+                break
 
     def _memory_files(self) -> List[Path]:
         if not self.memory_dir.exists():
@@ -392,7 +433,7 @@ class PromptApp(App[None]):
             "",
             "   The order is the security model: whatever the persona says, safety comes",
             "   after it. Only the middle is yours to change:",
-            f"   persona  {self.persona_path}  {yours}",
+            f"   persona  {self.persona_path}  {yours}  ·  active: {self.persona_active}  ·  more in {self.personas_dir}",
             "",
             "ALSO AT LAUNCH, read by Claude Code itself (not by ABS):",
             f"   project  {self.project_claude}  {'present' if self.project_claude.exists() else 'none'}",
@@ -404,13 +445,13 @@ class PromptApp(App[None]):
             "",
             "TABS",
             "   F2 System   read the two locked slots exactly as the next launch builds them",
-            "   F3 Persona  edit how the model writes and when it speaks — takes effect at the next launch",
+            "   F3 Persona  who the model is: default, ceo, cto, friend, yours — takes effect at the next launch",
             "   F4 Hooks    edit what a phrase injects, add your own — live for the next phrase",
             "   F5 Project  edit this repository's CLAUDE.md — committed, everyone who clones gets it",
             "   F6 Global   edit ~/.claude/CLAUDE.md — asks first; it shapes EVERY Claude Code session",
             "   F7 Memory   edit what Claude Code remembers about this project — next session",
             "",
-            "KEYS   F1–F7 or ^PgUp/^PgDn tabs (click works too) · ^S save · ^R reset · ^N new · ^T delete · ^Q quit",
+            "KEYS   F1–F7 or ^PgUp/^PgDn tabs (click works too) · ^S save · ^R reset · ^N new · ^T delete · ^U use · ^Q quit",
             "",
             f"profile {self.profile} · persona and hooks are global to every profile and project",
         ]
@@ -432,10 +473,14 @@ class PromptApp(App[None]):
                 )
                 yield TextArea(abs_text(self.profile, "show", "system"), read_only=True, id="system-text")
             with TabPane("Persona", id="persona"):
-                yield Static(f"{self.persona_path} — how the model writes and when it speaks. "
-                             "Missing file = the shipped persona. Global to every profile and project. "
-                             "Takes effect at the NEXT LAUNCH.", classes="hint", id="persona-hint")
-                yield TextArea(self._persona_text(), id="persona-text")
+                yield Static("Who the model is. 'default' is ~/.abs/persona.md; the others are "
+                             f"{self.personas_dir}/<name>.md, with ceo, cto and friend shipped as examples. "
+                             "^N new · ^U use for new sessions · ^T delete · `abs --persona <name>` for one "
+                             "session. Global to every profile and project; takes effect at the NEXT LAUNCH.",
+                             classes="hint", id="persona-hint")
+                with Horizontal(classes="pane"):
+                    yield ListView(id="persona-list")
+                    yield TextArea(self._persona_read("default"), id="persona-text")
             with TabPane("Hooks", id="hooks"):
                 yield Static("What a control phrase, sent as a WHOLE MESSAGE from Telegram while a session "
                              "is live, injects into the model. MUTE / OFF / BLOCK act in the hook and never "
@@ -471,6 +516,7 @@ class PromptApp(App[None]):
         for wid in ("overview-text", "system-text", "persona-text", "global-text", "project-text", "hooks-text", "memory-text"):
             ta = self.query_one(f"#{wid}", TextArea)
             self._baseline[wid] = ta.text
+        self._refresh_persona_list()
         self._refresh_hooks_list()
         self._refresh_memory_list()
         self._update_status()
@@ -505,6 +551,24 @@ class PromptApp(App[None]):
             lv.append(ListItem(Label(p.name), name=str(p)))
         if self._memory_files() and self.memory_selected is None:
             lv.index = 0
+
+    @on(ListView.Highlighted, "#persona-list")
+    def _persona_highlighted(self, event: ListView.Highlighted) -> None:
+        if event.item is None:
+            return
+        name = event.item.name or "default"
+        if name == self.persona_selected and self._baseline.get("persona-text") == self._persona_read(name):
+            return
+        self._commit_persona_editor()
+        self.persona_selected = name
+        self._load(self.query_one("#persona-text", TextArea), self._persona_read(name))
+        self._update_status()
+
+    def _commit_persona_editor(self) -> None:
+        ta = self.query_one("#persona-text", TextArea)
+        if ta.text != self._baseline.get("persona-text", ta.text):
+            self._persona_buffer[self.persona_selected] = ta.text
+            self.dirty["persona"] = True
 
     @on(ListView.Highlighted, "#hooks-list")
     def _hook_highlighted(self, event: ListView.Highlighted) -> None:
@@ -591,7 +655,9 @@ class PromptApp(App[None]):
         if tab == "persona":
             text = self.query_one("#persona-text", TextArea).text
             cap = self.defaults["persona_max_chars"]
-            source = "yours" if self.persona_path.exists() else "shipped default"
+            source = f"{self.persona_selected} · {self._persona_state(self.persona_selected)}"
+            if self.persona_selected == self.persona_active:
+                source += " · active for new sessions"
             flag = "  ⚠ over the cap" if len(text) > cap else ""
             flag += "  ⚠ contains <channel — will be refused" if forged(text) else ""
             st.update(f"persona · {source} · {len(text):,}/{cap:,} chars · ≈{approx_tokens(text):,} tokens"
@@ -635,18 +701,23 @@ class PromptApp(App[None]):
     def action_save(self) -> None:
         tab = self._active()
         if tab == "persona":
-            text = self.query_one("#persona-text", TextArea).text
+            self._commit_persona_editor()
             cap = self.defaults["persona_max_chars"]
-            if forged(text):
-                self.notify("Refused: a persona must not contain '<channel' — it could forge a Telegram message.", severity="error")
-                return
-            if len(text) > cap:
-                self.notify(f"Refused: {len(text):,} characters is over the {cap:,} cap.", severity="error")
-                return
-            write_private(self.persona_path, text if text.endswith("\n") else text + "\n")
-            self._baseline["persona-text"] = text
+            for name, text in list(self._persona_buffer.items()):
+                if forged(text):
+                    self.notify(f"Refused ({name}): a persona must not contain '<channel' — it could forge a Telegram message.", severity="error")
+                    return
+                if len(text) > cap:
+                    self.notify(f"Refused ({name}): {len(text):,} characters is over the {cap:,} cap.", severity="error")
+                    return
+            for name, text in list(self._persona_buffer.items()):
+                write_private(self._persona_path(name), text if text.endswith("\n") else text + "\n")
+            saved = ", ".join(self._persona_buffer) or self.persona_selected
+            self._persona_buffer.clear()
+            self._baseline["persona-text"] = self.query_one("#persona-text", TextArea).text
             self.dirty["persona"] = False
-            self.notify(f"Saved {self.persona_path}. Takes effect at the next launch.")
+            self._refresh_persona_list()
+            self.notify(f"Saved {saved}. Takes effect at the next launch.")
         elif tab == "hooks":
             self._commit_hook_editor()
             bad = [k for k, v in self.hooks.items() if forged(v)]
@@ -702,16 +773,23 @@ class PromptApp(App[None]):
     def action_reset(self) -> None:
         tab = self._active()
         if tab == "persona":
+            name = self.persona_selected
+            path = self._persona_path(name)
+            if name != "default" and name not in self.shipped_personas:
+                self.notify(f"{name} has no shipped text to reset to — ^T deletes it.", severity="warning")
+                return
             def done(yes: bool) -> None:
                 if not yes:
                     return
-                if self.persona_path.exists():
-                    self.persona_path.unlink()
-                self._load(self.query_one("#persona-text", TextArea), self.defaults["persona"])
-                self.dirty["persona"] = False
+                if path.exists():
+                    path.unlink()
+                self._persona_buffer.pop(name, None)
+                self._load(self.query_one("#persona-text", TextArea), self._persona_read(name))
+                self.dirty["persona"] = any(self._persona_buffer)
+                self._refresh_persona_list()
                 self._update_status()
-                self.notify("Back on the shipped persona.")
-            self.push_screen(Confirm(f"Delete {self.persona_path} and go back to the shipped persona?"), done)
+                self.notify(f"{name}: back on the shipped text.")
+            self.push_screen(Confirm(f"Delete {path} and go back to the shipped '{name}'?"), done)
         elif tab == "hooks":
             def done_h(yes: bool) -> None:
                 if not yes:
@@ -728,9 +806,43 @@ class PromptApp(App[None]):
         else:
             self.notify("Only the persona and the hooks have a shipped default to reset to.", severity="warning")
 
+    def action_use(self) -> None:
+        if self._active() != "persona":
+            self.notify("Use is for the persona tab: makes the selected persona the one new sessions launch with.", severity="warning")
+            return
+        name = self.persona_selected
+        (self.persona_path.parent / "persona.active").write_text(name + "\n")
+        self.persona_active = name
+        self._refresh_persona_list()
+        self._update_status()
+        self.notify(f"New sessions launch as '{name}'. A running session keeps its persona until restarted.")
+
     def action_new(self) -> None:
         tab = self._active()
-        if tab == "hooks":
+        if tab == "persona":
+            def made(name: Optional[str]) -> None:
+                if not name:
+                    return
+                slug = name.lower().strip().replace(" ", "-")
+                if slug in self._persona_names():
+                    self.notify(f"'{slug}' already exists — select it in the list.", severity="warning")
+                    return
+                import re
+                if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", slug):
+                    self.notify("A persona name is lowercase letters, digits, - and _.", severity="error")
+                    return
+                self._commit_persona_editor()
+                base = self._persona_read(self.persona_selected)
+                self._persona_buffer[slug] = base.replace("You are ABS — said like the name \"Abish\".", f"You are ABS, acting as {slug}.", 1)
+                self.dirty["persona"] = True
+                self.persona_selected = slug
+                self.personas_dir.mkdir(parents=True, exist_ok=True)
+                self._refresh_persona_list()
+                self._load(self.query_one("#persona-text", TextArea), self._persona_buffer[slug])
+                self.query_one("#persona-text", TextArea).focus()
+                self.notify(f"New persona '{slug}', copied from the selected one. Edit, then ^S.")
+            self.push_screen(Ask("New persona name (copied from the selected one):", "reviewer"), made)
+        elif tab == "hooks":
             def made(name: Optional[str]) -> None:
                 if not name:
                     return
@@ -793,7 +905,33 @@ class PromptApp(App[None]):
 
     def action_delete(self) -> None:
         tab = self._active()
-        if tab == "hooks":
+        if tab == "persona":
+            name = self.persona_selected
+            path = self._persona_path(name)
+            if name == "default":
+                self.notify("'default' is not deleted — ^R resets it to the shipped text.", severity="warning")
+                return
+            if not path.exists() and name not in self._persona_buffer:
+                self.notify(f"{name} is a shipped example with no file; nothing to delete.", severity="warning")
+                return
+            def done_p(yes: bool) -> None:
+                if not yes:
+                    return
+                if path.exists():
+                    path.unlink()
+                self._persona_buffer.pop(name, None)
+                if self.persona_active == name:
+                    active_file = self.persona_path.parent / "persona.active"
+                    if active_file.exists():
+                        active_file.unlink()
+                    self.persona_active = "default"
+                self.persona_selected = "default"
+                self._refresh_persona_list()
+                self._load(self.query_one("#persona-text", TextArea), self._persona_read("default"))
+                self._update_status()
+                self.notify(f"Deleted {name}.")
+            self.push_screen(Confirm(f"Delete persona '{name}' ({path})?"), done_p)
+        elif tab == "hooks":
             phrase = self.hook_selected
             if not phrase or self._hook_kind(phrase) != "custom":
                 self.notify("Only a phrase of your own can be deleted; built-ins can be reworded or reset.", severity="warning")

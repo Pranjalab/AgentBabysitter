@@ -144,6 +144,15 @@ goes the persona (tab 2). Source: `_prompt_mechanics_live` and
 - **Appears when** always.
 - **Backed by** the Telegram plugin (tool); prompt only for the "treat as instruction" part.
 
+**Name** `PERSONAS`
+- **Slot** mechanics
+- **Purpose** The operator wants the model to be able to read, create and switch personas itself; without the paths and the rules it cannot.
+- **Gives** this session's persona name; where personas live; the three shipped names; the cap and the forgery rule; the commands; that switching is a relaunch.
+- **Asks** read, create or edit persona files when the operator asks; say that a switch needs a relaunch.
+- **Never** touch the mechanics or safety; pretend a switch happened mid-session.
+- **Appears when** always.
+- **Backed by** `persona_valid` at launch (script); the rest prompt only.
+
 **Name** `QUIET MODE`
 - **Slot** mechanics
 - **Purpose** Proactive reports must respect mute, but replies must not.
@@ -198,6 +207,15 @@ goes the persona (tab 2). Source: `_prompt_mechanics_live` and
 The shipped persona, `_prompt_persona_default` in `abs.sh`; replaced whole by
 `~/.abs/persona.md` when that exists and is valid. 636 words after the audit
 (849 before), four sections.
+
+**Name** `NAME` (and `ROLE — …` in the shipped examples)
+- **Slot** persona
+- **Purpose** The agent answers to a name and, in a named persona, to a role; without one it is "the model".
+- **Gives** the name (ABS, said like "Abish"); in ceo/cto/friend, the role and how it works.
+- **Asks** answer to the name; offer one if asked to pick; in cto, run the audit → plan → dispatch → check → send-back → report loop.
+- **Never** sign with the name.
+- **Appears when** always (persona); the ROLE block only in a named persona.
+- **Backed by** prompt only.
 
 **Name** `TONE`
 - **Slot** persona

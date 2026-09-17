@@ -607,6 +607,10 @@ the three message types (ack, fork, update) and the shape of the update card.
 
 ```
 abs prompt                    # the page: F1–F7 or ^PgUp/^PgDn tabs · ^S save · ^R reset · ^N new · ^T delete · ^Q quit
+abs persona                   # list: default, ceo, cto, friend, yours — and which is active
+abs --persona cto             # one session as the CTO
+abs persona use friend        # every new session, until changed
+abs persona create reviewer --from cto   # your own, edited with: abs persona edit reviewer
 abs prompt show built         # exactly what the next launch passes
 abs prompt show persona|hooks|system|project|global|memory
 abs prompt edit persona       # in $EDITOR; seeded with the shipped text (also: hooks, project, memory)
@@ -617,8 +621,16 @@ abs prompt diff persona       # yours against shipped
 The page has seven tabs. **Overview** is where it opens: the three slots with
 their token counts, every file with its path and whether it is yours or
 shipped, and one line per tab. **System** is read-only and shows the two locked
-slots as built. **Persona** edits `~/.abs/persona.md`, with a live character and
-token count against the cap; it takes effect at the next launch. **Hooks** lists
+slots as built. **Persona** is a list of identities and an editor: `default` is
+`~/.abs/persona.md`; `ceo`, `cto` and `friend` ship as examples; anything else is
+a file of yours in `~/.abs/personas/`. Select one to read it, edit and `^S` to
+save it (a shipped example becomes your file the first time you save it), `^N`
+to create one copied from the selected one, `^U` to make it the persona new
+sessions launch with, `^T` to delete a file of yours, `^R` to put a shipped one
+back. A live character and token count sits against the cap. Everything takes
+effect at the next launch: `abs --persona <name>` for one session, `abs persona
+use <name>` for every session after. The model is told where personas live, so
+you can ask it to write one for you. **Hooks** lists
 every control phrase: `ABS MUTE`, `ABS OFF` and `ABS BLOCK` are shown locked,
 because they act inside the hook and never reach the model; `ABS UNMUTE`, `ABS
 STOP` and `ABS EXIT` have wording you can change; and `^N` adds a phrase of your

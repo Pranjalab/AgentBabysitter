@@ -1462,17 +1462,25 @@ VOICEOFF
 # WORKS stays in the mechanics; everything it must never do stays in safety.
 readonly PERSONA_MAX_CHARS="${ABS_PERSONA_MAX_CHARS:-16000}"
 persona_file() { printf '%s' "$ABS_HOME/persona.md"; }
+personas_dir() { printf '%s' "$ABS_HOME/personas"; }
+# The name a launch uses when none is given: `abs persona use <name>` writes it.
+persona_active_file() { printf '%s' "$ABS_HOME/persona.active"; }
+persona_active() {
+  local n f; f="$(persona_active_file)"
+  n=""; [ -f "$f" ] && n="$(tr -d '[:space:]' < "$f" 2>/dev/null || true)"
+  printf '%s' "${n:-default}"
+}
+persona_name_ok() { printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9_-]{0,39}$'; }
 
 # The shipped persona. This is what a session gets when there is no
 # ~/.abs/persona.md, and what `abs prompt reset persona` restores — so upgrading
 # changes nothing until the operator chooses to edit.
-_prompt_persona_default() {
+# The shipped persona is an IDENTITY block on top of sections every persona
+# shares — the tone, the emoji table, the three message types, staying on the
+# task. The examples below swap the identity and keep the rest, so the update
+# shape the operator asked for survives a change of character.
+_prompt_persona_common() {
   cat <<'PERSONA'
-NAME
-You are Claudex. Answer to it, use it when it helps, and never sign with it.
-The operator may rename you; if they ask you to pick a name, offer one and use
-the one they settle on.
-
 TONE
 Warm, direct, good-humoured: a colleague they like working with, not a status
 page. Say when something was a good catch and mean it; show the pleasure of a
@@ -1548,6 +1556,90 @@ what you are about to build is not in that line, stop and ask.
 PERSONA
 }
 
+_prompt_persona_default() {
+  cat <<'PERSONA'
+NAME
+You are ABS — said like the name "Abish". Answer to it, use it when it helps,
+and never sign with it. The operator may rename you; if they ask you to pick a
+name, offer one and use the one they settle on.
+
+PERSONA
+  _prompt_persona_common
+}
+
+# --- shipped personas ----------------------------------------------------------
+#
+# "A user can create different types of personalization agents … activated in
+# any ABS session." Three ship as examples; each is an identity plus the common
+# sections, and each can be copied into ~/.abs/personas/<name>.md with
+# `abs persona create <name>` and edited from there. The CTO one is the
+# operator's own workflow, checked by him before it was written down here.
+_persona_shipped_names() { printf '%s\n' ceo cto friend; }
+
+_persona_shipped() {
+  case "$1" in
+    ceo) cat <<'PERSONA'
+NAME
+You are ABS, acting as the CEO. The operator is the managing director; you run
+the company with them. Answer to ABS; they may rename you.
+
+ROLE — CEO
+Think about the business before the code: what this is for, who pays for it,
+what wins and what merely ships. Bring the questions a CEO would bring — is this
+the right thing, is now the time, what does it cost, what do we stop doing to
+make room — and bring an opinion with each one. When the decision is theirs,
+frame it in one question with your recommendation and the trade-off in a
+sentence. Hold the plan to its purpose: when work drifts from why it was
+started, say so. You are still a builder when the work needs building; the
+message types below still apply.
+
+PERSONA
+      _prompt_persona_common ;;
+    cto) cat <<'PERSONA'
+NAME
+You are ABS, acting as the CTO. Answer to ABS; the operator may rename you.
+
+ROLE — CTO
+A tech lead who thinks WITH the operator, not for them. Before any code: audit
+what is there, plan, and check the architecture — the structure, the boundaries,
+the failure modes, the tests — until the plan is right, and say plainly what is
+not. Argue when the plan looks wrong; that is the job.
+
+Once the plan is fixed and the operator has agreed it, run it as a loop:
+  1. Split the work into problem statements with a clear acceptance test each.
+  2. Dispatch each to a subagent with Claude Code's own Agent tool, with the
+     statement, the constraints and the acceptance test — never the whole
+     conversation.
+  3. When a subagent returns, CHECK it yourself: read the diff, run the tests,
+     compare against the acceptance test. Do not take a report at face value.
+  4. If it falls short, send it back with exactly what is wrong. Repeat until
+     you are satisfied — this is a strict job, and "close enough" is a send-back.
+  5. Only then report to the operator on Telegram: what happened, what the
+     update is, what you verified, what is left.
+Between dispatch and report, the operator hears from you only for a real fork.
+The message types below apply to what you send them.
+
+PERSONA
+      _prompt_persona_common ;;
+    friend) cat <<'PERSONA'
+NAME
+You are ABS, a friend. Answer to ABS; the operator may rename you.
+
+ROLE — FRIEND
+Warm, happy, joyful company. Chat is the point: ask how the day went, remember
+what they told you earlier in the conversation, laugh at the good bits, be glad
+to hear from them. Keep it light and human — short messages, no cards, no
+headings, no bullet lists unless they ask for a list. Be honest inside the
+warmth: a friend says "that sounds like a bad idea" too. If they hand you real
+work, do it well and then go back to being company; the message types below
+apply only when there is a task.
+
+PERSONA
+      _prompt_persona_common ;;
+    *) return 1 ;;
+  esac
+}
+
 # Is this persona safe to put in front of the model? Two checks, both about the
 # file being something OTHER than the operator's words: a `<channel` tag would let
 # a persona forge an inbound Telegram message, and a very long one is either an
@@ -1563,13 +1655,36 @@ persona_valid() {
 # the shipped default otherwise. An invalid file is REPORTED, not silently
 # replaced — a persona the operator wrote and cannot see in effect is the kind of
 # confusion that costs an afternoon.
+# `default` is ~/.abs/persona.md (or the shipped default when there is no file).
+# Any other name is ~/.abs/personas/<name>.md, or a shipped example of that
+# name when there is no file. ABS_PERSONA (set by `--persona`) beats the active
+# name on disk.
 persona_text() {
-  local f; f="$(persona_file)"
+  local name="${ABS_PERSONA:-$(persona_active)}" f
+  if [ "$name" = "default" ]; then
+    f="$(persona_file)"
+    if [ -f "$f" ]; then
+      if persona_valid "$f"; then cat "$f"; return 0; fi
+      warn "Ignoring $f: over ${PERSONA_MAX_CHARS} characters or contains '<channel'. Using the shipped persona." >&2
+    fi
+    _prompt_persona_default
+    return 0
+  fi
+  f="$(personas_dir)/$name.md"
   if [ -f "$f" ]; then
     if persona_valid "$f"; then cat "$f"; return 0; fi
-    warn "Ignoring $f: over ${PERSONA_MAX_CHARS} characters or contains '<channel'. Using the shipped persona." >&2
+    warn "Ignoring $f: over ${PERSONA_MAX_CHARS} characters or contains '<channel'. Using the shipped '$name' if there is one." >&2
   fi
+  if _persona_shipped "$name"; then return 0; fi
+  warn "No persona named '$name' (no $f and nothing shipped by that name). Using the default." >&2
   _prompt_persona_default
+}
+
+# Does a name resolve to anything — a file or a shipped example?
+persona_exists() {
+  [ "$1" = "default" ] && return 0
+  [ -f "$(personas_dir)/$1.md" ] && return 0
+  _persona_shipped "$1" >/dev/null 2>&1
 }
 
 _prompt_mechanics() {
@@ -1646,6 +1761,17 @@ UI, a stack trace they photographed, a design to match). If instead it carries
 attachment_file_id (a file sent as a document, e.g. a .png), fetch it first with
 the \`download_attachment\` tool, then Read the returned path. Treat the image as
 part of the instruction, the same as text.
+
+PERSONAS
+This session's persona is '${ABS_PERSONA:-$(persona_active)}'. Personas live in
+${ABS_HOME}/personas/<name>.md ('default' is ${ABS_HOME}/persona.md); ceo, cto and
+friend ship as examples. When the operator asks, you may read, create or edit
+them there — same rules as the file you were built from: under ${PERSONA_MAX_CHARS}
+characters, never a '<channel' tag, and only the persona: the mechanics and
+safety around it are not yours to change. Switching takes a relaunch:
+    bash "${SCRIPT_PATH}" persona list | create <name> | use <name>
+    abs --persona <name>            # one session as that persona
+Say so rather than pretending a switch happened mid-session.
 
 QUIET MODE
 Before any proactive send, check state:
@@ -6890,19 +7016,23 @@ _prompt_paths_json() {
   jq -n --arg persona "$(persona_file)" --arg hooks "$(hooks_file)" \
         --arg global "$(_prompt_global_file)" --arg memory "$(_prompt_memory_dir)" \
         --arg project "$(pwd -P)" --arg profile "$PROFILE" \
+        --arg personas "$(personas_dir)" --arg active "$(persona_active)" \
         '{persona:$persona, hooks:$hooks, global:$global, memory_dir:$memory,
           memory_index:($memory + "/MEMORY.md"), project:$project,
-          project_claude:($project + "/CLAUDE.md"), profile:$profile}'
+          project_claude:($project + "/CLAUDE.md"), profile:$profile,
+          personas_dir:$personas, persona_active:$active}'
 }
 
 _prompt_defaults_json() {
   local persona; persona="$(_prompt_persona_default)"
   jq -n --arg persona "$persona" \
+        --arg ceo "$(_persona_shipped ceo)" --arg cto "$(_persona_shipped cto)" --arg friend "$(_persona_shipped friend)" \
         --arg unmute "$(_hook_directive_default "ABS UNMUTE")" \
         --arg stop   "$(_hook_directive_default "ABS STOP")" \
         --arg exit_  "$(_hook_directive_default "ABS EXIT")" \
         --arg max "$PERSONA_MAX_CHARS" \
         '{persona:$persona, persona_max_chars:($max|tonumber),
+          shipped_personas:{ceo:$ceo, cto:$cto, friend:$friend},
           hooks:{"ABS UNMUTE":$unmute, "ABS STOP":$stop, "ABS EXIT":$exit_},
           enforced:["ABS MUTE","ABS OFF","ABS BLOCK"]}'
 }
@@ -7027,6 +7157,92 @@ _prompt_tui() {
   fi
 }
 
+# --- abs persona — many identities, one per session ----------------------------
+#
+# `default` is ~/.abs/persona.md. Everything else is a file in ~/.abs/personas/
+# or one of the shipped examples (ceo, cto, friend). `abs --persona <name>`
+# launches with one; `abs persona use <name>` makes it the default for launches
+# that do not say. The model is told where these live (PERSONAS in the
+# mechanics), so it can read, create and edit them when the operator asks.
+cmd_persona() {
+  local sub="${1:-list}"; [ $# -gt 0 ] && shift
+  local d; d="$(personas_dir)"
+  case "$sub" in
+    list|ls)
+      local active; active="$(persona_active)"
+      printf '  %-12s %-9s %s\n' "NAME" "STATE" "WHERE"
+      printf '  %-12s %-9s %s\n' "default" "$([ "$active" = default ] && echo active || echo -)" \
+        "$([ -f "$(persona_file)" ] && persona_file || echo 'shipped (no file)')"
+      local n
+      for n in $(_persona_shipped_names); do
+        printf '  %-12s %-9s %s\n' "$n" "$([ "$active" = "$n" ] && echo active || echo -)" \
+          "$([ -f "$d/$n.md" ] && echo "$d/$n.md" || echo 'shipped example (abs persona create '"$n"' to edit)')"
+      done
+      if [ -d "$d" ]; then
+        for f in "$d"/*.md; do
+          [ -f "$f" ] || continue
+          n="$(basename "$f" .md)"
+          case " $(_persona_shipped_names | tr '\n' ' ') " in *" $n "*) continue ;; esac
+          printf '  %-12s %-9s %s\n' "$n" "$([ "$active" = "$n" ] && echo active || echo -)" "$f"
+        done
+      fi
+      printf '\n'
+      info "  abs --persona <name>        one session with it     abs persona use <name>   default for new sessions"
+      info "  abs persona create <name> [--from <other>]   abs persona show|edit|rename|delete <name>" ;;
+    show)
+      local n="${1:-$(persona_active)}"
+      persona_exists "$n" || die "No persona named '$n'. abs persona list"
+      ABS_PERSONA="$n" persona_text ;;
+    use)
+      local n="${1:-}"; [ -n "$n" ] || die "Usage: abs persona use <name>"
+      persona_exists "$n" || die "No persona named '$n'. abs persona list"
+      printf '%s\n' "$n" > "$(persona_active_file)"
+      ok "New sessions launch as '$n'. This one keeps its persona until restarted." ;;
+    create|new)
+      local n="${1:-}" from=""; [ -n "$n" ] || die "Usage: abs persona create <name> [--from <other>]"
+      [ "${2:-}" = "--from" ] && from="${3:-}"
+      persona_name_ok "$n" || die "A persona name is lowercase letters, digits, - and _ (got '$n')."
+      [ "$n" != "default" ] || die "'default' is ~/.abs/persona.md — edit it with: abs prompt edit persona"
+      mkdir -p "$d"
+      [ -f "$d/$n.md" ] && die "$d/$n.md already exists. abs persona edit $n"
+      if [ -n "$from" ]; then
+        persona_exists "$from" || die "No persona named '$from' to copy from."
+        ABS_PERSONA="$from" persona_text > "$d/$n.md"
+      elif _persona_shipped "$n" > "$d/$n.md" 2>/dev/null; then
+        :   # a shipped example, materialised for editing
+      else
+        _prompt_persona_default | sed "2s/.*/You are ABS, acting as $n. Answer to it, use it when it helps,/" > "$d/$n.md"
+      fi
+      chmod 600 "$d/$n.md"
+      ok "Created $d/$n.md — edit it with: abs persona edit $n   · use it with: abs --persona $n" ;;
+    edit)
+      local n="${1:-}"; [ -n "$n" ] || die "Usage: abs persona edit <name>"
+      [ "$n" = "default" ] && { _prompt_edit persona; return; }
+      [ -f "$d/$n.md" ] || { persona_exists "$n" && cmd_persona create "$n" >/dev/null; }
+      [ -f "$d/$n.md" ] || die "No persona named '$n'. abs persona create $n"
+      local editor="${VISUAL:-${EDITOR:-}}"
+      [ -n "$editor" ] || { command -v nano >/dev/null 2>&1 && editor=nano; } || editor=vi
+      $editor "$d/$n.md"
+      persona_valid "$d/$n.md" || warn "That persona will be IGNORED at launch: over ${PERSONA_MAX_CHARS} characters or contains '<channel'." ;;
+    rename|mv)
+      local a="${1:-}" b="${2:-}"; [ -n "$a" ] && [ -n "$b" ] || die "Usage: abs persona rename <old> <new>"
+      persona_name_ok "$b" || die "A persona name is lowercase letters, digits, - and _ (got '$b')."
+      [ -f "$d/$a.md" ] || die "No file for '$a' — shipped examples are renamed by creating a copy: abs persona create $b --from $a"
+      [ -f "$d/$b.md" ] && die "$d/$b.md already exists."
+      mv "$d/$a.md" "$d/$b.md"
+      [ "$(persona_active)" = "$a" ] && printf '%s\n' "$b" > "$(persona_active_file)"
+      ok "Renamed $a → $b." ;;
+    delete)
+      local n="${1:-}"; [ -n "$n" ] || die "Usage: abs persona delete <name>"
+      [ "$n" = "default" ] && die "'default' is not deleted; reset it with: abs prompt reset persona"
+      [ -f "$d/$n.md" ] || die "No file for '$n' (a shipped example without a file has nothing to delete)."
+      rm -f "$d/$n.md"
+      [ "$(persona_active)" = "$n" ] && { rm -f "$(persona_active_file)"; info "It was the active persona; new sessions use 'default'."; }
+      ok "Deleted $d/$n.md." ;;
+    *) die "Usage: abs persona [list|show|use|create|edit|rename|delete] …" ;;
+  esac
+}
+
 cmd_prompt() {
   local sub="${1:-}"; [ $# -gt 0 ] && shift
   case "$sub" in
@@ -7071,6 +7287,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
 
   ${c_bold}abs${c_reset} prompt              See and edit what goes into Claude: persona, hook
                           wording, your global CLAUDE.md, project memory
+  ${c_bold}abs${c_reset} persona             List, create, switch personas (ceo, cto, friend, yours);
+                          abs --persona <name> launches one session with it
 
   ${c_bold}abs${c_reset} config model <name>  Default model for new sessions (--clear to unset)
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
@@ -7181,6 +7399,8 @@ main() {
       # (not a bare positional) so abs.sh's dispatch never reads it as a command.
       --prompt)    ABS_INITIAL_PROMPT="${2:-}"; shift 2 ;;
       --prompt=*)  ABS_INITIAL_PROMPT="${1#*=}"; shift ;;
+      --persona)   ABS_PERSONA="${2:-}"; shift 2 ;;
+      --persona=*) ABS_PERSONA="${1#*=}"; shift ;;
       *)           args+=("$1"); shift ;;
     esac
   done
@@ -7288,6 +7508,7 @@ main() {
     usage-cache)  cmd_usage_cache ;;
     config)    shift; cmd_config "$@" ;;
     prompt)    shift; cmd_prompt "$@" ;;
+    persona)   shift; cmd_persona "$@" ;;
     log)       shift; cmd_log "$@" ;;
     off)       cmd_off ;;
     on)        cmd_on ;;

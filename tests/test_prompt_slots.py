@@ -269,4 +269,56 @@ def test_showing_the_prompt_does_not_spend_the_offer(box):
 
 def test_the_persona_names_the_agent(box):
     text = box.built()
-    assert "NAME\nYou are Claudex." in text
+    assert "NAME\nYou are ABS" in text
+
+
+# ---- personas by name ---------------------------------------------------------
+
+def test_a_shipped_persona_launches_without_a_file(box):
+    r = box.run("prompt", "show", "built", ABS_PERSONA="cto")
+    assert "ROLE — CTO" in r.stdout
+    assert "MESSAGE TYPES" in r.stdout          # the common sections ride along
+    assert "Never send secrets over Telegram" in r.stdout
+
+
+def test_persona_use_sets_the_default_for_launches(box):
+    assert box.run("persona", "use", "friend").returncode == 0
+    assert (box.abs_home / "persona.active").read_text().strip() == "friend"
+    assert "ROLE — FRIEND" in box.built()
+    assert "persona is 'friend'" in box.built()   # PERSONAS section tells the model
+
+
+def test_the_flag_beats_the_active_name(box):
+    box.run("persona", "use", "friend")
+    r = box.run("prompt", "show", "built", ABS_PERSONA="ceo")
+    assert "ROLE — CEO" in r.stdout and "ROLE — FRIEND" not in r.stdout
+
+
+def test_create_materialises_a_shipped_example_and_a_fresh_name_copies_the_default(box):
+    r = box.run("persona", "create", "cto")
+    assert r.returncode == 0, r.stderr
+    assert "ROLE — CTO" in (box.abs_home / "personas" / "cto.md").read_text()
+    r = box.run("persona", "create", "mine")
+    assert r.returncode == 0, r.stderr
+    text = (box.abs_home / "personas" / "mine.md").read_text()
+    assert text.startswith("NAME\nYou are ABS, acting as mine.")
+    assert box.run("persona", "create", "Bad Name").returncode != 0
+
+
+def test_an_unknown_persona_falls_back_to_the_default_and_says_so(box):
+    r = box.run("prompt", "show", "built", ABS_PERSONA="nope")
+    assert "No persona named 'nope'" in r.stderr
+    assert 'said like the name "Abish"' in r.stdout
+
+
+def test_rename_and_delete_follow_the_active_name(box):
+    box.run("persona", "create", "mine")
+    box.run("persona", "use", "mine")
+    assert box.run("persona", "rename", "mine", "ours").returncode == 0
+    assert (box.abs_home / "persona.active").read_text().strip() == "ours"
+    assert box.run("persona", "delete", "ours").returncode == 0
+    assert not (box.abs_home / "persona.active").exists()
+
+
+def test_the_default_persona_is_named_abs(box):
+    assert 'You are ABS — said like the name "Abish"' in box.built()

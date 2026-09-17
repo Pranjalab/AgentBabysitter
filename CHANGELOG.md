@@ -56,6 +56,16 @@ ABS setup."
   (`"ABS REVIEW": "…"`), sent as a whole message from Telegram. `{profile}` is
   substituted. `ABS MUTE`, `ABS OFF` and `ABS BLOCK` cannot be reworded: they act
   in the hook and never reach the model, and an entry under those names is ignored.
+- **Named personas.** `~/.abs/personas/<name>.md`, one identity each on top of
+  the sections every persona shares; `ceo`, `cto` and `friend` ship as examples
+  (the CTO one is the operator's own audit → plan → dispatch subagents → check →
+  send back → report loop). `abs --persona <name>` for one session, `abs persona
+  use <name>` for every session after; `abs persona list|show|create|edit|rename|
+  delete`. The Persona tab of `abs prompt` is the picker and the editor. The
+  model is told where personas live and may read, create or edit them when
+  asked; the mechanics and safety around them stay out of reach.
+- **The agent has a name.** The shipped persona opens with NAME: you are ABS
+  (said like "Abish"); the operator may rename it.
 - **`abs prompt show built`** prints exactly what the next launch will pass.
 
 ### Changed

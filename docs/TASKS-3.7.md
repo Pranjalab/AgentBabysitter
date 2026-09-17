@@ -96,7 +96,7 @@ task."* The design is fixed; only the timing moved.
 - The operator has *"other plans for the monitoring part"* — ask before
   touching anything named monitor.
 
-## 5. Named personas — many identities, one active per session  →  after 3.7.0
+## 5. Named personas — many identities, one active per session  →  ✅ in 3.7.0 (moved up 17 Sep)
 
 Described by the operator on 17 Sep, written here in the feature structure
 (docs/PROMPT-SPEC.md §A.2) so it is defined once before it is built.
@@ -138,7 +138,7 @@ Described by the operator on 17 Sep, written here in the feature structure
 - **Verified by** a launch with `--persona x` builds with `personas/x.md` in
   the middle and nothing else changed; an unknown name is refused before launch;
   the three examples pass the same validation; bash 3.2 in the container.
-- **Shipped in** not yet.
+- **Shipped in** 3.7.0 — everything except `ABS PERSONA <name>` from Telegram, which waits for item 3.
 
 ## 4. Housekeeping — whenever
 

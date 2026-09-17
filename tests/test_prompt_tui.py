@@ -218,7 +218,7 @@ async def test_the_status_line_counts_tokens_and_flags_the_cap(home):
         app.action_tab("persona")
         await pilot.pause()
         status = str(app.query_one("#status").render())
-        assert "tokens" in status and "shipped default" in status
+        assert "tokens" in status and "default · shipped" in status
         app.query_one("#persona-text").load_text("x" * 17000)
         await pilot.pause()
         status = str(app.query_one("#status").render())
@@ -296,3 +296,69 @@ async def test_unsaved_changes_ask_first_and_n_keeps_the_page(home):
         await pilot.pause()
         assert app._exit
     assert not (home / "persona.md").exists()        # quit WITHOUT saving
+
+
+# ---- personas: many identities, one per session ------------------------------
+
+async def test_the_persona_tab_lists_default_and_the_shipped_examples(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_tab("persona")
+        await pilot.pause()
+        names = [getattr(i, "name", None) for i in app.query_one("#persona-list").children]
+        assert names[:4] == ["default", "ceo", "cto", "friend"]
+
+
+async def test_selecting_a_shipped_persona_shows_its_text_and_saving_materialises_it(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_tab("persona")
+        await pilot.pause()
+        lv = app.query_one("#persona-list")
+        lv.index = 2                                   # cto
+        await pilot.pause()
+        ta = app.query_one("#persona-text")
+        assert "ROLE — CTO" in ta.text
+        assert not any(app.dirty.values())             # looking is not editing
+        ta.focus()
+        await pilot.press("end", "x")
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+    f = home / "personas" / "cto.md"
+    assert f.exists() and "ROLE — CTO" in f.read_text()
+
+
+async def test_ctrl_u_makes_the_selected_persona_the_active_one(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_tab("persona")
+        await pilot.pause()
+        app.query_one("#persona-list").index = 3       # friend
+        await pilot.pause()
+        await pilot.press("ctrl+u")
+        await pilot.pause()
+    assert (home / "persona.active").read_text().strip() == "friend"
+
+
+async def test_a_new_persona_is_copied_from_the_selected_one_and_saved_to_its_own_file(home):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_tab("persona")
+        await pilot.pause()
+        app.action_new()
+        await pilot.pause()
+        await pilot.press(*"reviewer")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.persona_selected == "reviewer"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+    f = home / "personas" / "reviewer.md"
+    assert f.exists()
+    assert "acting as reviewer" in f.read_text()
+    assert "MESSAGE TYPES" in f.read_text()
