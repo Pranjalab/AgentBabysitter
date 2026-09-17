@@ -1784,6 +1784,24 @@ To change it (on their request, from terminal or Telegram):
 EOF
 }
 
+# `abs config commits ask|auto`. Ask (the default): finished work stays in the
+# working tree until the operator says commit. Auto: every completed task is
+# committed with a clear message — "keep version control of all the task
+# completions" — but a push still waits for the word. Set here rather than in
+# any persona, because the operator's rule was that it holds for every persona:
+# it is part of the ABS context, not of one character.
+vcs_policy() {
+  local v; v="$(state_get '.vcs_policy')"
+  case "$v" in auto) printf auto ;; *) printf ask ;; esac
+}
+_prompt_vcs_policy() {
+  if [ "$(vcs_policy)" = auto ]; then
+    printf '%s' 'The operator keeps version control of every completed task: when a task is done and its tests pass, commit it with a clear message. That is the only automatic commit — a half-done task is not committed.'
+  else
+    printf '%s' 'Finished work stays uncommitted in the working tree until the operator says "commit" (or "freeze"). They may want to change the feature or check something first.'
+  fi
+}
+
 _prompt_safety() {
   cat <<EOF
 HARD OFF
@@ -1815,6 +1833,13 @@ push, reading .env, DROP/TRUNCATE, etc.) when the turn came from Telegram — a
 remote message is lower-trust than the operator at the desk. If a command is
 blocked, don't fight it: tell the operator it was blocked as remote-driven and
 that they can run it at the terminal. From the terminal, nothing is blocked.
+
+VERSION CONTROL — commit and push only when told
+$(_prompt_vcs_policy)
+Never commit or push as a side effect of another task, to tidy up, or to "save
+progress": the operator may still want to change or check the work. Say once,
+in the update, that it is ready to commit — then wait. Pushing always waits for
+the word "push".
 
 SHIPPING — push, deploy, publish, release, tag
 Never as a side effect of another task. When the work is ready, ask ONE explicit
@@ -3863,6 +3888,13 @@ cmd_config() {
         *)
           state_set --arg m "$val" '.model = $m'
           ok "Default model set to '$val'." ;;
+      esac ;;
+    commits)
+      case "$val" in
+        ask)   state_set 'del(.vcs_policy)'; ok "Commits: ask — finished work stays uncommitted until you say commit; push on your word. Takes effect in a NEW session." ;;
+        auto)  state_set '.vcs_policy = "auto"'; ok "Commits: auto — every completed task is committed; push still waits for your word. Takes effect in a NEW session." ;;
+        "")    info "Commits: $(vcs_policy)" ;;
+        *)     die "Usage: abs config commits ask|auto" ;;
       esac ;;
     silent)
       case "$val" in
@@ -7370,6 +7402,9 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} persona             List, create, switch personas (ceo, cto, friend, yours);
                           abs --persona <name> launches one session with it
 
+  ${c_bold}abs${c_reset} config commits ask|auto
+                          ask: commit and push only when you say (default);
+                          auto: commit each completed task, push still on your word
   ${c_bold}abs${c_reset} config model <name>  Default model for new sessions (--clear to unset)
   ${c_bold}abs${c_reset} config silent on|off Whether new sessions start muted
   ${c_bold}abs${c_reset} config reply-text on|off   Send replies as text (default on)

@@ -336,3 +336,35 @@ def test_a_custom_phrase_must_start_with_abs(box):
     """A bare word as a whole message is too easy to send by accident."""
     box.hooks.write_text(json.dumps({"REVIEW": "Run the review checklist."}))
     assert box.hook("REVIEW").stdout.strip() == ""
+
+
+# ---- version control: commit and push only when told ------------------------------
+#
+# 17 Sep: "you committed the changes and pushed, which I did not tell … the user
+# will tell you to commit the work or freeze the change once the code is ready,
+# and … to push once satisfied." A rule for every persona, so it lives in the
+# locked slot and is driven by a setting, not by a character.
+
+def test_the_default_policy_holds_finished_work_uncommitted(box):
+    text = box.built()
+    assert "VERSION CONTROL — commit and push only when told" in text
+    assert 'until the operator says "commit"' in text
+    assert "Pushing always waits" in text
+    i_v = text.index("VERSION CONTROL"); i_s = text.index("SAFETY\n")
+    assert i_v < i_s                                  # in the locked slot, after the persona
+
+
+def test_auto_commits_change_the_wording_but_not_the_push_rule(box):
+    r = box.run("config", "commits", "auto")
+    assert r.returncode == 0, r.stderr
+    text = box.built()
+    assert "keeps version control of every completed task" in text
+    assert "Pushing always waits" in text
+    assert box.run("config", "commits", "ask").returncode == 0
+    assert 'until the operator says "commit"' in box.built()
+
+
+def test_the_rule_holds_whatever_the_persona(box):
+    for name in ("cto", "friend"):
+        r = box.run("prompt", "show", "built", ABS_PERSONA=name)
+        assert "VERSION CONTROL — commit and push only when told" in r.stdout, name

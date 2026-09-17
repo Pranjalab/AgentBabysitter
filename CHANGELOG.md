@@ -66,6 +66,11 @@ ABS setup."
   asked; the mechanics and safety around them stay out of reach.
 - **The agent has a name.** The shipped persona opens with NAME: you are ABS
   (said like "Abish"); the operator may rename it.
+- **Commit and push only when told.** A VERSION CONTROL section in the locked
+  safety slot: finished work stays uncommitted until the operator says commit
+  (or freeze), a push waits for the word push, never as a side effect. `abs
+  config commits auto` switches to committing every completed task; the push
+  rule stays. Holds for every persona.
 - **`abs prompt show built`** prints exactly what the next launch will pass.
 
 ### Changed

@@ -255,6 +255,15 @@ The shipped persona, `_prompt_persona_default` in `abs.sh`; replaced whole by
 
 ## D. Register — added to Safety on 17 Sep
 
+**Name** `VERSION CONTROL — commit and push only when told`
+- **Slot** safety
+- **Purpose** 17 Sep: work was committed and pushed without being asked; the operator may still want to change the feature or check it.
+- **Gives** the policy in force (`abs config commits ask|auto`): ask = finished work stays uncommitted until "commit"/"freeze"; auto = each completed task is committed.
+- **Asks** say once in the update that the work is ready to commit; commit on the word; push on the word "push".
+- **Never** commit or push as a side effect, to tidy up, or to save progress; push without the word, in either policy.
+- **Appears when** always, before `SHIPPING`. Holds for every persona — it is ABS context, not character.
+- **Backed by** prompt only (the guard blocks only force-push).
+
 **Name** `SHIPPING — push, deploy, publish, release, tag`
 - **Slot** safety
 - **Purpose** The operator ships from the phone most of the time, and the old rule (never from Telegram) blocked him; the risk is a ship as a side effect, or three ships bundled into one vague question.

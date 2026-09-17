@@ -659,6 +659,14 @@ The persona is **one file, global** across every bot and every project. That is
 deliberate: a project-local persona would let a cloned repository rewrite your
 agent's character, and an identity that changes when you `cd` is not an identity.
 
+Two rules live in the locked slot for every persona, driven by settings rather
+than by character: **version control** — finished work stays uncommitted until
+you say commit, and nothing is pushed until you say push (`abs config commits
+auto` commits each completed task instead; the push rule stays) — and
+**shipping** — push, deploy, publish, release and tag are never a side effect;
+the model asks one explicit question naming the action and the target, and a
+yes over Telegram counts.
+
 The page needs the v3 source and Textual (`abs src install` brings both).
 Without them, `abs prompt` prints the table and the plain commands still work.
 
