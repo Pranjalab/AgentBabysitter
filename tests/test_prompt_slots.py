@@ -322,3 +322,17 @@ def test_rename_and_delete_follow_the_active_name(box):
 
 def test_the_default_persona_is_named_abs(box):
     assert 'You are ABS — said like the name "Abish"' in box.built()
+
+
+# ---- hooks audit, 17 Sep -------------------------------------------------------
+
+def test_a_hand_edited_lowercase_key_still_matches(box):
+    box.hooks.write_text(json.dumps({"abs review": "Run the review checklist."}))
+    assert "review checklist" in box.hook("ABS REVIEW").stdout
+    assert "review checklist" in box.hook("abs review").stdout      # the hook upper-cases
+
+
+def test_a_custom_phrase_must_start_with_abs(box):
+    """A bare word as a whole message is too easy to send by accident."""
+    box.hooks.write_text(json.dumps({"REVIEW": "Run the review checklist."}))
+    assert box.hook("REVIEW").stdout.strip() == ""

@@ -3378,11 +3378,14 @@ ABS EXIT"
 # The text the operator wrote for a phrase, or empty. A value carrying `<channel`
 # is refused for the same reason the persona refuses it: it could forge an
 # inbound message.
+# Keys are matched case-insensitively (the hook upper-cases the message, and a
+# hand-edited file may not), and a phrase of the operator's own must start with
+# "ABS " — a bare "REVIEW" as a whole message is too easy to send by accident.
 _hook_directive_custom() {
   local f text; f="$(hooks_file)"
   [ -f "$f" ] || return 1
-  text="$(jq -r --arg k "$1" '.[$k] // empty' "$f" 2>/dev/null || true)"
-  [ -n "$text" ] || return 1
+  text="$(jq -r --arg k "$1" 'to_entries | map(select((.key | ascii_upcase) == ($k | ascii_upcase))) | .[0].value // empty' "$f" 2>/dev/null || true)"
+  [ -n "$text" ] && [ "$text" != "null" ] || return 1
   printf '%s' "$text" | grep -qi '<channel' && return 1
   printf '%s' "$text"
 }
@@ -3402,6 +3405,7 @@ _hook_directive() {
 _hook_custom_defined() {
   local up="$1"
   case "$up" in "ABS MUTE"|"ABS OFF"|"ABS BLOCK"|"ABS UNMUTE"|"ABS STOP"|"ABS EXIT") return 1 ;; esac
+  case "$up" in "ABS "*) ;; *) return 1 ;; esac
   _hook_directive_custom "$up" >/dev/null
 }
 

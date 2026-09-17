@@ -271,3 +271,67 @@ The three duplications found in the first pass, and where each rule now lives:
 - The one-line "on it" acknowledgement — **persona / ACK** only. Removed from `ALWAYS REPLY TO TELEGRAM`.
 - The EXIT confirmation — **the ABS EXIT directive** (`hooks.json` / shipped default) only. `REMOTE CONTROLS` now says the directive carries it.
 - The prose/card split — **the reply-mode block** owns what is spoken and the boundary; **MESSAGE TYPES** owns the shape and no longer repeats the boundary or the "split automatically" rule.
+
+## F. Register — the Hooks slot (tab 4), audited 17 Sep
+
+Per-turn text. A whole-message phrase from Telegram is matched by the
+UserPromptSubmit hook (`_hook_control`), upper-cased, and either ACTED on
+without the model or turned into one paragraph printed into the model's
+context. Wording lives in `~/.abs/hooks.json`; the shipped wording is
+`_hook_directive_default`. `{profile}` is substituted at injection.
+
+**Name** `ABS MUTE` · `ABS OFF` · `ABS BLOCK`
+- **Slot** hook (enforced)
+- **Purpose** The operator must be able to silence, cut or lock out a session that is misbehaving, without the model's cooperation.
+- **Gives** nothing to the model — these never reach it.
+- **Asks** nothing.
+- **Never** —
+- **Appears when** the phrase arrives; the hook exits 2 (the turn is dropped) after acting and sends a one-line ack over the Bot API.
+- **Backed by** `state_set` / `set_policy` (hook). A `hooks.json` entry under these names is ignored.
+
+**Name** `ABS UNMUTE`
+- **Slot** hook (directive)
+- **Purpose** Reports are back on, and the operator wants to know what happened while they were off.
+- **Gives** that reports are on.
+- **Asks** send a short catch-up of what was done while muted, then carry on.
+- **Never** —
+- **Appears when** the phrase arrives; the hook clears quiet/auto-silent, then injects.
+- **Backed by** state (hook) for the un-mute; the catch-up is prompt only.
+
+**Name** `ABS STOP`
+- **Slot** hook (directive)
+- **Purpose** Halt a plan that is going wrong, from the phone.
+- **Gives** that a stop was requested.
+- **Asks** halt now; start no new tool or step; say on Telegram that you have stopped; wait for the next instruction.
+- **Never** continue the plan.
+- **Appears when** the phrase arrives. Limit: a directive is read at the model's next turn; it cannot interrupt a tool already running. Interrupting is the 3.8 tmux item.
+- **Backed by** prompt only.
+
+**Name** `ABS EXIT`
+- **Slot** hook (directive)
+- **Purpose** Close the session from the phone without losing work mid-task.
+- **Gives** the exact exit command for this profile.
+- **Asks** if mid-task, ask "I am currently doing X; do you really want to stop?" and proceed only on a clear yes; when idle or confirmed, say you are closing and run the command.
+- **Never** exit mid-task unasked.
+- **Appears when** the phrase arrives (also the `/abs_exit` menu alias).
+- **Backed by** `cmd_exit` (script) once the model runs it; the confirmation is prompt only.
+
+**Name** a phrase of the operator's own (`"ABS <WORD>": "…"` in `hooks.json`)
+- **Slot** hook (directive)
+- **Purpose** "New hooks can be created": a phrase that injects whatever the operator wrote — `ABS REVIEW` → "run the review checklist and report".
+- **Gives** the wording, `{profile}` substituted.
+- **Asks** whatever the wording asks.
+- **Never** —
+- **Appears when** the phrase arrives, whole-message, while a session is live. Keys match case-insensitively; a key must start with `ABS `; a value with `<channel` is ignored; the six built-in names cannot be redefined.
+- **Backed by** prompt only. Limit: while no session is live the daemon pools the message like any other; the hook sees it only when a session starts.
+
+### Audit notes
+
+- The three shipped directives were read against the register: each asks one
+  thing, names the channel to reply on, and carries no rule that lives
+  elsewhere (EXIT's confirmation was moved here from `REMOTE CONTROLS`).
+- Two fixes made: keys match case-insensitively; a custom key must start with
+  `ABS `. Both tested.
+- Parked, worth doing: a "test" action on the Hooks tab that prints the exact
+  text the model would receive; an ack line over the Bot API when a custom
+  phrase is accepted, so the operator sees it landed before the model replies.
