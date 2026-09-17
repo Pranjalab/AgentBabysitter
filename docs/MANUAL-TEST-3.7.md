@@ -1,7 +1,7 @@
 # Manual test — 3.7.0, from the laptop
 
 Written 17 Sep for the operator's own run. Every automated check has passed
-(1,1xx tests, bash 3.2 in the container, ^Q in a real pty); this is the part
+(1,169 tests, bash 3.2 in the container, ^Q in a real pty); this is the part
 only a person at a real terminal can do. Tick as you go; anything that fails
 goes in the box at the bottom with what you saw.
 
