@@ -19,7 +19,7 @@ Tabs:
   Persona  ~/.abs/persona.md — tone, message types, the update card
   Hooks    ~/.abs/hooks.json — what a control phrase injects; add your own
   Project  <project>/CLAUDE.md — this repository's instructions (committed, shared)
-  Global   ~/.claude/CLAUDE.md — read-only here; it shapes every Claude session
+  Global   ~/.claude/CLAUDE.md — locked until confirmed; it shapes every Claude session
   Memory   Claude Code's per-project memory: the index and one file per fact
 
 Keys: F1–F7 or ^PgUp/^PgDn switch tabs (tabs are clickable too) · ^S save ·
@@ -316,7 +316,7 @@ class PromptApp(App[None]):
         self.hooks: Dict[str, str] = self._load_hooks()
         self.hook_selected: Optional[str] = None
         self.memory_selected: Optional[Path] = None
-        self.dirty: Dict[str, bool] = {"persona": False, "hooks": False, "project": False, "memory": False}
+        self.dirty: Dict[str, bool] = {"persona": False, "hooks": False, "project": False, "global": False, "memory": False}
 
     # ---- data ------------------------------------------------------------------
 
@@ -396,7 +396,7 @@ class PromptApp(App[None]):
             "",
             "ALSO AT LAUNCH, read by Claude Code itself (not by ABS):",
             f"   project  {self.project_claude}  {'present' if self.project_claude.exists() else 'none'}",
-            f"   global   {self.global_path}  {'present' if self.global_path.exists() else 'none'}  (view only here)",
+            f"   global   {self.global_path}  {'present' if self.global_path.exists() else 'none'}  (locked until you confirm)",
             f"   memory   {self.memory_dir}  ({mem_n} files)",
             "",
             "PER TURN, when a control phrase arrives from Telegram:",
@@ -407,7 +407,7 @@ class PromptApp(App[None]):
             "   F3 Persona  edit how the model writes and when it speaks — takes effect at the next launch",
             "   F4 Hooks    edit what a phrase injects, add your own — live for the next phrase",
             "   F5 Project  edit this repository's CLAUDE.md — committed, everyone who clones gets it",
-            "   F6 Global   read ~/.claude/CLAUDE.md — edit it with Claude Code or your editor",
+            "   F6 Global   edit ~/.claude/CLAUDE.md — asks first; it shapes EVERY Claude Code session",
             "   F7 Memory   edit what Claude Code remembers about this project — next session",
             "",
             "KEYS   F1–F7 or ^PgUp/^PgDn tabs (click works too) · ^S save · ^R reset · ^N new · ^T delete · ^Q quit",
@@ -452,12 +452,12 @@ class PromptApp(App[None]):
                              "Takes effect at the next session.", classes="hint")
                 yield TextArea(self.project_claude.read_text() if self.project_claude.exists() else "",
                                id="project-text")
-            with TabPane("Global (view)", id="global"):
-                yield Static(f"{self.global_path} — Claude Code's own global instructions, loaded by EVERY "
-                             "Claude Code session on this machine. Shown here so you can see what else "
-                             "shapes the model; not edited from ABS. To change it: Claude Code's /memory, "
-                             f"or your editor — nano {self.global_path}", classes="hint")
-                yield TextArea(self.global_path.read_text() if self.global_path.exists() else "(no file yet)",
+            with TabPane("Global", id="global"):
+                yield Static(f"⚠ {self.global_path} — Claude Code's own global instructions, loaded by EVERY "
+                             "Claude Code session on this machine, ABS or not. Locked until you confirm: "
+                             "press ^S to unlock (it asks), edit, then ^S again to save. Takes effect at "
+                             "the next session.", classes="hint")
+                yield TextArea(self.global_path.read_text() if self.global_path.exists() else "",
                                read_only=True, id="global-text")
             with TabPane("Memory", id="memory"):
                 yield Static(self._memory_hint(), classes="hint", id="memory-hint")
@@ -574,6 +574,8 @@ class PromptApp(App[None]):
             self.dirty["persona"] = True
         elif wid == "project-text":
             self.dirty["project"] = True
+        elif wid == "global-text" and not event.text_area.read_only:
+            self.dirty["global"] = True
         elif wid == "hooks-text" and not event.text_area.read_only:
             self.dirty["hooks"] = True
         elif wid == "memory-text":
@@ -603,8 +605,10 @@ class PromptApp(App[None]):
             st.update(f"project · {self.project_claude} · ≈{approx_tokens(text):,} tokens · committed with the repo"
                       f"{'  · unsaved' if self.dirty['project'] else ''}")
         elif tab == "global":
-            text = self.query_one("#global-text", TextArea).text
-            st.update(f"global · {self.global_path} · ≈{approx_tokens(text):,} tokens · view only — edit with Claude Code or nano")
+            ta = self.query_one("#global-text", TextArea)
+            state = "locked — ^S to unlock" if ta.read_only else "UNLOCKED — every Claude Code session reads this"
+            st.update(f"global · {self.global_path} · ≈{approx_tokens(ta.text):,} tokens · {state}"
+                      f"{'  · unsaved' if self.dirty['global'] else ''}")
         elif tab == "overview":
             st.update(f"overview · profile {self.profile} · F2–F7 to open a tab")
         elif tab == "memory":
@@ -661,7 +665,25 @@ class PromptApp(App[None]):
             self.dirty["project"] = False
             self.notify(f"Saved {self.project_claude}. Remember it is committed with the repo.")
         elif tab == "global":
-            self.notify(f"Not edited from ABS. Use Claude Code's /memory, or: nano {self.global_path}", severity="warning")
+            ta = self.query_one("#global-text", TextArea)
+            if ta.read_only:
+                def unlock(yes: bool) -> None:
+                    if not yes:
+                        return
+                    ta.read_only = False
+                    ta.focus()
+                    self._update_status()
+                    self.notify("Unlocked. Edit, then ^S to save.", severity="warning")
+                self.push_screen(Confirm(
+                    f"Are you sure you want to edit {self.global_path}? It is read by EVERY Claude Code "
+                    "session on this machine, in every project, ABS or not.  (y / n)"), unlock)
+                return
+            text = ta.text
+            self.global_path.parent.mkdir(parents=True, exist_ok=True)
+            self.global_path.write_text(text if text.endswith("\n") else text + "\n")
+            self._baseline["global-text"] = text
+            self.dirty["global"] = False
+            self.notify(f"Saved {self.global_path}. Every Claude Code session reads it from its next start.")
         elif tab == "memory":
             self._commit_memory_editor()
             for path, text in self._memory_buffer.items():

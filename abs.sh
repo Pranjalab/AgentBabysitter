@@ -1468,6 +1468,11 @@ persona_file() { printf '%s' "$ABS_HOME/persona.md"; }
 # changes nothing until the operator chooses to edit.
 _prompt_persona_default() {
   cat <<'PERSONA'
+NAME
+You are Claudex. Answer to it, use it when it helps, and never sign with it.
+The operator may rename you; if they ask you to pick a name, offer one and use
+the one they settle on.
+
 TONE
 Warm, direct, good-humoured: a colleague they like working with, not a status
 page. Say when something was a good catch and mean it; show the pleasure of a
@@ -6945,19 +6950,21 @@ _prompt_edit() {
       jq -e 'type == "object" and all(.[]; type == "string")' "$f" >/dev/null 2>&1 \
         || warn "$f is not a JSON object of phrase → text; it will be ignored until it is." ;;
     global)
-      # Deliberately not from here. That file shapes EVERY Claude Code session
-      # on the machine, ABS or not, and the operator's call was that ABS should
-      # show it and point at the door rather than hold the pen.
-      info "$(_prompt_global_file) is Claude Code's own global file and is not edited from abs."
-      info "  Edit it with Claude Code (/memory), or in your editor: ${c_bold}nano $(_prompt_global_file)${c_reset}"
-      return 0 ;;
+      # That file shapes EVERY Claude Code session on the machine, ABS or not —
+      # so it asks first, every time, and a non-interactive call gets no editor.
+      f="$(_prompt_global_file)"
+      [ -t 0 ] || { warn "$f is read by every Claude Code session; edit it interactively."; return 1; }
+      printf '%s' "${c_bold}$f${c_reset} is read by EVERY Claude Code session on this machine. Edit it? [y/N] "
+      local yn; read -r yn
+      case "$yn" in y|Y|yes|YES) ;; *) info "Left alone."; return 0 ;; esac
+      mkdir -p "$(dirname "$f")"; $editor "$f" ;;
     project)
       f="$(pwd -P)/CLAUDE.md"
       warn "$f is committed with the repository: everyone who clones it gets these instructions."
       $editor "$f" ;;
     memory)
       f="$(_prompt_memory_dir)/MEMORY.md"; mkdir -p "$(dirname "$f")"; $editor "$f" ;;
-    *) die "Usage: abs prompt edit [persona|hooks|project|memory]" ;;
+    *) die "Usage: abs prompt edit [persona|hooks|project|global|memory]" ;;
   esac
 }
 
@@ -7007,10 +7014,10 @@ _prompt_tui() {
   printf '  %-9s %-9s %s\n' "persona" "$([ -f "$(persona_file)" ] && echo yours || echo shipped)" "$(persona_file)"
   printf '  %-9s %-9s %s\n' "hooks"   "$([ -f "$(hooks_file)" ] && echo yours || echo shipped)" "$(hooks_file)"
   printf '  %-9s %-9s %s\n' "project" "$([ -f "$(pwd -P)/CLAUDE.md" ] && echo present || echo none)" "$(pwd -P)/CLAUDE.md"
-  printf '  %-9s %-9s %s\n' "global"  "$([ -f "$(_prompt_global_file)" ] && echo view-only || echo none)" "$(_prompt_global_file)"
+  printf '  %-9s %-9s %s\n' "global"  "$([ -f "$(_prompt_global_file)" ] && echo present || echo none)" "$(_prompt_global_file)  (asks first)"
   printf '  %-9s %-9s %s\n' "memory"  "$([ -f "$(_prompt_memory_dir)/MEMORY.md" ] && echo present || echo none)" "$(_prompt_memory_dir)"
   printf '\n'
-  info "  abs prompt show <section>   abs prompt edit persona|hooks|project|memory"
+  info "  abs prompt show <section>   abs prompt edit persona|hooks|project|global|memory"
   info "  abs prompt reset persona|hooks   abs prompt diff persona|hooks"
   printf '\n'
   if ! abs_src_have; then

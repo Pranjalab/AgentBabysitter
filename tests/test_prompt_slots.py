@@ -265,3 +265,8 @@ def test_showing_the_prompt_does_not_spend_the_offer(box):
     box.run("prompt", "show", "built")
     rc = json.loads((box.abs_home / "profiles" / PROFILE / "rc.json").read_text())
     assert rc.get("voice_offer_done") is not True
+
+
+def test_the_persona_names_the_agent(box):
+    text = box.built()
+    assert "NAME\nYou are Claudex." in text

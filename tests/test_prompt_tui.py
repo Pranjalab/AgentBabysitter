@@ -104,9 +104,9 @@ async def test_the_enforced_rungs_are_shown_locked(home):
         assert "never reaches the model" in ta.text
 
 
-async def test_the_global_tab_is_view_only(home, tmp_path):
-    """The operator's call: show ~/.claude/CLAUDE.md, never hold the pen — it
-    shapes every Claude Code session on the machine, ABS or not."""
+async def test_the_global_tab_is_locked_until_confirmed(home, tmp_path):
+    """"Are you sure you want to edit this?" — it shapes every Claude Code
+    session on the machine. ^S on the locked tab asks; n leaves it locked."""
     app = PromptApp(PROFILE)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -117,7 +117,29 @@ async def test_the_global_tab_is_view_only(home, tmp_path):
         assert "Be direct." in ta.text
         await pilot.press("ctrl+s")
         await pilot.pause()
+        assert type(app.screen).__name__ == "Confirm"
+        await pilot.press("n")
+        await pilot.pause()
+        assert ta.read_only
     assert (tmp_path / "fakehome" / ".claude" / "CLAUDE.md").read_text() == "# Working with me\n\nBe direct.\n"
+
+
+async def test_the_global_tab_edits_after_a_yes(home, tmp_path):
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_tab("global")
+        await pilot.pause()
+        ta = app.query_one("#global-text")
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert not ta.read_only
+        ta.load_text("# Working with me\n\nBe direct. Never guess.\n")
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+    assert (tmp_path / "fakehome" / ".claude" / "CLAUDE.md").read_text().endswith("Never guess.\n")
 
 
 async def test_the_project_tab_edits_the_repos_claude_md(home, tmp_path, monkeypatch):

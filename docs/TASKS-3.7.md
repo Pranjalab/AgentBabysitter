@@ -96,6 +96,50 @@ task."* The design is fixed; only the timing moved.
 - The operator has *"other plans for the monitoring part"* — ask before
   touching anything named monitor.
 
+## 5. Named personas — many identities, one active per session  →  after 3.7.0
+
+Described by the operator on 17 Sep, written here in the feature structure
+(docs/PROMPT-SPEC.md §A.2) so it is defined once before it is built.
+
+- **Name** `abs --persona <name>` · `abs persona list | create | use | rename | delete`
+- **One line** "a user can create different types of personalization agents …
+  activated in any ABS session … it just requires restarting the session with
+  that personality, and Claude will work like that with that specific name."
+- **Why** 17 Sep: one global persona is the right default, but he wants a CEO,
+  a CTO, a friend — each with a name — and to switch by restarting a session.
+- **Does**
+  - `~/.abs/personas/<name>.md` — one file per persona, same format and same
+    validation as `~/.abs/persona.md` today (cap, `<channel` refused). The
+    persona's NAME section names the agent; the operator can rename it, and a
+    persona may say "pick your own name and offer it".
+  - `~/.abs/persona.md` stays the default; `abs --persona cto` launches with
+    `personas/cto.md` in the persona slot instead. Mechanics and safety are
+    unchanged — a persona can never reach them.
+  - `abs persona create <name>` seeds from the shipped default (or `--from
+    <other>`); `abs persona use <name>` sets the default for new sessions;
+    the Persona tab of `abs prompt` gets a picker across the personas dir.
+  - Three shipped examples: **ceo** (you are the managing director, it thinks
+    with you about the business), **cto** (audits, plans, checks architecture;
+    when the plan is fixed it dispatches subagents — Claude Code's own Agent
+    tool — reviews what comes back, sends it round again until satisfied, and
+    only then reports on Telegram), **friend** (plain chat, no cards).
+  - From Telegram: `ABS PERSONA <name>` is a restart with that persona — it
+    needs the in-place session control from item 3, so it lands with 3.8.
+- **Does not**
+  - Orchestrate subagents itself. The CTO loop is prompt text telling Claude
+    Code how to use its own Agent tool; ABS adds no scheduler.
+  - Allow project-local personas (rejected 18 Aug: a cloned repo would rewrite
+    the agent's character).
+  - Change what the persona can reach: mechanics and safety stay locked.
+- **Lives in** `~/.abs/personas/`, `persona_file` in `abs.sh`, the `--persona`
+  flag, the Persona tab picker.
+- **Asked vs enforced** the persona text is asked; which file is loaded, the cap
+  and the forgery check are enforced.
+- **Verified by** a launch with `--persona x` builds with `personas/x.md` in
+  the middle and nothing else changed; an unknown name is refused before launch;
+  the three examples pass the same validation; bash 3.2 in the container.
+- **Shipped in** not yet.
+
 ## 4. Housekeeping — whenever
 
 - [ ] Publish GitHub Release entries for v3.5.3, v3.6.0, v3.6.2 (the Releases
