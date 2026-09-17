@@ -1430,19 +1430,18 @@ VOICEOFFER
 
 _prompt_voice_off() {
   cat <<VOICEOFF
-Voice is an optional add-on and is NOT set up on this machine. Do not run
-speak.py, transcribe.py, or \`abs say\` — the venvs don't exist yet and every one
-of them will just fail.
+Voice is NOT set up on this machine, so there are no voice notes: every reply is
+text. Do NOT improvise one — no system \`say\`, no espeak, no gTTS, no Python
+library, no API, no attaching audio through \`reply\` (it lands as a file). An
+improvised note is slow, the wrong voice, and ABS blocks the command anyway.
+speak.py, transcribe.py and \`abs say\` do not exist here either.
 
-If the operator sends a voice note, you cannot transcribe it. Say so plainly, ask
-them to type it instead, and tell them they can turn voice on once with:
+If the operator sends a voice note, you cannot transcribe it: say so, ask them to
+type it. If they ask for voice, once per session tell them it is one command,
+run at the terminal — a few minutes, downloads the models — and until then
+replies stay text:
 
     bash "${SCRIPT_PATH}" --profile ${PROFILE} voice setup
-
-If they ask you to speak a reply, same thing: voice isn't installed; that one-time
-command builds it (a few minutes, downloads the models). Do not try to fake a
-voice reply by attaching audio through \`reply\` — it lands as a file, not a
-playable voice note.
 VOICEOFF
 }
 
@@ -3488,6 +3487,41 @@ cmd_silent_hook() {
 # published artefacts — do not happen silently while nobody is watching. Keep
 # every pattern high-confidence; a guard that cries wolf gets switched off, and
 # `abs config guard off` is exactly the wrong outcome here.
+# Does this command make speech? The model's own attempts at audio, whichever
+# engine: ours (abs say, the speak scripts) or an improvised one (the macOS
+# `say`, espeak, gTTS, pyttsx3, edge-tts, piper, festival, flite, a cloud TTS).
+_is_tts() {
+  local c="$1"
+  printf '%s' "$c" | grep -qiE '(^|[;&|[:space:]])(abs|abs\.sh)([[:space:]]+--profile[[:space:]]+[^[:space:]]+)?[[:space:]]+say([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qE 'speak_kokoro\.py|speak\.py' && return 0
+  printf '%s' "$c" | grep -qE '(^|[;&|[:space:]])say[[:space:]]+(-[a-z]|["'"'"'])' && return 0
+  printf '%s' "$c" | grep -qiE '(^|[;&|[:space:]/])(espeak(-ng)?|gtts(-cli)?|pyttsx3|edge-tts|piper|festival|flite|mimic3?)([[:space:]]|$)' && return 0
+  printf '%s' "$c" | grep -qiE '(^|[;&|[:space:]/])tts[[:space:]]+--' && return 0   # coqui: tts --text …
+  printf '%s' "$c" | grep -qiE 'text[-_ ]?to[-_ ]?speech|audio\.speech|elevenlabs|polly\.synthesize' && return 0
+  return 1
+}
+
+# ONE engine, ever. In reply mode `both` or `voice` the hook speaks every reply,
+# so a note the model makes itself is a second note — and on a machine without
+# an engine an improvised one is slow, the wrong voice, and precisely the thing
+# the voice-off prompt forbids. Only in mode `text`, with an engine present, is
+# `abs say` the model's to run — that is the "speak this one" case.
+_guard_one_engine() {
+  local cmd="$1"
+  [ -n "$cmd" ] || return 0
+  _is_tts "$cmd" || return 0
+  if ! voice_can_speak; then
+    printf '%s\n' "⛔ Blocked by Agent Babysitter: voice is not installed on this machine, so do not make audio another way — it is slow, it is the wrong voice, and it is not a voice note. Tell the operator once: 'abs voice setup' at the terminal turns it on. Replies stay text until then." >&2
+    exit 2
+  fi
+  case "$(reply_mode)" in
+    both|voice)
+      printf '%s\n' "⛔ Blocked by Agent Babysitter: reply mode is '$(reply_mode)' — ABS speaks every reply itself, from one engine, after you send it. A note you make here would arrive as a second copy. Just reply; the hook does the audio." >&2
+      exit 2 ;;
+  esac
+  return 0
+}
+
 _is_destructive() {
   local c
   # Normalise the leading whitespace of every line, and the whitespace after a
@@ -3687,7 +3721,13 @@ cmd_guard_hook() {
   [ "$argv_away" = "1" ] && away=1
   [ "$(state_get '.session_away')" = "true" ] && away=1
   case "$tool" in
-    Bash) if [ "$away" = 0 ] && [ "$(state_get '.no_guard')" = "true" ]; then return 0; fi ;;
+    Bash)
+      # The one-engine rule runs before the guard's own off-switch and on every
+      # turn, whoever spoke: it is not about trust, it is about two notes.
+      if [ "$away" = 0 ] && [ "$(state_get '.no_guard')" = "true" ]; then
+        _guard_one_engine "$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
+        return 0
+      fi ;;
     # Two gates, mutually exclusive by mode: `voice` replaces the text with a note,
     # `both` puts the note in front of it. Each returns without acting when the
     # mode isn't theirs.
@@ -3709,11 +3749,14 @@ cmd_guard_hook() {
       return 0 ;;
     *) return 0 ;;
   esac
+  cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
+  [ -n "$cmd" ] || return 0
+  # Before the origin check: one engine is a rule for every turn, not only the
+  # remote ones.
+  _guard_one_engine "$cmd"
   if [ "$away" = 0 ]; then
     [ "$(state_get '.last_origin')" = "telegram" ] || return 0
   fi
-  cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)"
-  [ -n "$cmd" ] || return 0
   if [ "$away" = 1 ] && _touches_guard_state "$cmd"; then
     printf '%s\n' "⛔ Blocked by Agent Babysitter: that command writes to the guard's own state or code, which would disarm the only check running in this Away session. Do it at the terminal in a normal session." >&2
     exit 2
@@ -6272,6 +6315,37 @@ cmd_restricted() {
   esac
 }
 
+# A fresh machine has no voice engine, and what happened on such machines was
+# worse than silence: the model, told the pipeline was "not set up", went and
+# found its own — a system `say`, a Python library — slow, the wrong voice, and
+# on a box that later got Kokoro, TWO notes per reply. So at launch, on a
+# terminal, a machine that cannot speak is asked once whether to install it
+# (the answer is remembered), and every launch says in one line that voice is
+# off until it is on. Daemon-started sessions have no terminal and skip this.
+_voice_declined_file() { printf '%s' "$ABS_HOME/voice.declined"; }
+_offer_voice_install() {
+  voice_can_speak && return 0
+  [ "${ABS_DAEMON_START:-0}" = "1" ] && return 0
+  if [ -f "$(_voice_declined_file)" ] || [ ! -t 0 ] || [ ! -t 1 ]; then
+    info "${c_dim}Voice is off on this machine — replies arrive as text only. Turn it on: ${c_bold}abs voice setup${c_reset}"
+    return 0
+  fi
+  printf '\n'
+  info "${c_bold}Voice isn't set up on this machine.${c_reset} Without it there are no voice notes — replies"
+  info "arrive as text only, and Claude will be told not to improvise one. It runs locally"
+  info "(Kokoro, CPU): a one-time download of a few GB and a few minutes to build."
+  printf '  %s ' "Install it now? [Y/n]"
+  local yn; read -r yn
+  case "$yn" in
+    ""|y|Y|yes|YES)
+      cmd_voice setup || warn "Voice setup didn't finish — run it any time: abs voice setup" ;;
+    *)
+      mkdir -p "$ABS_HOME"; : > "$(_voice_declined_file)"
+      info "  Skipped, and not asked again. Turn it on any time with: ${c_bold}abs voice setup${c_reset}" ;;
+  esac
+  printf '\n'
+}
+
 cmd_run() {
   # Remember the passthrough args (claude flags like --model opus) so an
   # update-and-relaunch can reconstruct this exact invocation. A global because
@@ -6307,6 +6381,8 @@ cmd_run() {
   if [ "$policy" = "disabled" ]; then
     warn "Inbound Telegram is currently OFF. Turn it on with: abs --profile $PROFILE on"
   fi
+
+  _offer_voice_install
 
   # Names the holder, offers attach when there is something to attach to, and
   # reclaims a poller that outlived its session instead of making the operator

@@ -78,6 +78,20 @@ ABS setup."
 
 ### Fixed
 
+- **One voice engine, ever.** On a fresh machine with no Kokoro the model had
+  been improvising a text-to-speech of its own — slow, the wrong voice — and on a
+  machine that later had Kokoro the same reply arrived as two notes from two
+  engines. The command guard now blocks any command that makes speech (our
+  `abs say` and the speak scripts, the macOS `say`, espeak, gTTS, pyttsx3,
+  edge-tts, piper, festival, flite, coqui, a cloud TTS) whenever the hook is
+  already speaking replies (mode `both` / `voice`) or no engine is installed —
+  on every turn, whoever spoke, and regardless of `abs config guard off`. Only in
+  mode `text` with an engine present is `abs say` the model's to run. The
+  voice-off prompt says the same in words.
+- **A machine without voice is asked, once.** At launch on a terminal, a machine
+  that cannot speak is offered the install (`[Y/n]`, remembered if declined),
+  and every launch says in one line that voice is off until it is on. The
+  installer's own question now defaults to yes.
 - **A file name is spoken whole.** "It is your own CLAUDE.md in your home
   directory" was heard from "md in your home directory": the engine's sentence
   splitter took the dot as a full stop and dropped the words before it.

@@ -59,7 +59,12 @@ For each of default, cto, friend: `bash abs.sh --persona <name>`, then from the 
 
 - [ ] With a change ready, say "ship it" from the phone → model asks ONE question naming action + target, does not push until you say yes, does not ask twice.
 
-## 6. Mac only (if you run there)
+## 6. One engine (fresh-machine behaviour)
+
+- [ ] `mv ~/.abs/voice.declined /tmp 2>/dev/null; ABS_VOICE_ROOT=/tmp/empty bash abs.sh` → asked "Install it now? [Y/n]"; answer n → `~/.abs/voice.declined` exists; relaunch shows the one-line "Voice is off" hint and does not ask again. Delete the file afterwards.
+- [ ] In a live session (mode both), ask the model to "run abs say hello" → the guard blocks it with the "second copy" message; one note per reply, never two.
+
+## 7. Mac only (if you run there)
 
 - [ ] `abs prompt` opens, ^Q quits, F-keys or ^PgDn work, colours render.
 - [ ] `bash -n abs.sh` under /bin/bash (3.2) is clean; `abs persona` runs.
