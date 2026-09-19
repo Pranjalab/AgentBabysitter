@@ -598,10 +598,12 @@ class PromptApp(App[None]):
         self._update_status()
 
     def _commit_hook_editor(self) -> None:
-        """Keep what was typed for the phrase we are leaving."""
+        """Keep what was typed for the phrase we are leaving — typed, as against
+        what was loaded, so a highlight right after a programmatic load cannot
+        copy one phrase's text into another."""
         if self.hook_selected and self._hook_kind(self.hook_selected) != "enforced":
             ta = self.query_one("#hooks-text", TextArea)
-            if not ta.read_only and self.hooks.get(self.hook_selected) != ta.text:
+            if not ta.read_only and ta.text != self._baseline.get("hooks-text", ta.text):
                 self.hooks[self.hook_selected] = ta.text
                 self.dirty["hooks"] = True
 
@@ -691,8 +693,24 @@ class PromptApp(App[None]):
 
     # ---- actions ---------------------------------------------------------------
 
+    # Focus first, then switch. TabbedContent activates the pane that contains
+    # whatever has focus, so switching away from a tab whose editor is focused
+    # snapped straight back — F-keys did nothing once you had typed anything.
+    # Dropping focus before the switch, then focusing the new tab's editor,
+    # is what makes the keys work from inside an editor.
+    FOCUS_IN_TAB = {"overview": "#overview-text", "system": "#system-text", "persona": "#persona-text",
+                    "hooks": "#hooks-text", "project": "#project-text", "global": "#global-text",
+                    "memory": "#memory-text"}
+
     def action_tab(self, name: str) -> None:
+        self.set_focus(None)
         self.query_one("#tabs", TabbedContent).active = name
+        target = self.FOCUS_IN_TAB.get(name)
+        if target:
+            try:
+                self.query_one(target).focus()
+            except Exception:
+                pass
 
     def action_tab_step(self, step: int) -> None:
         i = self.TAB_ORDER.index(self._active())
@@ -856,6 +874,7 @@ class PromptApp(App[None]):
                 self.hooks.setdefault(phrase, "")
                 self.dirty["hooks"] = True
                 self.hook_selected = phrase
+                self._load(self.query_one("#hooks-text", TextArea), "")
                 self._refresh_hooks_list()
                 lv = self.query_one("#hooks-list", ListView)
                 for i, item in enumerate(lv.children):

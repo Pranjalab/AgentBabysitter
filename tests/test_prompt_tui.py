@@ -362,3 +362,45 @@ async def test_a_new_persona_is_copied_from_the_selected_one_and_saved_to_its_ow
     assert f.exists()
     assert "acting as reviewer" in f.read_text()
     assert "MESSAGE TYPES" in f.read_text()
+
+
+# ---- found by the headless sweep, 17 Sep ---------------------------------------
+
+async def test_switching_tabs_works_while_an_editor_has_focus(home):
+    """TabbedContent activates the pane that contains the focused widget, so
+    switching away from a tab whose editor had focus snapped straight back —
+    F-keys did nothing once you had typed anything."""
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_tab("hooks")
+        await pilot.pause()
+        app.query_one("#hooks-text").focus()
+        await pilot.pause()
+        await pilot.press("f5")
+        await pilot.pause()
+        assert app.query_one("#tabs").active == "project"
+        await pilot.press("ctrl+pagedown")
+        await pilot.pause()
+        assert app.query_one("#tabs").active == "global"
+
+
+async def test_a_new_hook_phrase_starts_empty_not_with_the_previous_text(home):
+    """The highlight that follows the list refresh committed the old editor
+    text under the NEW name, so ABS REVIEW opened holding ABS STOP's wording."""
+    app = PromptApp(PROFILE)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_tab("hooks")
+        await pilot.pause()
+        app.query_one("#hooks-list").index = 4          # ABS STOP
+        await pilot.pause()
+        app.action_new()
+        await pilot.pause()
+        await pilot.press(*"review")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.hook_selected == "ABS REVIEW"
+        assert app.query_one("#hooks-text").text == ""
+        assert app.hooks["ABS REVIEW"] == ""
+        assert app.hooks["ABS STOP"].startswith("STOP requested")   # untouched
