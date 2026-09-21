@@ -25,7 +25,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
-## [3.7.0] — 2026-09-16 — `abs prompt`: see and edit what goes into Claude
+## [3.7.0] — 2026-09-21 — `abs prompt`: see and edit what goes into Claude
 
 "What are we adding into the prompt? I would like to see that." Then: "one
 editable interactive page which can open and we can edit and personalize our own
