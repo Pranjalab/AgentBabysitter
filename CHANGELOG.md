@@ -25,6 +25,105 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.7.0] — 2026-09-21 — `abs prompt`: see and edit what goes into Claude
+
+"What are we adding into the prompt? I would like to see that." Then: "one
+editable interactive page which can open and we can edit and personalize our own
+ABS setup."
+
+### Added
+
+- **`abs prompt` — a tabbed page in the terminal.** Overview, System (locked,
+  read-only), Persona, Hooks, Project (this repo's `CLAUDE.md`, with a warning
+  that it is committed), Global (`~/.claude/CLAUDE.md`, view only — it shapes
+  every Claude session, so it is edited with Claude Code or your editor), Memory. F1–F7 or ^PgUp/^PgDn switch tabs; ^S saves, ^R
+  resets to the shipped text, ^N adds a hook phrase or a memory fact, ^T deletes
+  one, ^Q or Esc quits — with unsaved changes: save all and quit, quit without
+  saving, or stay (⌘Q on a Mac closes the terminal, not the page). Styled in the
+  website's palette, with round borders where a terminal can draw them. A status
+  line shows characters and an approximate token count for what you are editing.
+  Built on Textual, which `abs src install` now puts in the venv next to aiohttp.
+  Without it, `abs prompt` prints a table and the plain subcommands do the work:
+  `show`, `edit`, `reset`, `diff`, plus `defaults` and `paths` (JSON) that the
+  page itself uses — so the shipped text lives in exactly one place, `abs.sh`.
+- **The persona slot.** The system prompt is now assembled mechanics → persona →
+  safety. `~/.abs/persona.md` replaces the middle; missing means the shipped
+  persona, byte for byte. Over 16,000 characters or containing `<channel` is
+  refused at save and reported (not silently swapped) at launch. One file, global
+  — never project-local, per docs/PERSONA-AND-MEMORY.md.
+- **Hook wording on disk, and phrases of your own.** `~/.abs/hooks.json` holds what
+  `ABS UNMUTE`, `ABS STOP` and `ABS EXIT` inject, and any phrase you add
+  (`"ABS REVIEW": "…"`), sent as a whole message from Telegram. `{profile}` is
+  substituted. `ABS MUTE`, `ABS OFF` and `ABS BLOCK` cannot be reworded: they act
+  in the hook and never reach the model, and an entry under those names is ignored.
+- **Named personas.** `~/.abs/personas/<name>.md`, one identity each on top of
+  the sections every persona shares; `ceo`, `cto` and `friend` ship as examples
+  (the CTO one is the operator's own audit → plan → dispatch subagents → check →
+  send back → report loop). `abs --persona <name>` for one session, `abs persona
+  use <name>` for every session after; `abs persona list|show|create|edit|rename|
+  delete`. The Persona tab of `abs prompt` is the picker and the editor. The
+  model is told where personas live and may read, create or edit them when
+  asked; the mechanics and safety around them stay out of reach.
+- **The agent has a name.** The shipped persona opens with NAME: you are ABS
+  (said like "Abish"); the operator may rename it. The built-in persona is
+  called `abs` everywhere (`default` still works as an alias).
+- **A persona page at launch.** After the update check and before the project
+  menu: arrow keys, Enter; the active persona is preselected so Enter alone keeps
+  it; the pick is for that session. `--persona <name>` skips the page; `abs
+  config persona-menu off` turns it off.
+
+### Changed
+
+- **The status bar shows the persona, not the dots.** `abs:@bot · 🎭 cto · …`:
+  who the session is, right after who it talks to. The Text and Voice dots are
+  gone — green all day, they said nothing — and channel state appears only when
+  a reply would not go out as configured: `⛔ off`, `🔇 muted`, `text only — no
+  voice engine`, `no channel on`. The bar also re-runs every 5 seconds while the
+  session is idle (Claude Code's `refreshInterval`), so `abs quiet on` from
+  another terminal shows up without waiting for the next message.
+- **The update check runs before any choice.** It used to come after the
+  project menu, so you picked a folder and then learned there was a newer abs —
+  and a yes there relaunched, throwing the pick away. Now it is: update? → who
+  am I? → where am I working?
+- **Commit and push only when told.** A VERSION CONTROL section in the locked
+  safety slot: finished work stays uncommitted until the operator says commit
+  (or freeze), a push waits for the word push, never as a side effect. `abs
+  config commits auto` switches to committing every completed task; the push
+  rule stays. Holds for every persona.
+- **`abs prompt show built`** prints exactly what the next launch will pass.
+
+- **The prompt is a fifth shorter.** WHEN TO SEND, WHAT MAKES A REPORT WORTH
+  HEARING and MESSAGE TYPES said overlapping things; they are one section now,
+  inside the persona. The reply-mode, command-menu and bridge-down sections were
+  trimmed to what the model needs to act. 3,222 → 2,534 words on a paired profile
+  with voice, with no rule dropped.
+
+### Fixed
+
+- **One voice engine, ever.** On a fresh machine with no Kokoro the model had
+  been improvising a text-to-speech of its own — slow, the wrong voice — and on a
+  machine that later had Kokoro the same reply arrived as two notes from two
+  engines. The command guard now blocks any command that makes speech (our
+  `abs say` and the speak scripts, the macOS `say`, espeak, gTTS, pyttsx3,
+  edge-tts, piper, festival, flite, coqui, a cloud TTS) whenever the hook is
+  already speaking replies (mode `both` / `voice`) or no engine is installed —
+  on every turn, whoever spoke, and regardless of `abs config guard off`. Only in
+  mode `text` with an engine present is `abs say` the model's to run. The
+  voice-off prompt says the same in words.
+- **A machine without voice is asked, once.** At launch on a terminal, a machine
+  that cannot speak is offered the install (`[Y/n]`, remembered if declined),
+  and every launch says in one line that voice is off until it is on. The
+  installer's own question now defaults to yes.
+- **A file name is spoken whole.** "It is your own CLAUDE.md in your home
+  directory" was heard from "md in your home directory": the engine's sentence
+  splitter took the dot as a full stop and dropped the words before it.
+  `name.ext` is now spoken as "name dot ext" for the extensions that turn up in
+  reports, the same way a version number became "three point six point two".
+- **A test that passed by accident.** The daemon's Away launch has used
+  `bypassPermissions` since 3.5; its test still asserted `acceptEdits` and stayed
+  green because that word appeared in a comment inside the system prompt, which
+  is also in argv. It asserts the flag's value now.
+
 ## [3.6.2] — 2026-09-16 — the text behind the voice note, and a shape for updates
 
 Two reports from the phone, both about the same conversation: "sometimes only the

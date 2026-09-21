@@ -398,9 +398,10 @@ fi
 # there's a single source of truth for it (`abs voice setup`). ask_yes already
 # no-ops without a tty, so CI/nohup installs just skip this cleanly.
 info ""
-info "${c_bold}Optional — voice.${c_reset} Send Claude a voice note, or have it speak its reply back."
-info "${c_dim}Runs entirely on your machine. One-time ~3-5 GB download, a few minutes to build.${c_reset}"
-if ask_yes "Set up voice now? [y/N]"; then
+info "${c_bold}Voice.${c_reset} Send Claude a voice note, and hear its replies as voice notes."
+info "${c_dim}Runs entirely on your machine (Kokoro, CPU). One-time download of a few GB, a few minutes to build.${c_reset}"
+info "${c_dim}Without it, replies arrive as text only — abs asks again at the first launch.${c_reset}"
+if ask_yes "Set up voice now? [Y/n]" y; then
   info ""
   "$TARGET" voice setup \
     || warn "Voice setup didn't finish — run it any time: ${c_bold}abs voice setup${c_reset}"
