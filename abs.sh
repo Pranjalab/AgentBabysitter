@@ -2011,7 +2011,7 @@ cmd_quiet() {
   esac
   if [ "$val" = true ]; then
     state_set '.quiet = true'
-    ok "Quiet mode ON — proactive reports muted, inbound still works."
+    ok "Quiet mode ON — proactive reports muted, inbound still works. The bar says 🔇 muted within a few seconds."
   else
     # Unmuting is an explicit "I want reports now", so it also lifts any
     # terminal-driven auto-silent — the escape hatch that doesn't need your phone.
@@ -6537,9 +6537,17 @@ cmd_run() {
   # statusLine shows the live mute/active dot in the bottom bar. It's a scalar
   # (not a merge), so it overrides any global statusLine for the abs session only
   # — normal `claude` sessions keep yours. `abs config statusline off` opts out.
+  #
+  # refreshInterval: Claude Code re-runs the bar on conversation events and goes
+  # quiet while the session is idle — so `abs quiet on` from another terminal
+  # left the bar saying nothing until the next message (reported from the Mac
+  # on 21 Sep, the day the bar started saying "muted"). A 5-second timer keeps
+  # muted / off / persona current while nothing else is happening; the bar is a
+  # few stats and a cached glance, so the cost is nil. ABS_BAR_REFRESH overrides.
   local status_json='{}'
   [ "$(state_get '.no_statusline')" = "true" ] \
-    || status_json="$(jq -n --arg s "$status_cmd" '{statusLine: {type: "command", command: $s, padding: 0}}')"
+    || status_json="$(jq -n --arg s "$status_cmd" --argjson r "${ABS_BAR_REFRESH:-5}" \
+         '{statusLine: {type: "command", command: $s, padding: 0, refreshInterval: $r}}')"
   # PostToolUse normally only needs the reply tool (for auto-silent). When the
   # conversation log is on, widen it to every tool so tool calls get recorded —
   # so the per-tool hook cost is only paid by users who want the log.

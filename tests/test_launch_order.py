@@ -157,3 +157,15 @@ def test_default_is_an_alias_for_abs_on_disk(box):
     (box.rc.parent.parent.parent / "persona.active").write_text("default\n")
     _, argv = box.launch([b"n" + ENTER, ENTER])
     assert "This session's persona is 'abs'" in argv
+
+
+def test_the_bar_refreshes_on_a_timer_while_idle(box):
+    """`abs quiet on` from another terminal showed nothing on the bar until the
+    next message: Claude Code re-runs the status line on conversation events and
+    goes quiet when idle. A refreshInterval keeps muted / off / persona current."""
+    _, argv = box.launch([b"n" + ENTER, ENTER])
+    lines = argv.splitlines()
+    settings = Path(lines[lines.index("--settings") + 1])
+    cfg = json.loads(settings.read_text())
+    assert cfg["statusLine"]["refreshInterval"] == 5
+    assert "statusline" in cfg["statusLine"]["command"]

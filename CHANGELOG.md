@@ -78,7 +78,9 @@ ABS setup."
   who the session is, right after who it talks to. The Text and Voice dots are
   gone — green all day, they said nothing — and channel state appears only when
   a reply would not go out as configured: `⛔ off`, `🔇 muted`, `text only — no
-  voice engine`, `no channel on`.
+  voice engine`, `no channel on`. The bar also re-runs every 5 seconds while the
+  session is idle (Claude Code's `refreshInterval`), so `abs quiet on` from
+  another terminal shows up without waiting for the next message.
 - **The update check runs before any choice.** It used to come after the
   project menu, so you picked a folder and then learned there was a newer abs —
   and a yes there relaunched, throwing the pick away. Now it is: update? → who
