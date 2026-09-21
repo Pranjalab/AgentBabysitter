@@ -315,9 +315,11 @@ class PromptApp(App[None]):
         self.project_claude = Path(self.paths.get("project_claude", str(self.project_dir / "CLAUDE.md")))
         self.memory_dir = Path(self.paths["memory_dir"])
         self.personas_dir = Path(self.paths.get("personas_dir", str(Path(self.paths["persona"]).parent / "personas")))
-        self.persona_active = self.paths.get("persona_active", "default")
+        self.persona_active = self.paths.get("persona_active", "abs")
+        if self.persona_active == "default":
+            self.persona_active = "abs"
         self.shipped_personas: Dict[str, str] = dict(self.defaults.get("shipped_personas", {}))
-        self.persona_selected = "default"
+        self.persona_selected = "abs"
         self._persona_buffer: Dict[str, str] = {}
         self.hooks: Dict[str, str] = self._load_hooks()
         self.hook_selected: Optional[str] = None
@@ -340,7 +342,7 @@ class PromptApp(App[None]):
         return self._persona_read(self.persona_active)
 
     def _persona_names(self) -> List[str]:
-        names = ["default"] + list(self.shipped_personas)
+        names = ["abs"] + list(self.shipped_personas)
         if self.personas_dir.exists():
             for f in sorted(self.personas_dir.glob("*.md")):
                 if f.stem not in names:
@@ -348,7 +350,7 @@ class PromptApp(App[None]):
         return names
 
     def _persona_path(self, name: str) -> Path:
-        return self.persona_path if name == "default" else self.personas_dir / f"{name}.md"
+        return self.persona_path if name in ("abs", "default") else self.personas_dir / f"{name}.md"
 
     def _persona_state(self, name: str) -> str:
         if self._persona_path(name).exists():
@@ -361,7 +363,7 @@ class PromptApp(App[None]):
         p = self._persona_path(name)
         if p.exists():
             return p.read_text()
-        if name == "default":
+        if name in ("abs", "default"):
             return self.defaults["persona"]
         return self.shipped_personas.get(name, "")
 
@@ -445,7 +447,7 @@ class PromptApp(App[None]):
             "",
             "TABS",
             "   F2 System   read the two locked slots exactly as the next launch builds them",
-            "   F3 Persona  who the model is: default, ceo, cto, friend, yours — takes effect at the next launch",
+            "   F3 Persona  who the model is: abs, ceo, cto, friend, yours — takes effect at the next launch",
             "   F4 Hooks    edit what a phrase injects, add your own — live for the next phrase",
             "   F5 Project  edit this repository's CLAUDE.md — committed, everyone who clones gets it",
             "   F6 Global   edit ~/.claude/CLAUDE.md — asks first; it shapes EVERY Claude Code session",
@@ -473,14 +475,14 @@ class PromptApp(App[None]):
                 )
                 yield TextArea(abs_text(self.profile, "show", "system"), read_only=True, id="system-text")
             with TabPane("Persona", id="persona"):
-                yield Static("Who the model is. 'default' is ~/.abs/persona.md; the others are "
+                yield Static("Who the model is. 'abs' is ~/.abs/persona.md; the others are "
                              f"{self.personas_dir}/<name>.md, with ceo, cto and friend shipped as examples. "
                              "^N new · ^U use for new sessions · ^T delete · `abs --persona <name>` for one "
                              "session. Global to every profile and project; takes effect at the NEXT LAUNCH.",
                              classes="hint", id="persona-hint")
                 with Horizontal(classes="pane"):
                     yield ListView(id="persona-list")
-                    yield TextArea(self._persona_read("default"), id="persona-text")
+                    yield TextArea(self._persona_read("abs"), id="persona-text")
             with TabPane("Hooks", id="hooks"):
                 yield Static("What a control phrase, sent as a WHOLE MESSAGE from Telegram while a session "
                              "is live, injects into the model. MUTE / OFF / BLOCK act in the hook and never "
@@ -793,7 +795,7 @@ class PromptApp(App[None]):
         if tab == "persona":
             name = self.persona_selected
             path = self._persona_path(name)
-            if name != "default" and name not in self.shipped_personas:
+            if name != "abs" and name not in self.shipped_personas:
                 self.notify(f"{name} has no shipped text to reset to — ^T deletes it.", severity="warning")
                 return
             def done(yes: bool) -> None:
@@ -927,8 +929,8 @@ class PromptApp(App[None]):
         if tab == "persona":
             name = self.persona_selected
             path = self._persona_path(name)
-            if name == "default":
-                self.notify("'default' is not deleted — ^R resets it to the shipped text.", severity="warning")
+            if name == "abs":
+                self.notify("'abs' is not deleted — ^R resets it to the shipped text.", severity="warning")
                 return
             if not path.exists() and name not in self._persona_buffer:
                 self.notify(f"{name} is a shipped example with no file; nothing to delete.", severity="warning")
@@ -944,7 +946,7 @@ class PromptApp(App[None]):
                     if active_file.exists():
                         active_file.unlink()
                     self.persona_active = "default"
-                self.persona_selected = "default"
+                self.persona_selected = "abs"
                 self._refresh_persona_list()
                 self._load(self.query_one("#persona-text", TextArea), self._persona_read("default"))
                 self._update_status()

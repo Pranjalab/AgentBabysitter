@@ -156,91 +156,80 @@ def bar(tmp_path):
 # ---- both switches, both dots ------------------------------------------------
 
 
-def test_both_switches_on_lights_both_dots(bar):
+# ---- 21 Sep: the dots are gone; the persona is there instead --------------------
+#
+# "The text and voice dots are not that useful because they are always on. In
+# place of text and voice we can put the persona." So the bar shows WHO the session
+# is, right after who it talks to, and channel state appears only when a reply
+# would NOT go out as configured — off, muted, no voice engine, no channel — and
+# says which in words. Two green dots all day were no information at all.
+
+def _plain(s):
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+
+def test_the_persona_sits_right_after_the_bot(bar):
     bar.rc(reply_mode="both")
-    assert bar.dots() == {"Text": GREEN, "Voice": GREEN}
+    out = _plain(bar.render())
+    assert out.startswith("abs:@b · 🎭 abs"), out
 
 
-def test_voice_off_dims_only_voice(bar):
-    bar.rc(reply_mode="text")
-    d = bar.dots()
-    assert d["Text"] == GREEN
-    assert d["Voice"] == DIM
+def test_the_bar_shows_the_session_persona_not_the_active_one(bar):
+    """A launch records its persona (a page pick beats persona.active); the bar
+    shows the one this session actually runs as."""
+    (bar.home / "persona.active").write_text("friend\n")
+    bar.rc(reply_mode="both", session_persona="cto")
+    assert "🎭 cto" in _plain(bar.render())
 
 
-def test_text_off_dims_only_text(bar):
-    """Bug 2. `reply text off` used to leave Text green — the dot predates the
-    switches and only ever consulted quiet/off."""
-    bar.rc(reply_mode="voice")
-    d = bar.dots()
-    assert d["Text"] == DIM
-    assert d["Voice"] == GREEN
-
-
-# ---- the recency window is gone ----------------------------------------------
-
-
-def test_voice_stays_green_long_after_the_last_note(bar):
-    """Bug 1, and the one Pranjal reported. Voice is on and works; the last note
-    went out two hours ago because nothing needed saying. Green."""
-    bar.rc(reply_mode="both", last_voice_ts=int(time.time()) - 7200)
-    assert bar.dots()["Voice"] == GREEN
-
-
-def test_voice_is_green_before_any_note_has_ever_been_sent(bar):
-    """No `last_voice_ts` at all — a fresh install with the switch on. The next
-    reply WILL speak, so the dot must say so."""
+def test_without_a_session_persona_the_bar_falls_back_to_the_active_one(bar):
+    (bar.home / "persona.active").write_text("friend\n")
     bar.rc(reply_mode="both")
-    assert "last_voice_ts" not in json.loads(
-        (bar.home / "profiles" / PROFILE / "rc.json").read_text()
-    )
-    assert bar.dots()["Voice"] == GREEN
+    assert "🎭 friend" in _plain(bar.render())
 
 
-def test_a_recent_note_cannot_light_a_switched_off_channel(bar):
-    """The inverse, so the window is really gone rather than merely widened: a
-    note sent one second ago must not override `reply voice off`."""
-    bar.rc(reply_mode="text", last_voice_ts=int(time.time()))
-    assert bar.dots()["Voice"] == DIM
-
-
-def test_the_old_window_variable_no_longer_changes_anything(bar):
-    bar.rc(reply_mode="both", last_voice_ts=int(time.time()) - 7200)
-    assert bar.dots(ABS_VOICE_ACTIVE_SECS="1")["Voice"] == GREEN
-
-
-# ---- a switch is not a promise the machine can keep --------------------------
-
-
-def test_voice_is_dim_when_the_machine_cannot_speak(bar):
-    """The switch says yes, the box has no TTS, so no note will arrive. Dim is
-    the honest answer — this is the one thing worth keeping from the old
-    behaviour."""
+def test_all_on_says_nothing_about_channels(bar):
     bar.rc(reply_mode="both")
-    bar.speak(False)
-    d = bar.dots()
-    assert d["Voice"] == DIM
-    assert d["Text"] == GREEN
+    out = _plain(bar.render())
+    for word in ("Text", "Voice", "●", "muted", "off", "no voice"):
+        assert word not in out, out
 
 
-# ---- the global mutes still win ----------------------------------------------
-
-
-def test_quiet_dims_both(bar):
+def test_quiet_says_muted(bar):
     bar.rc(reply_mode="both", quiet=True)
-    assert bar.dots() == {"Text": DIM, "Voice": DIM}
+    assert "🔇 muted" in _plain(bar.render())
 
 
-def test_bot_off_dims_both(bar):
+def test_bot_off_says_off(bar):
     bar.rc(reply_mode="both")
     bar.access("disabled")
-    assert bar.dots() == {"Text": DIM, "Voice": DIM}
+    assert "⛔ off" in _plain(bar.render())
 
 
 def test_an_allowlisted_bot_is_not_off(bar):
     bar.rc(reply_mode="both")
     bar.access("allowlist")
-    assert bar.dots() == {"Text": GREEN, "Voice": GREEN}
+    assert "⛔ off" not in _plain(bar.render())
+
+
+def test_voice_on_without_an_engine_says_text_only(bar):
+    """The switch says yes, the box has no TTS, so no note will arrive — the one
+    thing worth keeping from the old dots, now in words."""
+    bar.rc(reply_mode="both")
+    bar.speak(False)
+    assert "text only — no voice engine" in _plain(bar.render())
+
+
+def test_mode_text_without_an_engine_is_fine(bar):
+    bar.rc(reply_mode="text")
+    bar.speak(False)
+    out = _plain(bar.render())
+    assert "no voice engine" not in out
+
+
+def test_the_old_window_variable_no_longer_changes_anything(bar):
+    bar.rc(reply_mode="both", last_voice_ts=int(time.time()) - 7200)
+    assert "no voice" not in _plain(bar.render(ABS_VOICE_ACTIVE_SECS="1"))
 
 
 # ---- the daemon dot, removed -------------------------------------------------
@@ -259,7 +248,7 @@ def test_the_bar_carries_no_daemon_segment(bar):
     bar.daemon(age_s=10)          # daemon running and watching this profile
     out = bar.render()
     assert "Daemon" not in out, out
-    assert "Text" in out and "Voice" in out
+    assert "🎭" in out and "abs:" in out         # the bar drew
 
 
 def test_a_stale_daemon_does_not_bring_the_segment_back(bar):
@@ -271,7 +260,7 @@ def test_no_daemon_directory_is_also_quiet(bar):
     bar.daemon(None)
     out = bar.render()
     assert "Daemon" not in out
-    assert "Text" in out and "Voice" in out
+    assert "🎭" in out and "abs:" in out         # the bar drew
 
 
 # ---- the shape the operator asked for ----------------------------------------
@@ -508,14 +497,14 @@ def test_a_render_with_no_payload_still_draws_the_bar(bar):
     sends nothing. A bar that needs the payload would be a bar that breaks."""
     bar.rc()
     out = _render_with(bar, None)
-    assert "Text" in out and "Voice" in out
+    assert "🎭" in out and "abs:" in out         # the bar drew
     assert "Ctx" not in out
 
 
 def test_junk_on_stdin_is_ignored_rather_than_rendered(bar):
     bar.rc()
     out = bar.render(stdin="not json at all {{{")
-    assert "Text" in out, out
+    assert "🎭" in out, out
     assert "Ctx" not in out
 
 
@@ -538,4 +527,4 @@ def test_a_nonsensical_context_number_is_dropped_not_drawn(bar):
     bar.rc()
     out = _render_with(bar, {"context_window": {"remaining_percentage": -5}})
     assert "Ctx" not in out, out
-    assert "Text" in out          # and the rest of the bar is unharmed
+    assert "🎭" in out            # and the rest of the bar is unharmed

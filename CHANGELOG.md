@@ -65,15 +65,30 @@ ABS setup."
   model is told where personas live and may read, create or edit them when
   asked; the mechanics and safety around them stay out of reach.
 - **The agent has a name.** The shipped persona opens with NAME: you are ABS
-  (said like "Abish"); the operator may rename it.
+  (said like "Abish"); the operator may rename it. The built-in persona is
+  called `abs` everywhere (`default` still works as an alias).
+- **A persona page at launch.** After the update check and before the project
+  menu: arrow keys, Enter; the active persona is preselected so Enter alone keeps
+  it; the pick is for that session. `--persona <name>` skips the page; `abs
+  config persona-menu off` turns it off.
+
+### Changed
+
+- **The status bar shows the persona, not the dots.** `abs:@bot · 🎭 cto · …`:
+  who the session is, right after who it talks to. The Text and Voice dots are
+  gone — green all day, they said nothing — and channel state appears only when
+  a reply would not go out as configured: `⛔ off`, `🔇 muted`, `text only — no
+  voice engine`, `no channel on`.
+- **The update check runs before any choice.** It used to come after the
+  project menu, so you picked a folder and then learned there was a newer abs —
+  and a yes there relaunched, throwing the pick away. Now it is: update? → who
+  am I? → where am I working?
 - **Commit and push only when told.** A VERSION CONTROL section in the locked
   safety slot: finished work stays uncommitted until the operator says commit
   (or freeze), a push waits for the word push, never as a side effect. `abs
   config commits auto` switches to committing every completed task; the push
   rule stays. Holds for every persona.
 - **`abs prompt show built`** prints exactly what the next launch will pass.
-
-### Changed
 
 - **The prompt is a fifth shorter.** WHEN TO SEND, WHAT MAKES A REPORT WORTH
   HEARING and MESSAGE TYPES said overlapping things; they are one section now,

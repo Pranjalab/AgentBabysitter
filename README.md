@@ -42,7 +42,7 @@ from your phone when nothing is running.
 - 🎤 **Voice both ways** — send a voice note, or ask for the answer spoken back.
 - 📊 **Check usage remotely** — your Claude limits, one tap away, no browser.
 - 🔒 **Your own private bot** — PIN-paired, so only you can reach it.
-- 🟢 **See the state at a glance** — dots in Claude's status bar answer one question per channel: if a reply happened right now, would it go out this way? Plus your 5-hour and weekly usage.
+- 🟢 **See the state at a glance** — Claude's status bar shows which persona the session is, says in words when a reply would not reach your phone (off, muted, no voice engine), and your 5-hour and weekly usage.
 - 🖥 **Runs anywhere** — laptop, SSH, `tmux`, a headless Linux server.
 - 🗂 **Multiple projects** — one bot per project, babysat side by side.
 

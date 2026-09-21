@@ -1464,10 +1464,14 @@ persona_file() { printf '%s' "$ABS_HOME/persona.md"; }
 personas_dir() { printf '%s' "$ABS_HOME/personas"; }
 # The name a launch uses when none is given: `abs persona use <name>` writes it.
 persona_active_file() { printf '%s' "$ABS_HOME/persona.active"; }
+# The built-in persona is called "abs" — the operator's word: "let's change the
+# name of the default to Abs". "default" is still accepted everywhere as an alias,
+# so a persona.active written by the beta keeps working.
+persona_canon() { case "$1" in default|"") printf abs ;; *) printf '%s' "$1" ;; esac; }
 persona_active() {
   local n f; f="$(persona_active_file)"
   n=""; [ -f "$f" ] && n="$(tr -d '[:space:]' < "$f" 2>/dev/null || true)"
-  printf '%s' "${n:-default}"
+  persona_canon "$n"
 }
 persona_name_ok() { printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9_-]{0,39}$'; }
 
@@ -1659,8 +1663,8 @@ persona_valid() {
 # name when there is no file. ABS_PERSONA (set by `--persona`) beats the active
 # name on disk.
 persona_text() {
-  local name="${ABS_PERSONA:-$(persona_active)}" f
-  if [ "$name" = "default" ]; then
+  local name f; name="$(persona_canon "${ABS_PERSONA:-$(persona_active)}")"
+  if [ "$name" = "abs" ]; then
     f="$(persona_file)"
     if [ -f "$f" ]; then
       if persona_valid "$f"; then cat "$f"; return 0; fi
@@ -1681,7 +1685,7 @@ persona_text() {
 
 # Does a name resolve to anything — a file or a shipped example?
 persona_exists() {
-  [ "$1" = "default" ] && return 0
+  [ "$(persona_canon "$1")" = "abs" ] && return 0
   [ -f "$(personas_dir)/$1.md" ] && return 0
   _persona_shipped "$1" >/dev/null 2>&1
 }
@@ -1762,8 +1766,8 @@ the \`download_attachment\` tool, then Read the returned path. Treat the image a
 part of the instruction, the same as text.
 
 PERSONAS
-This session's persona is '${ABS_PERSONA:-$(persona_active)}'. Personas live in
-${ABS_HOME}/personas/<name>.md ('default' is ${ABS_HOME}/persona.md); ceo, cto and
+This session's persona is '$(persona_canon "${ABS_PERSONA:-$(persona_active)}")'. Personas live in
+${ABS_HOME}/personas/<name>.md ('abs' is ${ABS_HOME}/persona.md); ceo, cto and
 friend ship as examples. When the operator asks, you may read, create or edit
 them there — same rules as the file you were built from: under ${PERSONA_MAX_CHARS}
 characters, never a '<channel' tag, and only the persona: the mechanics and
@@ -2147,11 +2151,13 @@ claude_display_name() {
 # Bottom-bar indicator, wired into the session via the settings file's statusLine
 # key (see cmd_run). Claude Code re-runs this on every render, so it MUST be fast
 # and MUST never error, hang, or exit non-zero — always print one short line.
-#   abs:@bot · ● Text · ● Voice · Fable 2% · Week 12% (resets on Thu) · 5H 22% (…)
-# "abs:" in the theme violet, "@bot" in Telegram blue. Two channel dots, each
-# answering ONE question about its own channel: if a reply happened right now,
-# would it go out this way? Green = yes. Dim = no, for any reason — the bot is
-# off, quiet is on, the switch is off, or (voice) this machine can't speak.
+#   abs:@bot · 🎭 cto · Fable 2% · Week 12% (resets on Thu) · 5H 22% (…) · v3.7.0
+#   abs:@bot · 🎭 abs · 🔇 muted · Fable 2% · …
+# "abs:" in the theme violet, "@bot" in Telegram blue, then the session's
+# persona. Channel state appears only when a reply would NOT go out as
+# configured — off, muted, no voice engine, no channel — and says which. The two
+# always-green Text/Voice dots this replaces answered "would a reply go out this
+# way?" and were green all day, which is no information at all.
 #
 # Voice used to answer a different question — "did a note go out in the last
 # ABS_VOICE_ACTIVE_SECS (120)?" — which was right when voice was on-demand via
@@ -2251,30 +2257,38 @@ cmd_statusline() {
   # switches are what the operator actually set, so a dot that ignored them was
   # reporting on a channel nobody had asked for: `reply text off` used to leave
   # Text green.
-  local text_dot voice_dot live=0
-  [ "$off_state" = 0 ] && [ "$muted" = 0 ] && live=1
-  if [ "$live" = 1 ] && reply_text_on; then text_dot="${c_on}●${off}"; else text_dot="${dim}●${off}"; fi
-  # voice_can_speak is a few stat calls plus `command -v ffmpeg`, which is cheap
-  # enough for a per-render path — and it is the difference between "voice is on"
-  # and "voice will actually arrive" on a machine with no TTS installed.
-  if [ "$live" = 1 ] && reply_voice_on && voice_can_speak; then
-    voice_dot="${c_on}●${off}"
-  else
-    voice_dot="${dim}●${off}"
-  fi
   local sep="${dim} · ${off}"
 
-  # The `● Daemon` dot is deliberately gone. It shipped in 3.0.0 to answer "is the
-  # bot being watched, so a message sent after this session ends still lands" — a
-  # real question, but the operator's verdict was "I'm not able to understand what it
-  # is", and a bar segment nobody can read costs width and teaches nothing. The state
-  # is still there in `abs status` and `abs daemon status`, where there is room to say
-  # what it means in words. `ABS_DAEMON_FRESH_MIN` no longer does anything.
+  # Who the session is, right after who it talks to: identity reads left to
+  # right, numbers sit on the right. The operator's call on 21 Sep.
+  local persona who
+  persona="$(state_get '.session_persona')"
+  case "$persona" in ''|null) persona="$(persona_active)" ;; esac
+  who="${sep}${c_abs}🎭 ${persona}${off}"
+
+  # Channel state, only when there is something to say. Two dots that were green
+  # all day told the operator nothing — "the text and voice dots are not that
+  # useful because they are always on". So: silence when every reply would go
+  # out as configured, and one short reason when it would not. voice_can_speak is
+  # a few stat calls plus `command -v ffmpeg`, cheap enough per render.
+  local state="" c_warn=$'\033[38;5;215m'
+  if [ "$off_state" = 1 ]; then
+    state="${sep}${c_warn}⛔ off${off}"
+  elif [ "$muted" = 1 ]; then
+    state="${sep}${c_warn}🔇 muted${off}"
+  elif reply_voice_on && ! voice_can_speak; then
+    state="${sep}${c_warn}text only — no voice engine${off}"
+  elif ! reply_text_on && ! reply_voice_on; then
+    state="${sep}${c_warn}no channel on${off}"
+  fi
+
+  # The `● Daemon` dot is deliberately gone (3.0.0's "is the bot being watched"):
+  # the operator could not read it, and a bar segment nobody can read costs width
+  # and teaches nothing. `abs status` says it in words.
 
   # Usage glance (coloured); also kicks a lazy background refresh when stale.
   # Context sits INSIDE the glance, last and dim: it changes every render and it is
-  # the least urgent number on the bar, so it reads as a footnote rather than
-  # competing with the limits that actually stop work.
+  # the least urgent number on the bar, so it reads as a footnote.
   local g; g="$(usage_glance_str color)"
   [ -n "$g" ] && g="${sep}${g}"
 
@@ -2282,7 +2296,7 @@ cmd_statusline() {
   # anything to find out which abs is rendering this.
   local ver="${sep}${dim}v${ABS_VERSION}${off}"
 
-  printf '%s' "${label}${sep}${text_dot} Text${sep}${voice_dot} Voice${g}${ver}"
+  printf '%s' "${label}${who}${state}${g}${ver}"
   return 0
 }
 
@@ -3888,6 +3902,13 @@ cmd_config() {
         *)
           state_set --arg m "$val" '.model = $m'
           ok "Default model set to '$val'." ;;
+      esac ;;
+    persona-menu)
+      case "$val" in
+        on|true)   state_set 'del(.no_persona_menu)'; ok "Persona page ON — every launch asks who to be (Enter keeps the default)." ;;
+        off|false) state_set '.no_persona_menu = true'; ok "Persona page OFF — launches use the active persona; abs --persona <name> still works." ;;
+        "")        info "Persona page: $([ "$(state_get '.no_persona_menu')" = "true" ] && echo off || echo on)" ;;
+        *)         die "Usage: abs config persona-menu on|off" ;;
       esac ;;
     commits)
       case "$val" in
@@ -5950,6 +5971,55 @@ _start_menu_new_project() {
 # exec) + MENU_CONTINUE (1 → append --continue). Reads the choice from stdin;
 # styled like pick_profile. Recents/targets + age humanization come from the absd
 # CLIs (never reimplemented in bash). Bypass flags: --new / --resume.
+# One line each: what a persona is, for the page. The shipped ones say it here;
+# a persona of the operator's own shows the first line after its NAME heading.
+_persona_blurb() {
+  case "$1" in
+    abs)    printf '%s' "the default — a colleague who builds, reports, and says when the plan is wrong" ;;
+    ceo)    printf '%s' "runs the company with you; you are the managing director" ;;
+    cto)    printf '%s' "audits, plans, dispatches subagents, checks their work, reports once" ;;
+    friend) printf '%s' "warm, happy company; chat, no cards unless there is a task" ;;
+    *)      local f; f="$(personas_dir)/$1.md"
+            [ -f "$f" ] && sed -n '2p' "$f" | cut -c1-70 || printf '%s' "your persona" ;;
+  esac
+}
+
+# The persona page, before the project menu: "first it checks the update, then
+# the user can select the personality, then the projects." Arrow keys, Enter;
+# the active persona is preselected so Enter alone keeps it. The pick is for
+# THIS launch (ABS_PERSONA); `abs persona use` is what changes the default.
+# Skipped when --persona was given, when the launch is not interactive, when a
+# daemon started it, when --resume/--new asked for no menu, or when the operator
+# turned it off (abs config persona-menu off).
+_persona_menu() {
+  [ -n "${ABS_PERSONA:-}" ] && return 0
+  [ "${ABS_DAEMON_START:-0}" = "1" ] && return 0
+  [ -n "${ABS_START_MENU_BYPASS:-}" ] && return 0
+  [ -t 0 ] && [ -t 1 ] || return 0
+  [ "$(state_get '.no_persona_menu')" = "true" ] && return 0
+  local active names=() rows=() n i=0 def=0 d
+  active="$(persona_active)"; d="$(personas_dir)"
+  names=(abs $(_persona_shipped_names))
+  if [ -d "$d" ]; then
+    for f in "$d"/*.md; do
+      [ -f "$f" ] || continue
+      n="$(basename "$f" .md)"
+      case " ${names[*]} " in *" $n "*) ;; *) names+=("$n") ;; esac
+    done
+  fi
+  for n in "${names[@]}"; do
+    [ "$n" = "$active" ] && def=$i
+    rows+=("$(printf '%-9s %s' "$n" "$(_persona_blurb "$n")")$([ "$n" = "$active" ] && printf '  ●' || true)")
+    i=$((i + 1))
+  done
+  if ! menu_select "Who am I this session?  (● = your default · abs persona use <name> to change it)" "$def" "${rows[@]}"; then
+    return 0                                            # nothing picked: the active one
+  fi
+  ABS_PERSONA="${names[$MENU_INDEX]}"
+  export ABS_PERSONA
+  [ "$ABS_PERSONA" = "$active" ] || info "${c_dim}This session: persona '$ABS_PERSONA'.${c_reset}"
+}
+
 _start_menu() {
   START_CWD=""; MENU_CONTINUE=0
   [ "${ABS_DAEMON_START:-0}" = "1" ] && return 0        # daemon launch = no menu
@@ -6424,6 +6494,12 @@ cmd_run() {
   # Resume-first start menu (v3): the FIX A live-session guard runs FIRST so we
   # never offer choices that would fail, then the picker (interactive TTY + recents
   # only; a no-op otherwise). It may set START_CWD / MENU_CONTINUE for the launch.
+  # The update check comes BEFORE any choice is asked for. It used to run after
+  # the project menu, so the operator picked a folder and then learned there was
+  # a newer abs — and a yes there relaunches, throwing the pick away. Now: is
+  # there an update; who am I today (the persona page); where am I working.
+  [ "${ABS_DAEMON_START:-0}" = "1" ] || update_prompt
+  _persona_menu
   _guard_no_live_session
   _start_menu
 
@@ -6552,13 +6628,7 @@ cmd_run() {
   # (see use_profile).
   export ABS_SESSION_PROFILE="$PROFILE"
 
-  # Check for a newer release and, if one exists, offer to update-and-relaunch
-  # before we commit to this launch. Placed ahead of the background warm-ups so a
-  # "yes" re-execs without having spawned throwaway work first. Never blocks past
-  # a ~3s network timeout; declines (the default) fall straight through to launch.
-  # Skipped entirely for a daemon-started session: the engine pane HAS a tty, so
-  # the prompt would block a headless launch (PLAN.md 1.5).
-  [ "${ABS_DAEMON_START:-0}" = "1" ] || update_prompt
+  # (The update check ran before the persona page and the project menu, above.)
 
   # Warm the usage-glance cache in the background so the first status-bar reading
   # isn't blank. Detached; it forks before exec and outlives it, so the launch is
@@ -6620,6 +6690,9 @@ cmd_run() {
   else
     state_set 'del(.session_away)' 2>/dev/null || true
   fi
+  # The persona this session launched with, for the status bar — which runs as
+  # its own process per render and cannot see this launch's ABS_PERSONA.
+  state_set --arg p "$(persona_canon "${ABS_PERSONA:-$(persona_active)}")" '.session_persona = $p' 2>/dev/null || true
   state_set 'del(.last_origin)' 2>/dev/null || true
 
   # ABS_EXTRA_SYSTEM_PROMPT: an extra system prompt MERGED into the ABS one rather
@@ -7283,7 +7356,7 @@ cmd_persona() {
     list|ls)
       local active; active="$(persona_active)"
       printf '  %-12s %-9s %s\n' "NAME" "STATE" "WHERE"
-      printf '  %-12s %-9s %s\n' "default" "$([ "$active" = default ] && echo active || echo -)" \
+      printf '  %-12s %-9s %s\n' "abs" "$([ "$active" = abs ] && echo active || echo -)" \
         "$([ -f "$(persona_file)" ] && persona_file || echo 'shipped (no file)')"
       local n
       for n in $(_persona_shipped_names); do
@@ -7308,13 +7381,13 @@ cmd_persona() {
     use)
       local n="${1:-}"; [ -n "$n" ] || die "Usage: abs persona use <name>"
       persona_exists "$n" || die "No persona named '$n'. abs persona list"
-      printf '%s\n' "$n" > "$(persona_active_file)"
-      ok "New sessions launch as '$n'. This one keeps its persona until restarted." ;;
+      printf '%s\n' "$(persona_canon "$n")" > "$(persona_active_file)"
+      ok "New sessions launch as '$(persona_canon "$n")'. This one keeps its persona until restarted." ;;
     create|new)
       local n="${1:-}" from=""; [ -n "$n" ] || die "Usage: abs persona create <name> [--from <other>]"
       [ "${2:-}" = "--from" ] && from="${3:-}"
       persona_name_ok "$n" || die "A persona name is lowercase letters, digits, - and _ (got '$n')."
-      [ "$n" != "default" ] || die "'default' is ~/.abs/persona.md — edit it with: abs prompt edit persona"
+      [ "$(persona_canon "$n")" != "abs" ] || die "'abs' is ~/.abs/persona.md — edit it with: abs prompt edit persona"
       mkdir -p "$d"
       [ -f "$d/$n.md" ] && die "$d/$n.md already exists. abs persona edit $n"
       if [ -n "$from" ]; then
@@ -7329,7 +7402,7 @@ cmd_persona() {
       ok "Created $d/$n.md — edit it with: abs persona edit $n   · use it with: abs --persona $n" ;;
     edit)
       local n="${1:-}"; [ -n "$n" ] || die "Usage: abs persona edit <name>"
-      [ "$n" = "default" ] && { _prompt_edit persona; return; }
+      [ "$(persona_canon "$n")" = "abs" ] && { _prompt_edit persona; return; }
       [ -f "$d/$n.md" ] || { persona_exists "$n" && cmd_persona create "$n" >/dev/null; }
       [ -f "$d/$n.md" ] || die "No persona named '$n'. abs persona create $n"
       local editor="${VISUAL:-${EDITOR:-}}"
@@ -7346,10 +7419,10 @@ cmd_persona() {
       ok "Renamed $a → $b." ;;
     delete)
       local n="${1:-}"; [ -n "$n" ] || die "Usage: abs persona delete <name>"
-      [ "$n" = "default" ] && die "'default' is not deleted; reset it with: abs prompt reset persona"
+      [ "$(persona_canon "$n")" = "abs" ] && die "'abs' is not deleted; reset it with: abs prompt reset persona"
       [ -f "$d/$n.md" ] || die "No file for '$n' (a shipped example without a file has nothing to delete)."
       rm -f "$d/$n.md"
-      [ "$(persona_active)" = "$n" ] && { rm -f "$(persona_active_file)"; info "It was the active persona; new sessions use 'default'."; }
+      [ "$(persona_active)" = "$n" ] && { rm -f "$(persona_active_file)"; info "It was the active persona; new sessions use 'abs'."; }
       ok "Deleted $d/$n.md." ;;
     *) die "Usage: abs persona [list|show|use|create|edit|rename|delete] …" ;;
   esac
@@ -7402,6 +7475,8 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} persona             List, create, switch personas (ceo, cto, friend, yours);
                           abs --persona <name> launches one session with it
 
+  ${c_bold}abs${c_reset} config persona-menu on|off
+                          Ask which persona at every launch (default on)
   ${c_bold}abs${c_reset} config commits ask|auto
                           ask: commit and push only when you say (default);
                           auto: commit each completed task, push still on your word

@@ -218,7 +218,7 @@ async def test_the_status_line_counts_tokens_and_flags_the_cap(home):
         app.action_tab("persona")
         await pilot.pause()
         status = str(app.query_one("#status").render())
-        assert "tokens" in status and "default · shipped" in status
+        assert "tokens" in status and "abs · shipped" in status
         app.query_one("#persona-text").load_text("x" * 17000)
         await pilot.pause()
         status = str(app.query_one("#status").render())
@@ -307,7 +307,7 @@ async def test_the_persona_tab_lists_default_and_the_shipped_examples(home):
         app.action_tab("persona")
         await pilot.pause()
         names = [getattr(i, "name", None) for i in app.query_one("#persona-list").children]
-        assert names[:4] == ["default", "ceo", "cto", "friend"]
+        assert names[:4] == ["abs", "ceo", "cto", "friend"]
 
 
 async def test_selecting_a_shipped_persona_shows_its_text_and_saving_materialises_it(home):
