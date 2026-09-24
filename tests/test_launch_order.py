@@ -29,6 +29,9 @@ ABS_SH = REPO / "abs.sh"
 def box(tmp_path):
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
+    # A launch refuses to start when Claude Code is not logged in (3.7.1); this
+    # suite is about what comes AFTER that gate.
+    (home / ".claude" / ".credentials.json").write_text('{"stub": true}')
     abs_home = home / ".abs"
     prof = abs_home / "profiles" / "default"
     prof.mkdir(parents=True)

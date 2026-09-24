@@ -37,7 +37,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.7.0"
+readonly ABS_VERSION="3.7.1"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -760,14 +760,66 @@ need_deps() {
   fi
 }
 
+# Where the plugin comes from. A machine that has run Claude Code has this
+# marketplace registered already; a FRESH one does not, and that was the whole
+# bug: `claude plugin install telegram@claude-plugins-official` on a new box
+# fails with "not found in marketplace … your local copy may be out of date",
+# which reads like a broken install of ABS. Adding it is one command, it needs
+# no login, and it falls back to https when there is no GitHub SSH key.
+readonly PLUGIN_MARKET="${PLUGIN_ID#*@}"
+readonly PLUGIN_MARKET_SRC="${ABS_PLUGIN_MARKET_SRC:-anthropics/claude-plugins-official}"
+
+plugin_installed() { claude plugin list 2>/dev/null | grep -q "$PLUGIN_ID"; }
+plugin_market_present() { claude plugin marketplace list 2>/dev/null | grep -q "$PLUGIN_MARKET"; }
+
+# Is Claude Code logged in? Presence of the credentials file only — never read,
+# never parsed. The daemon uses the same test before a handoff (absd/daemon.py).
+claude_logged_in() {
+  local f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+  [ -s "$f" ] && return 0
+  # A macOS install can keep the token in the keychain instead of a file, and
+  # ~/.claude.json's oauthAccount is written either way once login completes.
+  [ -f "$HOME/.claude.json" ] && grep -q '"oauthAccount"' "$HOME/.claude.json" 2>/dev/null
+}
+
 ensure_plugin() {
-  if claude plugin list 2>/dev/null | grep -q "$PLUGIN_ID"; then
+  plugin_installed && return 0
+  step "Installing the Telegram plugin"
+  # The marketplace first: on a fresh machine it is simply not there yet, and
+  # the install's own error message points at a stale cache rather than at this.
+  if ! plugin_market_present; then
+    info "  ${c_dim}Adding the plugin marketplace ($PLUGIN_MARKET_SRC)…${c_reset}"
+    claude plugin marketplace add "$PLUGIN_MARKET_SRC" >/dev/null 2>&1 || true
+  fi
+  if claude plugin install "$PLUGIN_ID" --scope user >/dev/null 2>&1; then
+    ok "Installed $PLUGIN_ID"
     return 0
   fi
-  step "Installing the Telegram plugin"
-  claude plugin install "$PLUGIN_ID" --scope user >/dev/null 2>&1 \
-    || die "Could not install $PLUGIN_ID. Run: claude plugin install $PLUGIN_ID"
-  ok "Installed $PLUGIN_ID"
+  # One retry after refreshing the marketplace: the other way this fails is a
+  # cached copy older than the plugin.
+  claude plugin marketplace update "$PLUGIN_MARKET" >/dev/null 2>&1 || true
+  if claude plugin install "$PLUGIN_ID" --scope user >/dev/null 2>&1; then
+    ok "Installed $PLUGIN_ID"
+    return 0
+  fi
+  warn "Could not install $PLUGIN_ID."
+  info "  Try these two, in order:"
+  info "    ${c_bold}claude plugin marketplace add $PLUGIN_MARKET_SRC${c_reset}"
+  info "    ${c_bold}claude plugin install $PLUGIN_ID --scope user${c_reset}"
+  claude_logged_in || info "  (And log in first: run ${c_bold}claude${c_reset} in a terminal — an unauthenticated CLI can also fail here.)"
+  die "The Telegram bridge needs that plugin. Fix the above, then run abs again."
+}
+
+# Logged out, the plugin and the pairing still work — only the SESSION does not.
+# Say that once, where it helps, rather than letting `claude` fail after setup.
+require_login() {
+  claude_logged_in && return 0
+  warn "Claude Code is not logged in on this machine."
+  info "  ABS is installed and your bot can be paired, but a session cannot start"
+  info "  until you log in. In this terminal or another one, run:"
+  info "    ${c_bold}claude${c_reset}        ${c_dim}→ complete the login, then /exit${c_reset}"
+  info "  Then start ABS again: ${c_bold}abs${c_reset}"
+  return 1
 }
 
 # Telegram allows exactly one getUpdates poller per bot. A live --channels
@@ -6455,6 +6507,13 @@ cmd_run() {
   ABS_RUN_ARGS=("$@")
   need_deps
   ensure_plugin
+  # Before the update check and the menus: a session that cannot start should
+  # say so now, not after the operator has picked a persona and a project.
+  # A daemon launch has no terminal to answer on; the daemon does its own
+  # credentials precheck and messages Telegram (absd/daemon.py).
+  if [ "${ABS_DAEMON_START:-0}" != "1" ]; then
+    require_login || exit 1
+  fi
 
   local did_setup=0
   if ! load_token || [ ! -f "$ABS_STATE" ]; then

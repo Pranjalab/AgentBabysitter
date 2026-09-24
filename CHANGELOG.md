@@ -25,6 +25,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.7.1] — 2026-09-24 — a fresh machine installs cleanly
+
+Reported from a new install: "the Claude Telegram plugin is not getting
+installed because the user is not logged in."
+
+### Fixed
+
+- **The plugin installs on a fresh machine.** Login was a red herring — a
+  logged-out `claude plugin install telegram@claude-plugins-official` works
+  fine. What a fresh machine has not got is the plugin MARKETPLACE, and without
+  it the install fails with "not found in marketplace … your local copy may be
+  out of date", which reads like a broken ABS. `ensure_plugin` now adds
+  `anthropics/claude-plugins-official` itself when it is missing (no login, and
+  it falls back to https when there is no GitHub SSH key), retries once after
+  refreshing a stale marketplace, and prints both commands if it still cannot.
+  `ABS_PLUGIN_MARKET_SRC` overrides the source.
+- **Not being logged in is said once, in words, before anything is chosen.** It
+  is needed to START a session, not to install or to pair — so the installer
+  says so at the end if credentials are absent, and a launch stops with the
+  command to run before the update check, the persona page and the project menu
+  rather than failing after you have chosen all three. Presence of the
+  credentials file or of `oauthAccount` in `~/.claude.json` (macOS keychain
+  installs) counts as logged in; nothing is ever read from either.
+
 ## [3.7.0] — 2026-09-21 — `abs prompt`: see and edit what goes into Claude
 
 "What are we adding into the prompt? I would like to see that." Then: "one

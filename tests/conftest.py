@@ -122,3 +122,41 @@ async def client_factory(fake: FakeTelegram) -> Iterator[Any]:
     finally:
         for c in made:
             await c.close()
+
+
+# A launch refuses to start when Claude Code is not logged in (3.7.1, after a
+# fresh-install report). Suites that point HOME at a temp directory are modelling
+# a machine that HAS Claude Code, not one mid-signup — so any temp HOME a test
+# creates gets an empty credentials file the moment it appears. Presence is all
+# `claude_logged_in` looks at; nothing is ever read.
+#
+# Done here rather than in twenty fixtures because the gate is orthogonal to what
+# any of them are testing; the suites that are ABOUT login (test_fresh_install)
+# delete the file explicitly.
+@pytest.fixture(autouse=True)
+def _logged_in_home(tmp_path, monkeypatch):
+    seeded: set[Path] = set()
+    real_run = __import__("subprocess").run
+
+    def seed(env):
+        home = env.get("HOME") if isinstance(env, dict) else None
+        if not home:
+            return
+        p = Path(home)
+        if p in seeded or not str(p).startswith(str(tmp_path)):
+            return
+        seeded.add(p)
+        try:
+            (p / ".claude").mkdir(parents=True, exist_ok=True)
+            f = p / ".claude" / ".credentials.json"
+            if not f.exists():
+                f.write_text('{"autouse": "logged-in for tests"}')
+        except OSError:
+            pass
+
+    def patched(*args, **kwargs):
+        seed(kwargs.get("env"))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(__import__("subprocess"), "run", patched)
+    yield

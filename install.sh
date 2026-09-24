@@ -398,6 +398,20 @@ fi
 # there's a single source of truth for it (`abs voice setup`). ask_yes already
 # no-ops without a tty, so CI/nohup installs just skip this cleanly.
 info ""
+# Login is not needed for anything the installer does — not the plugin, not the
+# pairing — but it IS needed before a session can start, and a fresh machine
+# usually has not done it. Saying so here turns a confusing first launch into a
+# one-line instruction.
+if [ -s "$HOME/.claude/.credentials.json" ] \
+   || { [ -f "$HOME/.claude.json" ] && grep -q '"oauthAccount"' "$HOME/.claude.json" 2>/dev/null; }; then
+  :
+else
+  info ""
+  warn "Claude Code is not logged in on this machine."
+  info "  ${c_dim}Everything below still installs. Before your first session, run${c_reset} ${c_bold}claude${c_reset}${c_dim},"
+  info "  complete the login, then /exit — abs will tell you if you forget.${c_reset}"
+fi
+
 info "${c_bold}Voice.${c_reset} Send Claude a voice note, and hear its replies as voice notes."
 info "${c_dim}Runs entirely on your machine (Kokoro, CPU). One-time download of a few GB, a few minutes to build.${c_reset}"
 info "${c_dim}Without it, replies arrive as text only — abs asks again at the first launch.${c_reset}"

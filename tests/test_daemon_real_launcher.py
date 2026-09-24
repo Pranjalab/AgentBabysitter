@@ -64,6 +64,10 @@ def _env(abs_home: Path, home: Path, stub_bin: Path, **extra: str) -> dict:
             env.pop(key, None)
     env["HOME"] = str(home)
     env["ABS_HOME"] = str(abs_home)
+    # A terminal launch refuses to start when Claude Code is not logged in (3.7.1),
+    # and these homes are empty by construction. Presence is all abs checks.
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    (home / ".claude" / ".credentials.json").write_text('{"stub": true}')
     env["PATH"] = f"{stub_bin}:{env.get('PATH', '')}"
     # Never let a real update check / network sneak in even if a path is missed.
     env["ABS_REPO"] = "http://127.0.0.1:1/never"
