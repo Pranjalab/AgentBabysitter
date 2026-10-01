@@ -47,7 +47,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.7.3"
+readonly ABS_VERSION="3.7.4"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -891,9 +891,30 @@ mcp_log_latest() {
   printf '%s' "$f"
 }
 
-# Every live poller for this machine's Telegram plugin, one pid per line.
+# Every live poller for this machine's Telegram plugin, one pid per line. ALL of
+# them, across every bot — the count alone says nothing until it is compared with
+# how many bots are legitimately being polled.
 pollers_running() {
   pgrep -f 'server\.ts' 2>/dev/null || true
+}
+
+# How many pollers SHOULD be running: one per profile whose recorded bot.pid names
+# a process that is still alive.
+#
+# Reported 1 Oct, minutes after being told to start a second bot: both sessions
+# showed "telegram conflict". The original premise was "one server.ts per machine
+# is correct, two means one is being 409'd" — true only when the machine runs one
+# bot, and running several is a feature this tool advertises. A 409 is two pollers
+# on the SAME token; two pollers on two tokens is the normal shape of two profiles.
+pollers_accounted() {
+  local n=0 saved="$PROFILE" name
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    use_profile "$name" 2>/dev/null || continue
+    [ -n "$(profile_live_pid)" ] && n=$((n + 1))
+  done < <(list_profiles 2>/dev/null || true)
+  use_profile "$saved" 2>/dev/null || true
+  printf '%s' "$n"
 }
 
 # What the plugin last said about polling, when the log carries stderr at all.
@@ -921,13 +942,17 @@ bridge_health() {
       *"polling as"*)     BRIDGE_STATE=healthy;  return 0 ;;
     esac
   fi
-  n="$(pollers_running | wc -l | tr -cd '0-9')"
-  case "${n:-0}" in
-    0) BRIDGE_DETAIL="no poller is running" ;;
-    1) BRIDGE_DETAIL="one poller, as it should be" ;;
-    *) BRIDGE_STATE=retrying
-       BRIDGE_DETAIL="$n pollers are running — they are competing for the same bot token" ;;
-  esac
+  local want
+  n="$(pollers_running | wc -l | tr -cd '0-9')"; n="${n:-0}"
+  want="$(pollers_accounted)"; want="${want:-0}"
+  if [ "$n" -eq 0 ]; then
+    BRIDGE_DETAIL="no poller is running"
+  elif [ "$want" -gt 0 ] && [ "$n" -gt "$want" ]; then
+    BRIDGE_STATE=retrying
+    BRIDGE_DETAIL="$n pollers for $want live profile(s) — one is unaccounted for and may be holding a bot token"
+  else
+    BRIDGE_DETAIL="$n poller(s) for $want live profile(s) — as it should be"
+  fi
   return 0
 }
 
@@ -1126,8 +1151,10 @@ $how"
       die "Profile '$PROFILE' is in use by a live Claude Code session ($who).
   Telegram allows one poller per bot, so this one cannot be started as well.
 $how
-  Use another bot:  abs --profile <name>      (see: abs profiles)
-  Make a new one:   abs start new-bot         (keeps this session running)
+  Another bot:   abs --profile <name>   an unused name sets up a NEW bot and
+                 launches it — this session keeps running (see: abs profiles)
+  Or automated:  abs start new-bot      same thing, provisioned for you (needs
+                 the v3 source: abs src status)
   If that pid is NOT a session you recognise, take the bot back:
     abs --reclaim --profile $PROFILE"
       ;;
@@ -3586,9 +3613,14 @@ _bridge_watchdog() {
   local pid; pid="$(profile_live_pid || true)"
   [ -n "$pid" ] || return 0
   poller_verdict "$pid"
+  # `orphan` only. This runs on every turn, silently, with no one watching — and
+  # `unknown` means exactly that: the poller's owner could not be found, which is
+  # not evidence that it has none. Killing a working bridge on a guess is far worse
+  # than leaving a stray one for `abs reconnect`, which the operator runs on purpose
+  # and which still handles `unknown`.
   case "$POLLER_VERDICT" in
-    stale)          rm -f "$TG_DIR/bot.pid" 2>/dev/null || true ;;
-    orphan|unknown) poller_reclaim "$pid" >/dev/null 2>&1 || true ;;
+    stale)  rm -f "$TG_DIR/bot.pid" 2>/dev/null || true ;;
+    orphan) poller_reclaim "$pid" >/dev/null 2>&1 || true ;;
   esac
   return 0
 }
@@ -6435,7 +6467,9 @@ cmd_new_bot() {
   local root py
   root="$(abs_src_root)"
   py="$root/.venv/bin/python"
-  abs_src_have || die "$(abs_src_missing_msg 'abs start new-bot')"
+  abs_src_have || die "$(abs_src_missing_msg 'abs start new-bot')
+  You may not need it: a profile name you have not used before sets up a new bot
+  and launches it, with nothing to install —  abs --profile <name>"
 
   # Resolve the trusted relay target (an existing paired bot) into RELAY_* globals
   # NOW, while globals still point at it — before read_new_token overwrites BOT_TOKEN

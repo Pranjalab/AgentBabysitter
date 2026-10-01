@@ -25,6 +25,52 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.7.4] — 2026-10-01 — two bots, said and seen the right way round
+
+Reported within the hour of 3.7.2 landing, about the message 3.7.2 itself added.
+It listed two ways to get a second bot:
+
+    Use another bot:  abs --profile <name>      (see: abs profiles)
+    Make a new one:   abs start new-bot         (keeps this session running)
+
+which reads as: the first is for a bot you already have, the second is how you
+make one. That is backwards for most installs. A profile name you have never
+used has no pairing, so ABS runs setup and walks you through BotFather — a new
+bot, with nothing to install. `abs start new-bot` is the *automated* version and
+needs the v3 source (`abs src install`), which is why it worked on one of the
+operator's servers and not the other.
+
+### Fixed
+
+- **Two bots is not a conflict.** Minutes after being told to start a second one,
+  both sessions showed `📡 telegram conflict — abs reconnect`. Nothing was
+  conflicting. The 3.7.2 detector counted `server.ts` processes across the whole
+  machine and called two of them a 409, on the premise that one poller per machine
+  is correct — true only when the machine runs one bot, and running several, one
+  per project, is a feature this tool advertises on its own front page. A 409 is
+  two pollers on the SAME token. The count is now compared against
+  `pollers_accounted` — one per profile whose recorded `bot.pid` is still alive —
+  so a conflict means a poller nobody accounts for, and two projects working looks
+  like two projects working. The plugin's own log still wins over the arithmetic
+  when it has something to say.
+- **The per-turn watchdog no longer reclaims on a guess.** The false conflict
+  exposed a worse latent bug: with `BRIDGE_STATE=retrying`, any profile whose own
+  poller came back `unknown` would have had it ended — silently, on an ordinary
+  turn, with nobody watching. `unknown` means the owner could not be found, which
+  is not evidence that there is none; killing a working bridge on that is far worse
+  than leaving a stray for `abs reconnect`, which the operator runs deliberately
+  and which still handles it. The automatic path acts on `orphan` alone — the
+  unambiguous reparented-to-init signature.
+- **The option that always works goes first, and says what it does.** The refusal
+  now leads with `abs --profile <name>` — "an unused name sets up a NEW bot and
+  launches it — this session keeps running" — and presents `new-bot` as the
+  automated alternative, naming its prerequisite.
+- **`abs start new-bot` without the v3 source stops sending people to install
+  something they may not need.** It still says how to get the source, and now adds
+  that an unused profile name does the same job with nothing to install.
+
+Wording only; no behaviour changed.
+
 ## [3.7.3] — 2026-10-01 — a tidy-up, nothing behavioural
 
 Asked for directly: "make sure that in the code there is no junk stored … if you

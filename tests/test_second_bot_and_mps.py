@@ -62,17 +62,32 @@ def test_new_bot_still_only_sends_through_the_live_bot():
     assert "do_pairing" in body, "pairing still happens, on the NEW bot"
 
 
-def test_the_refusal_names_the_command_that_makes_a_new_bot():
+def test_the_refusal_says_how_to_get_a_second_bot():
     m = re.search(r'die "Profile \'\$PROFILE\' is in use by a live Claude Code session.*?"',
                   SRC, re.S)
     assert m, "the in-use refusal moved"
     msg = m.group(0)
-    assert "abs start new-bot" in msg, (
-        "every other option assumes a bot you already have"
-    )
-    # and the options it already had must survive
-    for opt in ["abs --profile <name>", "--reclaim"]:
+    for opt in ["abs --profile <name>", "abs start new-bot", "--reclaim"]:
         assert opt in msg, opt
+    # Reported 1 Oct, about the message added the day before: it read as though
+    # `--profile <name>` only worked for a bot you already had, and `new-bot` was
+    # the way to make one. That is backwards for most installs — an unused profile
+    # name sets up a new bot with nothing to install, while `new-bot` needs the v3
+    # source. The option that always works has to say what it does.
+    assert "NEW bot" in msg, "the always-available path must say it creates one"
+    assert msg.index("abs --profile <name>") < msg.index("abs start new-bot"), (
+        "the option with no prerequisite goes first"
+    )
+
+
+def test_new_bot_without_the_source_points_at_the_path_that_needs_nothing():
+    """`abs src install` is a fine answer, but not when a command the operator
+    already has would do the job."""
+    body = SRC[SRC.index("cmd_new_bot() {"):]
+    body = body[:body.index("\n}\n")]
+    i = body.index("abs_src_have ||")
+    die = body[i:i + 400]
+    assert "abs --profile <name>" in die, die
 
 
 # ---- the CUDA MPS hang ---------------------------------------------------------------

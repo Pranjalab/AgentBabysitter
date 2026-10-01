@@ -135,16 +135,31 @@ def test_a_real_conversation_still_resumes(box, tmp_path):
 # ---- the bridge: what can be known without asking Telegram ----------------------
 
 
-def test_one_poller_is_the_healthy_shape(box, tmp_path):
-    r = box.probe('pollers_running() { echo 111; }; bridge_health; echo "S=$BRIDGE_STATE D=$BRIDGE_DETAIL"')
+def test_one_poller_for_one_live_profile_is_the_healthy_shape(box, tmp_path):
+    r = box.probe('pollers_running() { echo 111; }; pollers_accounted() { printf 1; }; '
+                  'bridge_health; echo "S=$BRIDGE_STATE D=$BRIDGE_DETAIL"')
     assert "S=unknown" in r.stdout          # nothing claimed either way
-    assert "one poller" in r.stdout
+    assert "as it should be" in r.stdout
 
 
-def test_two_pollers_are_a_conflict_worth_naming(box, tmp_path):
-    r = box.probe('pollers_running() { printf "111\\n222\\n"; }; bridge_health; echo "S=$BRIDGE_STATE D=$BRIDGE_DETAIL"')
+def test_two_pollers_for_two_profiles_is_two_projects_not_a_conflict(box, tmp_path):
+    """This test used to assert the opposite, and that is how the bug shipped.
+
+    3.7.2 read two `server.ts` processes as a 409 on the premise that one poller
+    per machine is correct — true only with one bot. The operator started a second
+    one on 1 Oct, exactly as ABS had just advised, and both sessions showed
+    "telegram conflict". A 409 is two pollers on the SAME token; this is two
+    pollers on two tokens."""
+    r = box.probe('pollers_running() { printf "111\\n222\\n"; }; pollers_accounted() { printf 2; }; '
+                  'bridge_health; echo "S=$BRIDGE_STATE D=$BRIDGE_DETAIL"')
+    assert "S=retrying" not in r.stdout, r.stdout
+
+
+def test_a_poller_nobody_accounts_for_is_still_a_conflict(box, tmp_path):
+    r = box.probe('pollers_running() { printf "111\\n222\\n"; }; pollers_accounted() { printf 1; }; '
+                  'bridge_health; echo "S=$BRIDGE_STATE D=$BRIDGE_DETAIL"')
     assert "S=retrying" in r.stdout
-    assert "competing for the same bot token" in r.stdout
+    assert "unaccounted" in r.stdout
 
 
 def test_the_plugins_own_words_win_when_the_log_has_them(box, tmp_path):
