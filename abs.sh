@@ -47,7 +47,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.7.2"
+readonly ABS_VERSION="3.7.3"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -2721,25 +2721,6 @@ _voice_long_enough() {
 # it. What keeps a note short is the answer being short, which is the prompt's job.
 readonly VOICE_LEAD_MAX="${ABS_VOICE_LEAD_CHARS:-4000}"
 
-# Is this message too long to speak WHOLE, but otherwise fine to speak?
-#
-# The distinction matters because the two reasons a message is unspeakable want
-# opposite treatment. Code and links have to be *read*, so voice-first must stand
-# aside and let the text go first. Length is not like that: a finished-task report
-# is long precisely because it is the thing the operator wanted to hear about, and
-# silently reverting to text-first for every real report — which is what happened
-# on the first message after this shipped, at 1854 characters against a 1200 ceiling
-# — makes the feature look broken while behaving exactly as written.
-_voice_too_long_only() {
-  local text="$1" prepped
-  printf '%s' "$text" | grep -q '```' && return 1
-  printf '%s' "$text" | grep -qE 'https?://' && return 1
-  [ "${#text}" -gt "$VOICE_MIRROR_MAX" ] || return 1
-  prepped="$(_voice_prep "$text")"
-  _voice_worth_saying "$prepped" || return 1
-  return 0
-}
-
 # Where the prose stops and the reference material starts.
 #
 # The operator's rule, in his words: "the whole text section in multiple paragraphs
@@ -3559,16 +3540,6 @@ _hook_directive_default() {
     *) ;;
   esac
 }
-
-# Phrases whose enforcement is code. Listed so the editor can show them locked
-# and so a hooks.json entry under one of these names is ignored, not honoured.
-HOOK_ENFORCED_PHRASES="ABS MUTE
-ABS OFF
-ABS BLOCK"
-# Phrases with editable wording and a shipped default.
-HOOK_DIRECTIVE_PHRASES="ABS UNMUTE
-ABS STOP
-ABS EXIT"
 
 # The text the operator wrote for a phrase, or empty. A value carrying `<channel`
 # is refused for the same reason the persona refuses it: it could forge an

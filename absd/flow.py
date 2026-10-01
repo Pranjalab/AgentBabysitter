@@ -27,7 +27,11 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # annotations only — the real import is local to each function,
+    from datetime import datetime  # noqa: F401   so module import stays cheap
+
 
 # D6 folder-name jail: the ONLY names a Telegram-created folder may take. Exactly
 # the Step 1.5 regex — letters, digits, dot, underscore, hyphen; 1..64 chars.

@@ -25,6 +25,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.7.3] — 2026-10-01 — a tidy-up, nothing behavioural
+
+Asked for directly: "make sure that in the code there is no junk stored … if you
+find any redundant code please update it." Audited rather than guessed — every
+function and every constant in `abs.sh` checked for a reader, every Python module
+linted, the whole script scanned for repeated blocks.
+
+Most of it came back clean: 260 functions and not one uncalled besides the two
+below, zero duplicated six-line blocks, and the 31% comment density is `why`, not
+clutter, so it stays. Four things were genuinely dead.
+
+### Removed
+
+- **`_voice_too_long_only`** (19 lines). It decided whether a message was too long
+  to speak but otherwise speakable — a distinction that stopped existing in 3.6.2,
+  when nothing was trimmed from a voice note any more. Nothing has called it since.
+- **`HOOK_ENFORCED_PHRASES` and `HOOK_DIRECTIVE_PHRASES`** (9 lines). Two lists
+  whose comment claimed they made the editor show phrases locked and made a
+  `hooks.json` entry under those names be ignored. Neither was true — the `case`
+  above does both, and nothing anywhere read either variable. A constant that
+  documents a rule it does not enforce is worse than no constant, because it reads
+  like the rule lives there.
+- **`import sys`** from `absd/recents.py` and `absd/status.py`, unused in both.
+
+### Changed
+
+- **The lazy `datetime` imports are legible to a linter.** `datetime` appears only
+  in string annotations, which `from __future__ import annotations` never
+  evaluates; the real import is local to each function, deliberately, to keep
+  module import cheap. Correct, but every linter flagged it as an undefined name —
+  which trains people to ignore the linter. Now declared under `TYPE_CHECKING`,
+  with the reason written down.
+
+Nothing here changes behaviour. `abs.sh` is 29 lines shorter.
+
 ## [3.7.2] — 2026-10-01 — the bridge says when it is deaf; two dead ends removed
 
 Three reports, all of the same shape: ABS noticed something was wrong and then

@@ -41,7 +41,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from absd import __version__
 from absd import flow as flow_mod
@@ -76,6 +76,10 @@ from absd.profiles import Profile
 from absd.recents import Recents, RecentEntry
 from absd.registry import Registry
 from absd.telegram import Conflict409, TelegramClient, TelegramError
+
+if TYPE_CHECKING:  # annotations only — the real import is local to each function,
+    from datetime import datetime  # noqa: F401   so module import stays cheap
+
 
 log = logging.getLogger("absd.poller")
 

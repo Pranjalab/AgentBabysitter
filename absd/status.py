@@ -18,7 +18,6 @@ pure (dataclasses in, string out) so it unit-tests without any of those sources.
 from __future__ import annotations
 
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
