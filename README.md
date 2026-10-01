@@ -181,6 +181,39 @@ can speak — the failure mode is always "text as usual", never silence.
 <img src="https://raw.githubusercontent.com/Pranjalab/AgentBabysitter/main/assets/voice-and-report.jpg" alt="A Telegram chat showing voice notes in both directions and a written task-done report from Claude." width="440">
 </div>
 
+### 🎭 Personas — pick who you're working with
+
+Four ship and you can write your own: `abs` itself, `ceo` (outcomes and
+trade-offs, no implementation detail), `cto` (audit → plan → dispatch → verify →
+report) and `friend` (warm, cheerful, the one you'd enjoy hearing from). You
+choose at launch, and the one you chose shows in the status bar so you never
+wonder which is answering.
+
+```sh
+abs persona list                # what exists
+abs --persona cto               # just this session
+abs persona use cto             # every session from now on
+abs persona create mine         # start your own from the shipped text
+```
+
+### 🧠 `abs prompt` — read and edit everything it tells Claude
+
+Anything bolted onto a Claude Code session shapes how the model behaves, so none
+of it is hidden. One command opens a tabbed page over every layer — the persona,
+the wording each remote command injects, this project's `CLAUDE.md`, your global
+one, and what Claude has remembered. Edit what's yours, reset any part back to
+the shipped text with one key.
+
+```sh
+abs prompt                      # the page — F1…F7 or ^PgUp/^PgDn to move
+abs prompt diff persona         # what you changed vs what ships
+abs prompt reset persona        # back to shipped
+```
+
+The prompt is assembled **mechanics → persona → safety**, and safety is appended
+*last* on purpose: a persona can change the voice and the priorities, never the
+destructive-command rails.
+
 ### 📊 Usage — check your Claude limits without leaving the chat
 
 Tap `/usage` and your subscription limits and reset times come to Telegram — no
@@ -290,12 +323,18 @@ abs --model opus        # any claude flag is passed straight through
 | 📋 `abs status` | What's paired, inbound state, whether it's live |
 | 📊 `abs usage` | Your Claude limits — in the terminal and on Telegram |
 | 🗂 `abs profiles` | List your bots and which are in use |
+| 🎭 `abs prompt` | See and edit what abs tells Claude — persona, hooks, `CLAUDE.md`, memory |
+| 🎭 `abs persona list\|use\|create` | Switch or write personas; `abs --persona cto` for one session |
+| 📡 `abs reconnect` | Telegram stopped arriving? Clear whatever is holding the bot |
+| 🤖 `abs start new-bot` | Provision a second bot and profile — works while another session is live |
 | ⚙️ `abs config model <name>` | Default model for new sessions (`--clear` to unset) |
 | ⚙️ `abs config silent on` / `off` | Whether new sessions start muted |
-| ⚙️ `abs config statusline on` / `off` | Bottom-bar dots, usage, context and version (default on) |
+| ⚙️ `abs config statusline on` / `off` | Bottom bar: bot, persona, usage, context, version (default on) |
 | ⚙️ `abs config label <name>` | Name before the colon in the bar — `auto` takes your Claude one |
 | ⚙️ `abs config usage-refresh <min>` | How often the usage glance refreshes (default 5) |
 | ⚙️ `abs config guard on` / `off` | Block destructive commands on Telegram turns (default on) |
+| ⚙️ `abs config commits ask\|auto` | `ask` (default): nothing is committed until you say so. Pushing always waits |
+| ⚙️ `abs config persona-menu on` / `off` | Ask which persona at every launch (default on) |
 | ⚙️ `abs config footer on` / `off` | Attach your usage and context to replies (default on) |
 | 🎧 `abs voice samples` | Send one voice note per voice, and choose by ear |
 | ⚙️ `abs config kokoro-voice <id>` | Which voice speaks (`--clear` for the default, `af_heart`) |

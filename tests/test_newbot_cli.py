@@ -6,8 +6,9 @@ pairing. We only prove the *guards* fire the way they must; the happy path (whic
 would type a token and pair) is covered by the manual-test doc, not here.
 
 Covered:
-  - assert_no_live_session fires when the resolved profile already has a live
-    poller (a bot.pid we keep alive) — provisioning refuses before any token entry;
+  - a live poller on the resolved profile does NOT block provisioning: making a
+    second bot while the first is working is the normal reason to want one, and it
+    collides with nothing (the live bot is only used to SEND the new bot's PIN);
   - the interactive guard: a non-TTY invocation refuses (new-bot needs a terminal);
   - token-not-verifiable aborts cleanly: over a pty we type a well-formed token,
     the stub curl makes getMe return ok:false, and abs.sh dies "Telegram rejected".
@@ -83,7 +84,7 @@ pytestmark = [
 # ---- 1. assert_no_live_session fires -----------------------------------------
 
 
-def test_new_bot_refuses_while_session_live(tmp_path: Path, stub_bin: Path) -> None:
+def test_new_bot_is_not_blocked_by_a_live_session(tmp_path: Path, stub_bin: Path) -> None:
     home = tmp_path / "home"; home.mkdir()
     abs_home = tmp_path / "abs"
     write_profile(abs_home, "default", allow_ids=[42])
@@ -114,13 +115,18 @@ def test_new_bot_refuses_while_session_live(tmp_path: Path, stub_bin: Path) -> N
         poller.wait()
 
     combined = proc.stdout + proc.stderr
+    # It still refuses — this invocation has no terminal and new-bot is interactive —
+    # but it must NOT refuse because the default profile is busy. Reported 1 Oct: a
+    # live session on `default` made the only command that creates a second bot
+    # unusable, so there was no way to get one without ending the session in use.
     assert proc.returncode != 0, combined
-    # Which refusal depends on whether this suite runs under a claude/absd ancestor
-    # (owned) or not (unknown), so assert what both promise: the holder's pid, and
-    # the way out.
-    assert str(poller.pid) in combined or "in use by a live" in combined, combined
-    assert "--reclaim" in combined, combined
-    # Never created a new profile.
+    assert "in use by a live" not in combined, (
+        "a live session on the relay profile must not block making a NEW bot:\n" + combined)
+    assert "--reclaim" not in combined, combined
+    assert "interactive" in combined, (
+        "the refusal we DO expect here is the tty one:\n" + combined)
+    # The safety property the original test was really protecting: a refusal, for
+    # whatever reason, must not leave a half-made profile behind.
     assert list((abs_home / "profiles").glob("*")) == [abs_home / "profiles" / "default"]
 
 

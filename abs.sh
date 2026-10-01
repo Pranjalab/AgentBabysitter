@@ -21,6 +21,16 @@ set -euo pipefail
 # names the line and the command instead of dying in silence. Expected failures
 # are all tested in `if`/`&&` conditions, which never fire ERR.
 set -E
+# A CUDA MPS daemon started as root — `nvidia-cuda-mps-control -d`, common on a
+# shared GPU host running worker containers — makes every OTHER user's CUDA init
+# on that machine hang for ever: the client finds the control pipe at the default
+# /tmp/nvidia-mps, asks a server it is not permitted to use, and waits. torch's
+# mere cuda.is_available(), which both the speech engine and the transcriber
+# import, blocked for hours on 2026-09-17 and no voice note went out at all.
+# Pointing the client at a directory that does not exist makes it fall back to a
+# normal context. Honours an existing value, so a host that really does share an
+# MPS server with us is unaffected.
+export CUDA_MPS_PIPE_DIRECTORY="${CUDA_MPS_PIPE_DIRECTORY:-/nonexistent}"
 trap 'rc=$?; printf "\n\033[31m✗\033[0m Unexpected failure (exit %s) at line %s\n    command: %s\n" \
   "$rc" "$LINENO" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
@@ -37,7 +47,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.7.1"
+readonly ABS_VERSION="3.7.2"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -837,6 +847,90 @@ assert_no_live_session() {
   fi
 }
 
+# --- is the bridge actually listening? ----------------------------------------
+#
+# The plugin retries polling with backoff on any error, so a dropped connection
+# heals itself — except for 409 Conflict, which means a SECOND poller holds this
+# bot token. After eight of those the plugin gives up and stops polling for
+# good, while its process stays alive because MCP keeps stdin open: replies
+# still go out, nothing comes in, and nothing anywhere says so. That is the
+# "can't reconnect" reported on 24 Sep.
+#
+# Two ways to know, and the honest split between them matters:
+#
+#   PASSIVE — count the pollers. One `server.ts` per bot token is correct; two
+#   means one of them is being 409'd right now, and that is the state the plugin
+#   cannot survive. Free, no Telegram call, so it can run on a hook.
+#
+#   ACTIVE — ask Telegram. `getUpdates` with timeout=0 succeeds only when NOBODY
+#   is polling; a live poller makes it 409. So success means the bridge is deaf.
+#   It costs one request and briefly interrupts a healthy poller's long poll
+#   (which it retries), so it belongs in `abs reconnect`, which the operator
+#   runs on purpose, and nowhere else.
+#
+# Claude Code used to capture the plugin's stderr into a per-session MCP log,
+# which would say all this for free — the current version does not, so it is
+# read when present and never depended on.
+BRIDGE_STATE=""      # healthy | retrying | deaf | unknown
+BRIDGE_DETAIL=""
+
+mcp_log_dir() {
+  local dir="${1:-$PWD}" slug
+  slug="$(printf '%s' "$dir" | sed 's#/#-#g')"
+  printf '%s/.cache/claude-cli-nodejs/%s/mcp-logs-plugin-telegram-telegram' "$HOME" "$slug"
+}
+
+# The newest log for this cwd. Newest by NAME: the file is named for its start
+# time in ISO-8601, so a lexical sort is a chronological one, and `ls -t` would
+# depend on mtimes that a copy or a restore can scramble.
+mcp_log_latest() {
+  local d; d="$(mcp_log_dir "${1:-$PWD}")"
+  [ -d "$d" ] || return 1
+  local f; f="$(ls -1 "$d"/*.jsonl 2>/dev/null | sort | tail -1 || true)"
+  [ -n "$f" ] || return 1
+  printf '%s' "$f"
+}
+
+# Every live poller for this machine's Telegram plugin, one pid per line.
+pollers_running() {
+  pgrep -f 'server\.ts' 2>/dev/null || true
+}
+
+# What the plugin last said about polling, when the log carries stderr at all.
+# Empty when it does not — a missing answer, not a healthy one.
+bridge_log_says() {
+  local f line
+  f="$(mcp_log_latest "${1:-$PWD}")" || return 1
+  line="$(grep -a 'telegram channel:' "$f" 2>/dev/null \
+          | grep -aE 'polling as|409 Conflict|polling error|persists after' \
+          | tail -1 || true)"
+  [ -n "$line" ] || return 1
+  printf '%s' "$line"
+}
+
+# Passive verdict. `retrying` here means "something is fighting over this token",
+# which is the state worth acting on before the plugin gives up.
+bridge_health() {
+  BRIDGE_STATE=unknown; BRIDGE_DETAIL=""
+  local line n
+  if line="$(bridge_log_says "${1:-$PWD}")"; then
+    case "$line" in
+      *"persists after"*) BRIDGE_STATE=deaf;     BRIDGE_DETAIL="another poller holds this bot token; the plugin gave up" ; return 0 ;;
+      *"409 Conflict"*)   BRIDGE_STATE=retrying; BRIDGE_DETAIL="409 Conflict — another poller holds this bot token" ; return 0 ;;
+      *"polling error"*)  BRIDGE_STATE=retrying; BRIDGE_DETAIL="${line#*polling error: }" ; return 0 ;;
+      *"polling as"*)     BRIDGE_STATE=healthy;  return 0 ;;
+    esac
+  fi
+  n="$(pollers_running | wc -l | tr -cd '0-9')"
+  case "${n:-0}" in
+    0) BRIDGE_DETAIL="no poller is running" ;;
+    1) BRIDGE_DETAIL="one poller, as it should be" ;;
+    *) BRIDGE_STATE=retrying
+       BRIDGE_DETAIL="$n pollers are running — they are competing for the same bot token" ;;
+  esac
+  return 0
+}
+
 # --- who is holding this bot? ------------------------------------------------
 #
 # `profile_live_pid` answers "is the token taken", which is the wrong question on
@@ -1032,7 +1126,8 @@ $how"
       die "Profile '$PROFILE' is in use by a live Claude Code session ($who).
   Telegram allows one poller per bot, so this one cannot be started as well.
 $how
-  Or use another bot: abs --profile <name>    (see: abs profiles)
+  Use another bot:  abs --profile <name>      (see: abs profiles)
+  Make a new one:   abs start new-bot         (keeps this session running)
   If that pid is NOT a session you recognise, take the bot back:
     abs --reclaim --profile $PROFILE"
       ;;
@@ -2324,7 +2419,17 @@ cmd_statusline() {
   # out as configured, and one short reason when it would not. voice_can_speak is
   # a few stat calls plus `command -v ffmpeg`, cheap enough per render.
   local state="" c_warn=$'\033[38;5;215m'
-  if [ "$off_state" = 1 ]; then
+  # A second poller means the two are 409-ing each other, and the plugin gives up
+  # after eight rounds of that — so this is worth the bar's space while there is
+  # still something to do about it. Deafness AFTER the plugin has given up cannot
+  # be seen from here without asking Telegram, which is what `abs reconnect` is
+  # for; the bar does not pretend otherwise.
+  bridge_health
+  if [ "$BRIDGE_STATE" = "deaf" ]; then
+    state="${sep}${c_warn}📵 telegram deaf — abs reconnect${off}"
+  elif [ "$BRIDGE_STATE" = "retrying" ]; then
+    state="${sep}${c_warn}📡 telegram conflict — abs reconnect${off}"
+  elif [ "$off_state" = 1 ]; then
     state="${sep}${c_warn}⛔ off${off}"
   elif [ "$muted" = 1 ]; then
     state="${sep}${c_warn}🔇 muted${off}"
@@ -3499,6 +3604,24 @@ _hook_custom_defined() {
   _hook_directive_custom "$up" >/dev/null
 }
 
+# Kill a stray poller while the plugin is still retrying, so the bridge recovers
+# without anyone noticing. Never touches a poller that belongs to a live session
+# — that is somebody's bridge, not a stray.
+_bridge_watchdog() {
+  bridge_health
+  # Only the conflict case, and only from the passive signal — this runs on every
+  # turn, so it must never call Telegram.
+  [ "$BRIDGE_STATE" = "retrying" ] || return 0
+  local pid; pid="$(profile_live_pid || true)"
+  [ -n "$pid" ] || return 0
+  poller_verdict "$pid"
+  case "$POLLER_VERDICT" in
+    stale)          rm -f "$TG_DIR/bot.pid" 2>/dev/null || true ;;
+    orphan|unknown) poller_reclaim "$pid" >/dev/null 2>&1 || true ;;
+  esac
+  return 0
+}
+
 cmd_silent_hook() {
   [ -f "${ABS_STATE:-/nonexistent}" ] || return 0
   local input event now sess
@@ -3506,6 +3629,12 @@ cmd_silent_hook() {
   now="$(date +%s)"
   event="$(printf '%s' "$input" | jq -r '.hook_event_name // ""' 2>/dev/null)"
   sess="$(printf '%s' "$input" | jq -r '.session_id // ""' 2>/dev/null)"
+
+  # While the plugin is BACKING OFF from a 409 there is a window — about half a
+  # minute — in which ending the stray holder lets it heal itself; after that it
+  # stops for good and only a new session brings it back. Free to check (the
+  # process table, never Telegram), so it rides on the events that already fire.
+  case "$event" in UserPromptSubmit|PostToolUse) _bridge_watchdog ;; esac
 
   case "$event" in
     UserPromptSubmit)
@@ -4995,15 +5124,85 @@ _latest_known() {
 # over the same file. Verifies the on-disk ABS_VERSION actually advanced before
 # reporting success, so a failed pull or a network blip never leaves you thinking
 # you upgraded when you didn't. Returns 0 only on a verified upgrade.
+# `git pull --ff-only` refused. Reported from a server on 1 Oct: the update
+# offered itself, failed on "Your local changes to abs.sh would be overwritten",
+# and said "resolve it by hand" — which, over SSH, on a box you are not sitting at,
+# is a dead end. It did not say WHAT had changed or give a way out.
+#
+# So: name the reason, show the damage, and offer the one recovery that cannot
+# lose work. `git stash` keeps the changes and prints how to get them back; it is
+# never run without a yes, and never in a non-interactive launch.
+#
+# Returns 0 if the checkout ended up updated, 1 if it did not.
+_update_git_stuck() {
+  local dir="$1" branch upstream dirty reply
+  branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  upstream="$(git -C "$dir" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+  dirty="$(git -C "$dir" status --porcelain 2>/dev/null || true)"
+
+  warn "The update could not be applied to $dir."
+
+  if [ -z "$upstream" ]; then
+    info "  ${c_dim}Branch '${branch:-?}' is not tracking a remote, so there is nothing to pull.${c_reset}"
+    info "  ${c_bold}git -C $dir branch --set-upstream-to=origin/main${c_reset}"
+    return 1
+  fi
+
+  if [ -n "$dirty" ]; then
+    info "  Local changes are in the way:"
+    git -C "$dir" status --porcelain 2>/dev/null | sed 's/^/      /' >&2
+    local stat
+    stat="$(git -C "$dir" diff --stat 2>/dev/null | tail -4 || true)"
+    [ -n "$stat" ] && printf '%s\n' "$stat" | sed 's/^/      /' >&2
+
+    # A mode-only difference is not a change anyone made on purpose — it is two
+    # machines with different umasks — so say that, because the fix is different.
+    if [ -z "$(git -C "$dir" diff --numstat 2>/dev/null | awk '$1!="0"||$2!="0"')" ]; then
+      info "  ${c_dim}Those are file-permission differences, not edits — usually two machines"
+      info "  with different umasks. This clears it for good:${c_reset}"
+      info "  ${c_bold}git -C $dir config core.fileMode false${c_reset}"
+    fi
+
+    if [ -t 0 ] && [ -t 1 ]; then
+      printf '  %sStash them and update? Your changes are kept, not discarded. [y/N]%s ' \
+        "$c_bold" "$c_reset" >&2
+      read -r reply || reply=""
+      case "$reply" in
+        [yY]|[yY][eE][sS])
+          if git -C "$dir" stash push -u -m "abs update $(date +%Y-%m-%d)" >&2 \
+             && git -C "$dir" pull --ff-only >&2; then
+              ok "  Updated. Your changes are safe in the stash:"
+            info "  ${c_bold}cd $dir && git stash pop${c_reset}  ${c_dim}brings them back${c_reset}"
+            return 0
+          fi
+          warn "  Stash-and-pull did not work either — nothing was lost."
+          info "  ${c_bold}git -C $dir stash list${c_reset}  ${c_dim}your changes, if the stash was made${c_reset}"
+          return 1 ;;
+      esac
+    fi
+    info "  ${c_dim}Keeping your changes and leaving the version as it is. To update by hand:${c_reset}"
+    info "  ${c_bold}cd $dir${c_reset}"
+    info "  ${c_bold}git stash && git pull --ff-only && git stash pop${c_reset}"
+    return 1
+  fi
+
+  # Clean tree, so --ff-only failed because the branch has its own commits.
+  local ahead
+  ahead="$(git -C "$dir" rev-list --count "$upstream..HEAD" 2>/dev/null || echo '?')"
+  info "  ${c_dim}Branch '${branch:-?}' has ${ahead} commit(s) that ${upstream} does not, so it"
+  info "  cannot fast-forward. Nothing here will rewrite your history for you.${c_reset}"
+  info "  ${c_bold}git -C $dir log --oneline ${upstream}..HEAD${c_reset}  ${c_dim}what is yours${c_reset}"
+  info "  ${c_bold}git -C $dir rebase ${upstream}${c_reset}            ${c_dim}replay it on top${c_reset}"
+  return 1
+}
+
 abs_self_update() {
   local want="${1:-}" dir now
   dir="$(dirname "$SCRIPT_PATH")"
   if git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     info "${c_dim}Updating the checkout at $dir  (git pull --ff-only)…${c_reset}"
     if ! git -C "$dir" pull --ff-only >&2; then
-      warn "git pull --ff-only failed — the checkout has local changes or diverged."
-      info "  Resolve it by hand in $dir, then relaunch."
-      return 1
+      _update_git_stuck "$dir" || return 1
     fi
   else
     local url="${ABS_INSTALL_URL:-https://agentbabysitter.com/install.sh}"
@@ -5830,6 +6029,30 @@ _guard_no_live_session() {
 # Apply a chosen recent (by index) from the recents JSON: launch in its recorded
 # path with --continue and its recorded mode. A vanished folder falls back to a
 # fresh session in the current folder (mkdir is trivial at a terminal).
+# Has Claude Code got a conversation it could actually continue in this folder?
+#
+# ABS records a recent when a session LAUNCHES, and Claude Code writes a history
+# file for every session — but a session nobody spoke in leaves that file holding
+# metadata only. `claude --continue` then prints "No conversation found to
+# continue" and exits, which killed the launch and dropped the operator back at a
+# shell prompt (reported 24 Sep, after a session that never got a word in because
+# the Telegram bridge had dropped).
+#
+# So: look for at least one real message before offering to continue. The history
+# lives in ~/.claude/projects/<cwd with / → ->/ *.jsonl; a line with type "user"
+# or "assistant" is a conversation, the metadata records are not.
+has_resumable_conversation() {
+  local dir="$1" slug d f
+  slug="$(printf '%s' "$dir" | sed 's#/#-#g')"
+  d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug"
+  [ -d "$d" ] || return 1
+  for f in "$d"/*.jsonl; do
+    [ -f "$f" ] || continue
+    grep -aqE '"type"[[:space:]]*:[[:space:]]*"(user|assistant)"' "$f" && return 0
+  done
+  return 1
+}
+
 _start_menu_apply() {
   local path mode
   path="$(printf '%s' "$1" | jq -r ".[$2].path")"
@@ -5840,6 +6063,12 @@ _start_menu_apply() {
   fi
   START_CWD="$path"
   MENU_CONTINUE=1
+  if ! has_resumable_conversation "$path"; then
+    warn "There is no conversation to resume in $path — starting a fresh session there."
+    info "  ${c_dim}(The last session in that folder ended before anything was said.)${c_reset}"
+    MENU_CONTINUE=0
+    return 0
+  fi
   if [ "$mode" = "away" ]; then
     ABS_AWAY=1
     warn "Away mode (recorded): file edits won't prompt for approval."
@@ -6044,7 +6273,7 @@ _persona_blurb() {
 # daemon started it, when --resume/--new asked for no menu, or when the operator
 # turned it off (abs config persona-menu off).
 _persona_menu() {
-  [ -n "${ABS_PERSONA:-}" ] && return 0
+  [ -n "${ABS_PERSONA:-}" ] && return 0            # --persona said so already
   [ "${ABS_DAEMON_START:-0}" = "1" ] && return 0
   [ -n "${ABS_START_MENU_BYPASS:-}" ] && return 0
   [ -t 0 ] && [ -t 1 ] || return 0
@@ -6067,8 +6296,11 @@ _persona_menu() {
   if ! menu_select "Who am I this session?  (● = your default · abs persona use <name> to change it)" "$def" "${rows[@]}"; then
     return 0                                            # nothing picked: the active one
   fi
+  # Not exported: everything that reads it — persona_text, the PERSONAS section,
+  # the .session_persona record — runs in this shell. Exporting put it in the
+  # environment of `claude` itself, so an `abs` run from INSIDE a session
+  # inherited a persona and silently skipped its own page.
   ABS_PERSONA="${names[$MENU_INDEX]}"
-  export ABS_PERSONA
   [ "$ABS_PERSONA" = "$active" ] || info "${c_dim}This session: persona '$ABS_PERSONA'.${c_reset}"
 }
 
@@ -6218,10 +6450,14 @@ _newbot_pick_cwd() {
 # convenience. See docs/v3/critique/newbot.md.
 cmd_new_bot() {
   need_deps
-  # Guard first (as with every launch): don't provision while a session is live on
-  # the resolved profile — Telegram allows one poller per bot and an interactive
-  # flow here would collide with it.
-  assert_no_live_session
+  # Deliberately NOT guarded on the current profile. Making a second bot while the
+  # first is working is the normal reason to want one — and it collides with
+  # nothing: the live bot is only used to SEND the new bot's PIN (a single
+  # sendMessage), and the pairing that follows polls the NEW bot. Telegram's
+  # one-poller-per-bot rule never comes into it. The profile that actually gets
+  # launched at the end is the new one, and cmd_run guards that in the usual way.
+  # Reported 1 Oct: this refused with "profile is in use", which left no way to
+  # make a second bot at all without first ending the session you were using.
   ensure_plugin
   [ -t 0 ] || die "abs start new-bot is interactive — run it at a terminal."
 
@@ -7495,6 +7731,97 @@ cmd_persona() {
   esac
 }
 
+# `abs reconnect` — clear whatever is holding this bot, and say what is left.
+#
+# Two halves, because only one of them is recoverable from outside the session.
+# A stray poller CAN be killed from here, and killing it during the plugin's
+# backoff is what lets the bridge heal itself. A plugin that has already given
+# up cannot be restarted from outside: MCP servers are children of `claude`, so
+# the session has to go round again. Saying that plainly beats pretending.
+cmd_reconnect() {
+  require_setup
+  local pid
+  info "Bridge for profile '$PROFILE' (@$(state_get '.bot')):"
+
+  bridge_health
+  case "$BRIDGE_STATE" in
+    healthy)  ok "  The session in this folder is polling normally." ;;
+    retrying) warn "  Reconnecting: $BRIDGE_DETAIL" ;;
+    deaf)     warn "  Deaf: $BRIDGE_DETAIL" ;;
+    *)        info "  ${c_dim}No session log here (${BRIDGE_DETAIL}).${c_reset}" ;;
+  esac
+
+  # Whatever the log says, a stray holder is the thing to remove.
+  pid="$(profile_live_pid)"
+  if [ -n "$pid" ]; then
+    poller_verdict "$pid"
+    case "$POLLER_VERDICT" in
+      stale)
+        rm -f "$TG_DIR/bot.pid" 2>/dev/null || true
+        ok "  Cleared a stale bot.pid (pid $pid was gone)." ;;
+      orphan|unknown)
+        info "  Ending an orphaned poller (pid $pid) that no session is behind…"
+        if poller_reclaim "$pid"; then
+          ok "  Reclaimed. The bot token is free again."
+        else
+          warn "  Could not end pid $pid — end it yourself: kill $pid"
+        fi ;;
+      owned)
+        info "  The poller (pid $pid) belongs to a live session (pid $POLLER_OWNER_PID${POLLER_OWNER_CWD:+, $POLLER_OWNER_CWD})."
+        info "  ${c_dim}That is the session that owns the bot. Nothing to reclaim.${c_reset}" ;;
+    esac
+  else
+    info "  Nothing is holding the bot token."
+  fi
+
+  # Does Telegram itself answer, and is anyone actually polling?
+  #
+  # getUpdates with timeout=0 is the only way to know from outside the session:
+  # it SUCCEEDS when nobody is polling and 409s when somebody is. offset=-1 asks
+  # for the newest update only and confirms nothing, so a pending message is not
+  # consumed by the question. A healthy poller loses one long poll to this and
+  # retries within a second — the cost of an answer the operator asked for.
+  local probe ok_field
+  if ! load_token 2>/dev/null; then
+    warn "  No bot token for this profile — run: abs --profile $PROFILE setup"
+    return 0
+  fi
+  if ! tg_api getMe '{}' | jq -e '.ok == true' >/dev/null 2>&1; then
+    warn "  Telegram did not answer getMe — check the network or the token."
+    return 0
+  fi
+  ok "  Telegram answers (getMe)."
+  # An active probe is deliberately NOT run here.
+  #
+  # `getUpdates` only returns 409 when another request is in flight at that exact
+  # moment, and a poller between long polls is idle for a beat — so a single
+  # probe answers "nobody is polling" about a perfectly healthy bridge, which is
+  # exactly what it did when this was first tried, on a session whose inbound was
+  # demonstrably working. A wrong "your bot is deaf" is worse than no answer, and
+  # the probe also costs the live poller its current long poll.
+  #
+  # So the verdict here comes from what can be known without guessing: who holds
+  # the token, how many pollers exist, and whatever the plugin has logged.
+  case "$BRIDGE_STATE" in
+    deaf)
+      printf '\n'
+      warn "The plugin has stopped polling and cannot start again on its own."
+      info "  The plugin stops for good after repeated conflicts, and only a new"
+      info "  session starts it again. In the Claude session: ${c_bold}/exit${c_reset}, then ${c_bold}abs${c_reset}"
+      info "  ${c_dim}(A restart picks up the messages you sent meanwhile — they are pooled.)${c_reset}" ;;
+    retrying)
+      printf '\n'
+      info "  The plugin retries on its own; with the holder gone it should be back within ~15s."
+      info "  ${c_dim}Still nothing arriving after that? ${c_bold}/exit${c_reset}${c_dim} in the session, then ${c_bold}abs${c_reset}${c_dim}.${c_reset}" ;;
+    *)
+      printf '\n'
+      info "  If messages still do not arrive, the session's own poller has stopped:"
+      info "  that cannot be restarted from outside, so in the Claude session run"
+      info "  ${c_bold}/exit${c_reset}, then ${c_bold}abs${c_reset}. ${c_dim}Anything you sent meanwhile is pooled and arrives with it.${c_reset}" ;;
+  esac
+  return 0
+}
+
 cmd_prompt() {
   local sub="${1:-}"; [ $# -gt 0 ] && shift
   case "$sub" in
@@ -7529,6 +7856,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
                           setup'; --turbo = faster model, --device cuda|mps|cpu)
   ${c_bold}abs${c_reset} log [--list|--clear]  Read or delete your local conversation backup
 
+  ${c_bold}abs${c_reset} reconnect           Telegram stopped arriving? Clear whatever holds the bot
   ${c_bold}abs${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
   ${c_bold}abs${c_reset} off                 Hard off: drop ALL inbound + outbound Telegram
   ${c_bold}abs${c_reset} on                  Re-enable inbound Telegram
@@ -7766,6 +8094,7 @@ main() {
     config)    shift; cmd_config "$@" ;;
     prompt)    shift; cmd_prompt "$@" ;;
     persona)   shift; cmd_persona "$@" ;;
+    reconnect|telegram-reset) shift; cmd_reconnect "$@" ;;
     log)       shift; cmd_log "$@" ;;
     off)       cmd_off ;;
     on)        cmd_on ;;

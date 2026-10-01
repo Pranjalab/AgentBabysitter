@@ -25,6 +25,81 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.7.2] — 2026-10-01 — the bridge says when it is deaf; two dead ends removed
+
+Three reports, all of the same shape: ABS noticed something was wrong and then
+left the operator with nowhere to go. "When the Telegram connection drops it's
+not able to reconnect properly"; a menu offering `Resume reel (3m ago)` followed
+by `No conversation found to continue`; and, from a server, an update that
+refused and said only "resolve it by hand".
+
+### Fixed
+
+- **You can make a second bot while the first one is working.** A session was live
+  on `default`, the operator wanted another bot for another project, and `abs`
+  refused — correctly, since Telegram allows one poller per bot. But every option
+  it offered assumed a bot you already had, and `abs start new-bot`, the one
+  command that makes one, was not among them *and* was blocked by the same
+  assertion. There was no way forward short of ending the session he was using.
+  The guard was wrong there: provisioning only SENDS the new bot's PIN through the
+  trusted bot (one `sendMessage`), and the pairing that follows polls the NEW bot,
+  so the one-poller rule never applies. The refusal now lists `abs start new-bot`
+  too. A test asserts the relay is still send-only, so the guard comes back if that
+  ever changes.
+- **Voice no longer dies on a shared GPU host.** A root-owned CUDA MPS daemon —
+  `nvidia-cuda-mps-control -d`, normal on a box running worker containers — makes
+  every *other* user's CUDA init hang for ever: the client finds the control pipe
+  at the default `/tmp/nvidia-mps`, asks a server it may not use, and waits. torch's
+  mere `cuda.is_available()`, which the speech engine and the transcriber both
+  import, blocked for hours on 17 Sep and not one voice note went out. `abs` now
+  exports `CUDA_MPS_PIPE_DIRECTORY=/nonexistent` before anything can import torch,
+  which falls the client back to a normal context; an existing value is honoured,
+  so a host that genuinely shares an MPS server is untouched. Found as a local edit
+  on the affected machine — which is also why that machine could not be updated.
+- **A stuck checkout says what is stuck, and offers a way out.** On a server the
+  update offered itself, failed with "Your local changes to abs.sh would be
+  overwritten", and told the operator to resolve it by hand — over SSH, with no
+  indication of what had changed. That machine then sat on 3.6.2 for a fortnight.
+  `git pull --ff-only` refusing to overwrite somebody's work is correct and still
+  happens; what changed is everything after it. ABS now names the files in the
+  way, prints the diff stat, and offers to `git stash` and retry — which keeps the
+  changes and prints the command that brings them back. Never without an explicit
+  yes, and never without a terminal, so a systemd or cron launch can't move
+  anyone's work. A diverged branch is told apart from local edits (it suggests
+  `rebase`, not `stash`), a branch with no upstream is named as such, and a
+  permission-only difference — two machines with different umasks — points at
+  `core.fileMode` instead of sending someone to stash nothing.
+
+- **A resume only ever resumes something that exists.** ABS records a recent when
+  a session LAUNCHES, and a session nobody spoke in leaves a history file holding
+  metadata and no messages — so `--continue` refused and the launch died at a
+  shell prompt. The menu now looks for a real message first and starts a fresh
+  session in that folder instead, saying so.
+- **A Telegram conflict is visible and gets cleared.** The plugin retries polling
+  with backoff, so a dropped connection heals itself; what it cannot survive is
+  409 Conflict — a second poller on the same bot token — which it gives up on
+  after eight attempts, staying alive and deaf while replies still go out. Two
+  pollers is a free, passive signal for exactly that, so the status bar shows
+  `📡 telegram conflict — abs reconnect`, and the hook that already runs each
+  turn ends a stray poller while the plugin can still recover on its own. A
+  poller that belongs to a live session is never touched.
+- **The chosen persona no longer leaks into the session's environment.** It was
+  exported, so `claude` and everything under it inherited `ABS_PERSONA` — and an
+  `abs` run from inside a session then skipped its own persona page, thinking
+  `--persona` had been given. Found while testing the bridge fix, in the test
+  suite's own environment.
+- **`abs reconnect`** (also `abs telegram-reset`) — what is holding the bot, what
+  the plugin last said, whether Telegram answers, a stray cleared, and the one
+  thing only a session restart can fix, said plainly.
+
+### Not done, deliberately
+
+- **No active "is anyone polling?" probe.** `getUpdates` returns 409 only while
+  another request is in flight, so a probe that lands between two long polls
+  reports a healthy bridge as deaf — which is what it did on a live session
+  during this work — and it costs that poller its current poll. A wrong "your
+  bot is deaf" is worse than no answer.
+
 ## [3.7.1] — 2026-09-24 — a fresh machine installs cleanly
 
 Reported from a new install: "the Claude Telegram plugin is not getting

@@ -345,6 +345,20 @@ def test_new_bypass_launches_fresh_in_cwd(tmp_path: Path, stub_bin: Path) -> Non
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="jq required")
+def _seed_conversation(home: Path, project: Path) -> None:
+    """Claude Code's own history for `project`, with one real message in it.
+
+    Since 3.7.2 a resume is offered only when there is something to continue: a
+    session nobody spoke in leaves a metadata-only file, and `--continue` then
+    refuses and kills the launch. This models a folder that WAS talked in.
+    """
+    d = home / ".claude" / "projects" / str(project).replace("/", "-")
+    d.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    (d / "seed.jsonl").write_text(
+        _json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n")
+
+
 def test_resume_bypass_resumes_top_recent(tmp_path: Path, stub_bin: Path) -> None:
     home = tmp_path / "home"; home.mkdir()
     abs_home = tmp_path / "abs"
@@ -352,6 +366,7 @@ def test_resume_bypass_resumes_top_recent(tmp_path: Path, stub_bin: Path) -> Non
     (abs_home / "daemon").mkdir(parents=True, exist_ok=True)
     recent = tmp_path / "research"; recent.mkdir()
     _seed_recent(abs_home, "default", recent, mode="away")
+    _seed_conversation(home, recent)
     cwd = tmp_path / "here"; cwd.mkdir()
     _dump_stub(stub_bin)
     cwd_file = tmp_path / "cwd"
@@ -406,6 +421,7 @@ def test_interactive_menu_resume_via_pty(tmp_path: Path, stub_bin: Path) -> None
     (abs_home / "daemon").mkdir(parents=True, exist_ok=True)
     recent = tmp_path / "research"; recent.mkdir()
     _seed_recent(abs_home, "default", recent)
+    _seed_conversation(home, recent)
     cwd = tmp_path / "here"; cwd.mkdir()
     _dump_stub(stub_bin)
     cwd_file = tmp_path / "cwd"

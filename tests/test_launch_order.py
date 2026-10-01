@@ -63,7 +63,8 @@ def box(tmp_path):
             e = dict(os.environ, HOME=str(home), ABS_HOME=str(abs_home),
                      PATH=f"{binp}:{os.environ.get('PATH', '')}", ABS_VOICE_ROOT=str(tmp_path / "novoice"),
                      TERM="xterm-256color", ABS_VERSION_URL=f"file://{tmp_path}/VERSION")
-            e.pop("TELEGRAM_STATE_DIR", None)
+            for k in ("TELEGRAM_STATE_DIR", "ABS_PERSONA", "ABS_SESSION_PROFILE", "ABS_PROFILE"):
+                e.pop(k, None)
             e.update(extra)
             return e
 
@@ -172,3 +173,14 @@ def test_the_bar_refreshes_on_a_timer_while_idle(box):
     cfg = json.loads(settings.read_text())
     assert cfg["statusLine"]["refreshInterval"] == 5
     assert "statusline" in cfg["statusLine"]["command"]
+
+
+def test_the_chosen_persona_does_not_leak_into_the_session_environment(box):
+    """It used to be exported, so `claude` and everything under it inherited
+    ABS_PERSONA — and an `abs` run from inside a session then skipped its own
+    persona page because it thought --persona had been given."""
+    text, _ = box.launch([b"n" + ENTER, DOWN, ENTER])     # abs → ceo
+    assert "Who am I this session?" in text
+    src = (REPO / "abs.sh").read_text()
+    body = src[src.index("_persona_menu() {"):src.index("_start_menu() {")]
+    assert "export ABS_PERSONA" not in body

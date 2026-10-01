@@ -154,6 +154,16 @@ def _logged_in_home(tmp_path, monkeypatch):
         except OSError:
             pass
 
+    # The session running these tests is itself an ABS session, so its own
+    # ABS_PERSONA / ABS_SESSION_PROFILE / ABS_PROFILE sit in os.environ and ride
+    # into every fixture that copies it. ABS_PERSONA is the one that bites:
+    # abs.sh reads it as "--persona was given", so the persona page never appears
+    # and `persona use` looks like it does nothing. Cleared from os.environ here
+    # rather than from each call, so a test that sets one DELIBERATELY still has
+    # it honoured.
+    for leaked in ("ABS_PERSONA", "ABS_SESSION_PROFILE", "ABS_PROFILE"):
+        monkeypatch.delenv(leaked, raising=False)
+
     def patched(*args, **kwargs):
         seed(kwargs.get("env"))
         return real_run(*args, **kwargs)

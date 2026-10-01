@@ -122,6 +122,17 @@ trade you're making, and worth knowing before you rely on it.
 
 ## Reporting a vulnerability
 
-Found something? Open an issue at
-[github.com/Pranjalab/AgentBabysitter/issues](https://github.com/Pranjalab/AgentBabysitter/issues),
-or for anything sensitive, describe it privately rather than in a public issue.
+**Anything exploitable goes through GitHub's private reporting, not a public
+issue:** [Report a vulnerability](https://github.com/Pranjalab/AgentBabysitter/security/advisories/new).
+It opens a private advisory only you and the maintainer can read, so the fix can
+land before the detail is public. Email works too —
+[pranjal.panda.ai@gmail.com](mailto:pranjal.panda.ai@gmail.com) — if you'd rather
+not use GitHub.
+
+Please include what you did, what happened, and roughly what an attacker gets.
+A proof of concept is welcome; a working exploit is not required.
+
+Anything **not** sensitive — a hardening idea, a question about the model above,
+a doc that's wrong — is better in the open, as an
+[issue](https://github.com/Pranjalab/AgentBabysitter/issues) or a
+[discussion](https://github.com/Pranjalab/AgentBabysitter/discussions).
