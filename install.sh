@@ -163,6 +163,16 @@ have_tty() { { exec 3<>/dev/tty; } 2>/dev/null && { exec 3<&-; } 2>/dev/null; }
 # reachable, the one line they need to be told never gets printed.
 ORIG_PATH="$PATH"
 
+# Which profile this shell reads, when we can tell. Needed in two places: to add
+# PREFIX to it, and at the very end to name the one line that picks up
+# everything installed into $HOME during this run — Bun's and Claude Code's
+# entries as well as ours, since all three land in the same file.
+shell_rc=""
+case "${SHELL:-}" in
+  */zsh)  shell_rc="$HOME/.zshrc" ;;
+  */bash) shell_rc="$HOME/.bashrc" ;;
+esac
+
 # ---- this machine -----------------------------------------------------------
 
 case "$(uname -s 2>/dev/null)" in
@@ -641,10 +651,7 @@ if [ "$abs_reachable" = "0" ] \
   abs_reachable=1
 fi
 if [ "$abs_reachable" = "0" ]; then
-  case "${SHELL:-}" in
-    */zsh)  path_rc="$HOME/.zshrc" ;;
-    */bash) path_rc="$HOME/.bashrc" ;;
-  esac
+  path_rc="$shell_rc"
   line="export PATH=\"$PREFIX:\$PATH\""
   if [ -n "$path_rc" ]; then
     if grep -qF "$PREFIX" "$path_rc" 2>/dev/null; then
@@ -820,30 +827,38 @@ nn=0
 next() { nn=$((nn + 1)); printf '    %s%d%s  %-34s %s%s%s\n' \
   "$c_bold" "$nn" "$c_reset" "$1" "$c_dim" "$2" "$c_reset" >&2; }
 
-# This has to be the first thing in the list and it has to be a command, not
-# advice: the run that prompted it ended with `abs` installed, correct, and
-# unreachable, and "open a new terminal" buried 60 lines up is not an answer.
-if [ "$path_note" = "1" ]; then
-  next "source $(short_path "$path_rc")" "puts abs on THIS shell's PATH"
-  info "       ${c_dim}opening a new terminal does the same${c_reset}"
-elif [ "$path_note" = "2" ]; then
+# First in the list, and a command rather than advice. These branches look like
+# alternatives and the PROBLEMS are not: `abs` can need rehashing while Bun also
+# needs a PATH entry, and an earlier version of this chain printed whichever
+# matched first. That is how a run which had just put Bun in ~/.bun ended with
+#
+#     zsh: command not found: abs          (fixed by rehash)
+#     Missing required commands: bun       (not fixed by rehash)
+#
+# one after the other, reported 21 Oct. So the order runs from the instruction
+# that fixes the most to the one that fixes the least, and sourcing the profile
+# comes before rehashing because it subsumes it — Bun's line, Claude Code's and
+# ours are all in that one file, and assigning PATH makes zsh rehash anyway.
+if [ "$path_note" = "2" ]; then
+  # Nothing could be written, so nothing else on this list will help first.
   next "put $(short_path "$PREFIX") on your PATH" "the line is printed above"
+elif [ "$path_note" = "1" ] || [ "$bun_fresh" = "1" ] || [ "$claude_fresh" = "1" ]; then
+  if [ -n "$shell_rc" ]; then
+    next "source $(short_path "$shell_rc")" "picks up everything installed just now"
+    info "       ${c_dim}opening a new terminal does the same${c_reset}"
+  else
+    next "open a new terminal" "so the new PATH is picked up"
+  fi
 elif [ "$abs_existed" = "0" ]; then
-  # PREFIX was already on PATH, so there was nothing to write and the list used
-  # to say nothing at all — and that is the case the operator hit:
-  #
-  #     zsh: command not found: abs
-  #
-  # on a machine whose PATH was already correct. zsh builds its table of every
-  # command on PATH when the shell starts, so a command created after that is
-  # unknown until you tell it to look again. bash only caches what it has
-  # actually run, so `hash -r` there is belt and braces rather than a fix.
+  # PREFIX was already on PATH and nothing else landed in $HOME, so there was
+  # nothing to write and this list used to say nothing at all — the case the
+  # operator hit. zsh builds its table of every command on PATH when the shell
+  # starts, so a command created after that is a name it has never heard. bash
+  # only caches what it has actually run, so `hash -r` there is belt and braces.
   case "${SHELL:-}" in
     */zsh) next "rehash" "zsh listed your PATH before abs was on it" ;;
     *)     next "hash -r" "so this shell notices a command newer than itself" ;;
   esac
-elif [ "$bun_fresh" = "1" ] || [ "$claude_fresh" = "1" ]; then
-  next "open a new terminal" "so the new PATH is picked up"
 fi
 
 # Login is needed before a session can start, and a fresh machine has not done

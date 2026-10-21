@@ -771,8 +771,28 @@ _pkg_hint() {
   esac
 }
 
+# Bun installs into ~/.bun and Claude Code into ~/.local/bin, and both edit your
+# shell profile for the NEXT login. So in the tab that just installed them they
+# are not on PATH, and abs used to tell you to install a bun you already had:
+#
+#     Missing required commands: bun
+#       bun → curl -fsSL https://bun.sh/install | bash
+#
+# Reported 21 Oct, from the tab the installer had just finished in. Look where
+# they actually live before believing PATH. Appended, not prepended: the job is
+# to find something PATH has missed, never to outrank what it already found.
+_widen_path() {
+  local d
+  for d in "${BUN_INSTALL:-$HOME/.bun}/bin" "$HOME/.local/bin"; do
+    [ -d "$d" ] || continue
+    case ":$PATH:" in *":$d:"*) ;; *) PATH="$PATH:$d" ;; esac
+  done
+  export PATH
+}
+
 need_deps() {
   local missing=()
+  _widen_path
   for c in claude curl jq bun; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
@@ -780,7 +800,8 @@ need_deps() {
     printf '%s\n' "Missing required commands: ${missing[*]}" >&2
     for m in "${missing[@]}"; do
       case "$m" in
-        bun)    echo "  bun    → curl -fsSL https://bun.sh/install | bash   (the plugin's MCP server runs on Bun)" >&2 ;;
+        bun)    echo "  bun    → curl -fsSL https://bun.sh/install | bash   (the plugin's MCP server runs on Bun)" >&2
+                echo "           already installed it? open a new terminal, or source your shell profile" >&2 ;;
         claude) echo "  claude → https://claude.com/claude-code" >&2 ;;
         jq)     echo "  jq     → $(_pkg_hint jq)" >&2 ;;
         curl)   echo "  curl   → $(_pkg_hint curl)" >&2 ;;

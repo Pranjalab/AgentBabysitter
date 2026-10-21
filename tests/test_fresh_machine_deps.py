@@ -492,6 +492,72 @@ def test_a_non_zsh_shell_is_given_its_own_word_for_it(tmp_path):
     assert "hash -r" in out, out
     assert "rehash" not in out, "that is the zsh builtin, not bash's:\n" + out
 
+
+# A curl that serves the two self-installers as well, so the one path with no
+# coverage at all — bun and claude installing themselves into $HOME — can run
+# without the network. Each payload drops a working stub where the real one goes.
+FAKE_CURL_SELF = """#!/bin/sh
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *)  url="$1"; shift ;;
+  esac
+done
+emit() { if [ -n "$out" ]; then cat > "$out"; else cat; fi; }
+case "$url" in
+  *bun.sh/install*)
+    emit << 'EOS'
+mkdir -p "$HOME/.bun/bin"
+printf '#!/bin/sh\\ncase "$1" in *version*) echo 1.4.3 ;; esac\\nexit 0\\n' > "$HOME/.bun/bin/bun"
+chmod 755 "$HOME/.bun/bin/bun"
+EOS
+    ;;
+  *claude.ai/install.sh*)
+    emit << 'EOS'
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\\ncase "$1" in *version*) echo 2.1.306 ;; esac\\nexit 0\\n' > "$HOME/.local/bin/claude"
+chmod 755 "$HOME/.local/bin/claude"
+EOS
+    ;;
+  *abs.sh)
+    if [ -n "$out" ]; then cp "$FAKE_ABS_SH" "$out"; else cat "$FAKE_ABS_SH"; fi ;;
+  *) echo "fake curl asked for an unexpected url: $url" >&2; exit 1 ;;
+esac
+exit 0
+"""
+
+
+def test_a_run_that_installed_bun_says_the_line_that_fixes_bun(tmp_path):
+    """Reported 21 Oct, two messages apart and from the same run:
+
+        zsh: command not found: abs
+        Missing required commands: bun
+
+    The closing list prints ONE instruction, and the branches look like
+    alternatives while the problems are not. `rehash` fixes the first and cannot
+    possibly fix the second — Bun had just been installed into ~/.bun, whose PATH
+    entry only exists for the next login. Sourcing the profile fixes both, since
+    Bun's line and ours are in the same file and assigning PATH rehashes anyway,
+    so it has to come first."""
+    d = machine(tmp_path, osname="Darwin", have=("brew", "jq", "tar"))
+    fake_py = d / "python3"
+    fake_py.write_text("#!/bin/sh\necho 3.12\nexit 0\n")
+    fake_py.chmod(0o755)
+    (d / "curl").unlink()            # a symlink to the real one; write would follow it
+    (d / "curl").write_text(FAKE_CURL_SELF)
+    (d / "curl").chmod(0o755)
+
+    out = run(d, "--yes", env={"PREFIX": str(d), "FAKE_ABS_SH": str(ABS_SH)})
+    assert "Bun 1.4.3" in out, "the self-install never ran:\n" + out
+    assert "Claude Code 2.1.306" in out, out
+    assert (d / "home" / ".bun" / "bin" / "bun").exists(), out
+    assert "source ~/.zshrc" in out, \
+        "rehash cannot put ~/.bun/bin on PATH; sourcing the profile can:\n" + out
+    assert "rehash" not in out, \
+        "it offered the instruction that fixes the smaller half:\n" + out
+
 def test_the_steps_are_numbered_without_gaps(tmp_path):
     """Half these sections are skipped on a machine that is already set up, and a
     run that reads "1 · … 4 · … 6 · …" looks like something went wrong."""

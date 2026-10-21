@@ -151,6 +151,28 @@ ABS can install properly with all the dependencies?"
   `source ~/.zshrc` for when it had to write the profile. A re-run on a machine
   that already had `abs` says neither, because the shell has known the name
   since before the run began.
+- **`abs` told the operator to install a bun they already had.** In the tab the
+  installer had just finished in: `Missing required commands: bun` — because Bun
+  lives in `~/.bun`, whose PATH entry Bun's own installer writes for the *next*
+  login. `need_deps` widens PATH to `~/.bun/bin` and `~/.local/bin` before
+  deciding anything, so abs finds what is installed and its children get it too.
+  Appended rather than prepended: the job is to find what PATH has missed, never
+  to outrank what it already found, and there is a test holding that line. When
+  something really is absent, the hint now also names the case where it is
+  installed and only the shell has not caught up.
+- **The closing list stopped choosing the smaller of two problems.** Those last
+  two reports were the same run: `zsh: command not found: abs`, then
+  `Missing required commands: bun`. The list prints one instruction, its branches
+  look like alternatives, and the problems are not — `rehash` fixes the first and
+  cannot fix the second. Worse, the `rehash` branch added an hour earlier sat
+  *ahead* of the one that would have said "open a new terminal", so this got
+  worse before it got better. The order now runs from the instruction that fixes
+  the most to the one that fixes the least: sourcing the profile comes first,
+  because Bun's line, Claude Code's and ours are all in that one file and
+  assigning PATH makes zsh rehash anyway.
+- The installer's self-install path — Bun and Claude Code installing themselves
+  into `$HOME` — had no test at all, which is why both of those shipped. It has
+  one now, against a `curl` that serves both installers offline.
 
 ### Changed
 
