@@ -603,6 +603,11 @@ if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
   fi
 fi
 
+# Whether an abs was there BEFORE we wrote one, which is the only way to tell
+# whether the operator's shell could already know the name. See the Next list.
+abs_existed=0
+if [ -e "$TARGET" ]; then abs_existed=1; fi
+
 mkdir -p "$PREFIX"
 if [ -n "$here" ]; then
   # Symlink, so `git pull` updates the installed command too. abs.sh resolves
@@ -823,6 +828,20 @@ if [ "$path_note" = "1" ]; then
   info "       ${c_dim}opening a new terminal does the same${c_reset}"
 elif [ "$path_note" = "2" ]; then
   next "put $(short_path "$PREFIX") on your PATH" "the line is printed above"
+elif [ "$abs_existed" = "0" ]; then
+  # PREFIX was already on PATH, so there was nothing to write and the list used
+  # to say nothing at all — and that is the case the operator hit:
+  #
+  #     zsh: command not found: abs
+  #
+  # on a machine whose PATH was already correct. zsh builds its table of every
+  # command on PATH when the shell starts, so a command created after that is
+  # unknown until you tell it to look again. bash only caches what it has
+  # actually run, so `hash -r` there is belt and braces rather than a fix.
+  case "${SHELL:-}" in
+    */zsh) next "rehash" "zsh listed your PATH before abs was on it" ;;
+    *)     next "hash -r" "so this shell notices a command newer than itself" ;;
+  esac
 elif [ "$bun_fresh" = "1" ] || [ "$claude_fresh" = "1" ]; then
   next "open a new terminal" "so the new PATH is picked up"
 fi

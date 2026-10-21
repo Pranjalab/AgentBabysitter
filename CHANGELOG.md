@@ -121,6 +121,36 @@ ABS can install properly with all the dependencies?"
   end deliberately reads the PATH the *operator's* shell has, not the one this
   script widened to do that probing, or finding a `claude` in `~/.local/bin`
   would have silently suppressed the very line they need to be told.
+- **Four prompts nobody could see.** At the end of an install that had otherwise
+  gone perfectly: `Voice needs uv` … `Install it yourself:` — with the question
+  between those two lines, *"Install uv now? [y/N]"*, never printed. `voice_ask`
+  and `ask_default_yes` handed their prompt to bash's `read -p`, which writes it
+  to **stderr**, and the same line carried the `2>/dev/null` that was there to
+  hide a failed `/dev/tty` open. The prompt went into /dev/null with the error.
+  The run looked hung, and whichever key was pressed to find out why became the
+  answer — so voice silently did not install, and nothing on screen said why.
+  The prompt is printed to the terminal directly now, and both redirections are
+  braced, because `printf > /dev/tty 2>/dev/null` also reports its own failure
+  before the `2>/dev/null` exists — `install.sh` learned that one the same way.
+  The other three call sites were in the start-menu workspace flow (*"Start a
+  session in it as it is?"*, *"Create it and start here?"*, *"Use this as your
+  workspace root from now on?"*), equally invisible and answered by accident.
+  `tests/test_prompt_visible.py` drives the real functions through a pty and
+  asserts the question is on the screen; against the old body the screen holds
+  nothing but the echoed keystroke.
+- **The uv question defaults to yes, and says which key.** It gates the voice
+  setup you have just agreed to, so `[y/N]` was a trap even once you could see
+  it: *"it was not clear for me to press something, that's why I pressed
+  something else"*. It is `[Y/n]  (Enter = yes)` now.
+- **`zsh: command not found: abs` on a machine whose PATH was already right.**
+  There was nothing to write to the profile, so the Next list said nothing — and
+  that was the one case where it had to. zsh lists every command on your PATH
+  when the shell starts, so `abs`, created after that, is a name it has never
+  heard of. The list now opens with `rehash` (or `hash -r` off zsh) when the
+  prefix was already on PATH and no `abs` was there before this run, and keeps
+  `source ~/.zshrc` for when it had to write the profile. A re-run on a machine
+  that already had `abs` says neither, because the shell has known the name
+  since before the run began.
 
 ### Changed
 

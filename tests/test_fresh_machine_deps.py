@@ -452,6 +452,46 @@ def test_bun_and_claude_in_their_own_prefixes_are_not_installed_twice(tmp_path):
     assert "source ~/.zshrc" in out, \
         "the Next list never says how to pick it up:\n" + out
 
+
+def _mac_with_everything(tmp_path, **kw):
+    d = machine(tmp_path, osname="Darwin",
+                have=("brew", "bun", "claude", "jq", "tar"), **kw)
+    fake_py = d / "python3"
+    fake_py.write_text("#!/bin/sh\necho 3.12\nexit 0\n")
+    fake_py.chmod(0o755)
+    return d
+
+
+def test_a_prefix_already_on_path_still_says_how_to_reach_abs(tmp_path):
+    """Reported 21 Oct: `zsh: command not found: abs` on a machine whose PATH was
+    already correct. Nothing needed writing, so the run said nothing — but zsh
+    lists every command on PATH when the shell starts, and abs was created after
+    that, so the name is unknown until it looks again. The one case the Next list
+    was silent about was the one case that needed a word."""
+    d = _mac_with_everything(tmp_path)
+    out = run(d, env={"PREFIX": str(d)})          # PREFIX *is* the PATH dir
+    assert "is not on your PATH" not in out, "it is on PATH:\n" + out
+    assert "rehash" in out, "nothing told them how to reach abs:\n" + out
+
+
+def test_an_abs_that_was_already_there_is_not_made_a_fuss_of(tmp_path):
+    """The control. A re-run on a working machine must not keep handing out
+    shell commands for a problem that cannot exist — the shell has known the
+    name since before this run started."""
+    d = _mac_with_everything(tmp_path)
+    (d / "abs").write_text('#!/usr/bin/env bash\nreadonly ABS_VERSION="0.0.1"\n')
+    (d / "abs").chmod(0o755)
+    out = run(d, env={"PREFIX": str(d)})
+    assert "rehash" not in out, "abs was already on PATH and already known:\n" + out
+    assert "hash -r" not in out, out
+
+
+def test_a_non_zsh_shell_is_given_its_own_word_for_it(tmp_path):
+    d = _mac_with_everything(tmp_path)
+    out = run(d, env={"PREFIX": str(d), "SHELL": "/bin/bash"})
+    assert "hash -r" in out, out
+    assert "rehash" not in out, "that is the zsh builtin, not bash's:\n" + out
+
 def test_the_steps_are_numbered_without_gaps(tmp_path):
     """Half these sections are skipped on a machine that is already set up, and a
     run that reads "1 · … 4 · … 6 · …" looks like something went wrong."""

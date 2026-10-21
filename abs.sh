@@ -5512,16 +5512,35 @@ voice_can_speak() {
 # already said what they want twice.
 ask_default_yes() {
   local reply=""
-  read -rp "  $1 " reply < /dev/tty 2>/dev/null || return 1
+  # Printed, not `read -p` — see voice_ask. Enter already means yes here, so the
+  # swallowed prompt was less visible as a bug and no less of one: a question
+  # nobody can see is answered by whatever key they press to find out why it
+  # stopped.
+  { printf '%s' "  $1 " > /dev/tty; } 2>/dev/null || return 1
+  { read -r reply < /dev/tty; } 2>/dev/null || return 1
   case "$reply" in ""|[yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
 }
 
 # yes/no on the human's terminal. abs prompts on /dev/tty everywhere, which is
 # also what lets `curl install.sh | bash` hand off to `abs voice setup` — that
 # child's stdin is the piped installer, but /dev/tty is still the person.
+#
+# The prompt is printed to the terminal, NOT handed to `read -p`. bash writes a
+# -p prompt to stderr, so the `2>/dev/null` that used to sit on this line — there
+# to hide the error from a failed /dev/tty open — threw the question away with
+# it. Reported 21 Oct from a Mac, at the end of an install that had otherwise
+# gone perfectly: "Install uv now? [y/N]" never appeared, the run looked hung,
+# and the empty answer that followed was read as no. Voice did not install, and
+# nothing on screen said why. Verified here under `script`: with that redirect
+# in place the prompt is never shown at all.
 voice_ask() {
   local reply=""
-  read -rp "  $1 " reply < /dev/tty 2>/dev/null || return 1
+  # Braced, both of them. Redirections apply left to right, so
+  # `printf > /dev/tty 2>/dev/null` opens the terminal, fails, and prints
+  # "/dev/tty: No such device or address" at the operator BEFORE the 2>/dev/null
+  # that was meant to hide it exists. install.sh learned this the same way.
+  { printf '%s' "  $1 " > /dev/tty; } 2>/dev/null || return 1
+  { read -r reply < /dev/tty; } 2>/dev/null || return 1
   case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
 }
 
@@ -5644,7 +5663,11 @@ voice_setup() {
   # preinstalled. Offer to install it the same way the base installer offers Bun.
   if ! command -v uv >/dev/null 2>&1; then
     info "${c_bold}Voice needs uv${c_reset} — a fast Python env manager (installs to ~/.local/bin, no sudo)."
-    if voice_ask "Install uv now? [y/N]"; then
+    # Enter means yes, and the prompt says which key does what. This gates the
+    # voice setup they have ALREADY said yes to, so a default of no is a trap
+    # even once the prompt is visible — reported 21 Oct: "it was not clear for
+    # me to press something, that's why I pressed something else".
+    if ask_default_yes "Install uv now? [Y/n]  (Enter = yes)"; then
       info "  ${c_dim}Installing uv…${c_reset}"
       curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 \
         || die "uv's installer failed. Install it yourself: https://docs.astral.sh/uv/getting-started/installation/"
