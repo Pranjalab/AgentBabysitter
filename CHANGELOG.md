@@ -73,6 +73,34 @@ ABS can install properly with all the dependencies?"
 - The regression test pipes the installer the way `curl` does. The first version
   of it gave the installer a terminal on *stdin* and passed against the broken
   code — a test that cannot fail is not a test.
+- **`brew install` was eating the rest of the installer.** Same Mac, one bug
+  later: every dependency installed, `✓ All dependencies present.` printed — and
+  then the shell prompt. No `abs`, no PATH advice, nothing, and a run that looked
+  like a success. Earlier in the same output, lines of `install.sh` itself had
+  been echoed into the terminal mid-install, which is the whole story: piped from
+  curl, **the script is stdin**, bash reads a non-seekable script as it goes, and
+  `brew install` read stdin and swallowed the part bash had not parsed yet. bash
+  reached end-of-file right after the dependency summary, so the entire
+  "Installing abs" step never ran.
+  The body of the installer now lives in one function with the call as the last
+  line, so bash must read all of it before the first child process starts and
+  there is nothing left in the pipe to steal. The regression test installs against
+  a `brew` that drinks stdin the way the real one did; it fails without the
+  wrapper, which was checked by running it against the broken script first.
+- **The PATH instruction is at the end, and it is a command.** That run ended with
+  `zsh: command not found: abs` and nothing at the bottom to act on. Two reasons:
+  the old code appended the PATH line only to a profile that *already existed*, so
+  a brand-new Mac with no `~/.zshrc` was the one machine guaranteed not to get it;
+  and the closing "open a new terminal" was printed only when that append had
+  happened. The profile is created if it is missing, and the Next list now opens
+  with `source ~/.zshrc` — the thing to type, named after the shell you are
+  actually running, with fish given `fish_add_path` instead.
+- **The voice offer names ffmpeg, and installs it.** `abs voice setup` refuses
+  without ffmpeg and will not install a package itself, while the offer at the
+  end of the installer defaults to *yes* — so on a brand-new Mac, pressing RETURN
+  at the last question was a guaranteed dead end. The package manager is known by
+  then, so the offer names it (`brew install ffmpeg`) and installing it is part of
+  saying yes.
 
 ### Changed
 

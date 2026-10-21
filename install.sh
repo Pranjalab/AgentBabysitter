@@ -37,6 +37,29 @@ readonly PREFIX="${PREFIX:-$HOME/.local/bin}"
 readonly TARGET="$PREFIX/abs"
 readonly ABS_HOME="${ABS_HOME:-$HOME/.abs}"
 
+# Everything below this line lives in one function, and the only thing after it
+# is the call. That is not style.
+#
+# Piped from curl, THIS SCRIPT IS STDIN. bash reads a non-seekable script as it
+# goes, so any child process that reads stdin eats the part bash has not parsed
+# yet. Reported 21 Oct, from the Mac that had just been fixed: `brew install`
+# drank the rest of this file mid-install — lines of it were echoed into the
+# operator's terminal — and bash hit end-of-file right after the dependency
+# summary. Every dependency was installed, "All dependencies present" was
+# printed, and `abs` itself never was. It looked like a success.
+#
+# Inside a function, bash must read to the closing brace before anything runs,
+# so by the time the first child starts there is nothing left in the pipe to
+# steal. The body is not re-indented: the diff that introduced this is worth
+# reading, and bash does not care either way.
+#
+# BASH_SOURCE is captured out here while it is unambiguous — piped, it is an
+# empty array, and the checkout detection below depends on telling those apart.
+ABS_SELF=""
+if [ -f "${BASH_SOURCE[0]:-}" ]; then ABS_SELF="${BASH_SOURCE[0]}"; fi
+
+main() {
+
 assume_yes="${ABS_YES:-0}"
 skip_deps=0
 # Piped in there are no arguments at all; `… | bash -s -- --yes` is the form.
@@ -119,6 +142,15 @@ ask_yes() {
     [yY]|[yY][eE][sS]) return 0 ;;
     "") case "$default" in [yY]) return 0 ;; *) return 1 ;; esac ;;
     *) return 1 ;;
+  esac
+}
+
+# ~/.zshrc, not /Users/somebody/.zshrc. These end up in the Next list at the
+# bottom, where they are lines to be typed rather than facts to be read.
+short_path() {
+  case "$1" in
+    "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;;
+    *)         printf '%s' "$1" ;;
   esac
 }
 
@@ -481,8 +513,8 @@ info ""
 # when it actually names a file.
 src=""
 here=""
-if [ -f "${BASH_SOURCE[0]:-}" ]; then
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+if [ -n "$ABS_SELF" ]; then
+  here="$(cd "$(dirname "$ABS_SELF")" 2>/dev/null && pwd || true)"
 fi
 
 if [ -n "$here" ] && [ -f "$here/abs.sh" ]; then
@@ -553,29 +585,47 @@ fi
 ver="$(grep -m1 '^readonly ABS_VERSION=' "$src" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')"
 
 # PATH. Only worth saying anything when `abs` is not already reachable.
+#
+# path_note is what the Next list at the bottom reads: 0 nothing to do, 1 a
+# profile was written and this shell needs it, 2 nobody could write it and the
+# operator has to. Reported 21 Oct: `zsh: command not found: abs`, with no
+# instruction anywhere at the end of the run — the old code only appended to a
+# profile that ALREADY EXISTED, and a brand new Mac has no ~/.zshrc, so the one
+# machine that most needed the PATH line was the one guaranteed not to get it.
+path_rc=""
+path_note=0
 if ! command -v abs >/dev/null 2>&1; then
   case ":$PATH:" in
     *":$PREFIX:"*) ;;
     *)
-      rc=""
-      case "${SHELL##*/}" in
-        zsh)  rc="$HOME/.zshrc" ;;
-        bash) rc="$HOME/.bashrc" ;;
+      case "${SHELL:-}" in
+        */zsh)  path_rc="$HOME/.zshrc" ;;
+        */bash) path_rc="$HOME/.bashrc" ;;
       esac
       line="export PATH=\"$PREFIX:\$PATH\""
-      if [ -n "$rc" ] && [ -f "$rc" ] && ! grep -qF "$PREFIX" "$rc" 2>/dev/null; then
-        printf '\n# Agent Babysitter\n%s\n' "$line" >> "$rc"
-        ok "$PREFIX added to $rc"
-        path_note=1
-      else
-        warn "$PREFIX is not on your PATH. Add this to your shell profile:"
-        info "      $line"
+      if [ -n "$path_rc" ]; then
+        if grep -qF "$PREFIX" "$path_rc" 2>/dev/null; then
+          ok "$(short_path "$PREFIX") is already in $(short_path "$path_rc")"
+        elif printf '\n# Agent Babysitter\n%s\n' "$line" >> "$path_rc" 2>/dev/null; then
+          ok "$(short_path "$PREFIX") added to $(short_path "$path_rc")"
+        else
+          warn "Could not write to $path_rc."
+          path_rc=""
+        fi
+        if [ -n "$path_rc" ]; then path_note=1; fi
+      fi
+      if [ -z "$path_rc" ]; then
+        case "${SHELL:-}" in
+          */fish) warn "$PREFIX is not on your PATH. Run: ${c_bold}fish_add_path $PREFIX${c_reset}" ;;
+          *)      warn "$PREFIX is not on your PATH. Add this to your shell's profile:"
+                  info "      $line" ;;
+        esac
+        path_note=2
       fi
       export PATH="$PREFIX:$PATH"
       ;;
   esac
 fi
-path_note="${path_note:-0}"
 
 # ---- the v3 source ----------------------------------------------------------
 #
@@ -674,9 +724,29 @@ elif [ -n "$src_root" ]; then
   info "    ${c_dim}Send Claude a voice note; hear its replies as voice notes.${c_reset}"
   info "    ${c_dim}Entirely on your machine. One-time download of a few GB.${c_reset}"
   info "    ${c_dim}Without it, replies are text — abs offers again on first launch.${c_reset}"
+  # ffmpeg packages the synthesized audio as the Opus a Telegram voice note has
+  # to be, and `abs voice setup` refuses without it rather than installing a
+  # package itself. A brand-new Mac has no ffmpeg, so this offer was a dead end
+  # with a default of yes: say yes, watch it stop. The package manager is known
+  # by now — name it in the offer, and install it as part of the yes.
+  need_ffmpeg=0
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    need_ffmpeg=1
+    info ""
+    if [ -n "$PKG" ]; then
+      info "    ${c_dim}It needs ffmpeg too, which is not here yet: $(pkg_cmdline ffmpeg)${c_reset}"
+    else
+      info "    ${c_dim}It needs ffmpeg too, which is not here yet — install that first.${c_reset}"
+    fi
+  fi
   info ""
   if ask_yes "Set up voice now? [Y/n]" y; then
     info ""
+    if [ "$need_ffmpeg" = "1" ] && [ -n "$PKG" ]; then
+      info "    ${c_dim}$(pkg_cmdline ffmpeg)${c_reset}"
+      pkg_install ffmpeg >&2 </dev/null \
+        || warn "ffmpeg did not install — voice setup will stop short of audio."
+    fi
     "$TARGET" voice setup >&2 \
       || warn "Voice setup did not finish — any time: ${c_bold}abs voice setup${c_reset}"
   else
@@ -709,7 +779,15 @@ nn=0
 next() { nn=$((nn + 1)); printf '    %s%d%s  %-34s %s%s%s\n' \
   "$c_bold" "$nn" "$c_reset" "$1" "$c_dim" "$2" "$c_reset" >&2; }
 
-if [ "$path_note" = "1" ] || [ "$bun_fresh" = "1" ] || [ "$claude_fresh" = "1" ]; then
+# This has to be the first thing in the list and it has to be a command, not
+# advice: the run that prompted it ended with `abs` installed, correct, and
+# unreachable, and "open a new terminal" buried 60 lines up is not an answer.
+if [ "$path_note" = "1" ]; then
+  next "source $(short_path "$path_rc")" "puts abs on THIS shell's PATH"
+  info "       ${c_dim}opening a new terminal does the same${c_reset}"
+elif [ "$path_note" = "2" ]; then
+  next "put $(short_path "$PREFIX") on your PATH" "the line is printed above"
+elif [ "$bun_fresh" = "1" ] || [ "$claude_fresh" = "1" ]; then
   next "open a new terminal" "so the new PATH is picked up"
 fi
 
@@ -730,3 +808,7 @@ info ""
 info "  ${c_dim}First run asks for a bot token from @BotFather, then pairs your account${c_reset}"
 info "  ${c_dim}with a PIN. Nothing leaves your machine except Telegram API calls.${c_reset}"
 info ""
+}
+
+# The last line, and nothing after it: see the note above main.
+main ${1+"$@"}

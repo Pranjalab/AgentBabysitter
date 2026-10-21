@@ -60,9 +60,11 @@ a single list with the command for *your* platform — Homebrew, jq, Python, Bun
 Claude Code — and installs all of it once you say yes. Nothing is run before you
 answer, and a machine that already has them is never asked at all.
 
-Then it puts `abs` on your PATH and fetches the v3 source (the daemon, sandboxes,
-`ABS START` from the phone) into `~/.abs/src`, builds its venv, and offers the
-always-on daemon and voice. No git, no clone.
+Then it puts `abs` on your PATH — writing your shell's profile if it has to, and
+ending with the one line to run so the shell you are in picks it up — and fetches
+the v3 source (the daemon, sandboxes, `ABS START` from the phone) into
+`~/.abs/src`, builds its venv, and offers the always-on daemon and voice. No git,
+no clone.
 
 ```sh
 curl -fsSL https://agentbabysitter.com/install.sh | bash -s -- --yes   # don't ask

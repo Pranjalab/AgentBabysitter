@@ -62,6 +62,12 @@ esac
 exit 0
 """
 
+# The same brew, but it reads stdin — which is what the real one did on the
+# reported Mac, and the entire bug in three characters.
+FAKE_BREW_THIRSTY = FAKE_BREW.replace(
+    "  install)   shift\n",
+    "  install)   shift\n             cat > /dev/null\n")
+
 # Stands in for Homebrew's own installer, reproducing the two ways it refuses.
 # NONINTERACTIVE makes the real one use `sudo -n` — sudo forbidden to prompt —
 # so on a Mac whose password is not cached it aborts with the exact line the
@@ -302,6 +308,68 @@ def test_the_piped_form_installs_a_real_copy(tmp_path):
     assert "brew install python@3.12" in out, \
         "the runtime hint gave a Mac the wrong platform's command:\n" + out
 
+
+
+def test_a_package_manager_that_reads_stdin_does_not_eat_the_script(tmp_path):
+    """Reported 21 Oct, from the Mac that had just been fixed. Every dependency
+    installed, "All dependencies present", and then the shell prompt — no abs,
+    no PATH advice, nothing. Earlier in the same run, lines of this very file had
+    been echoed into the terminal in the middle of the brew install.
+
+    Piped from curl the script IS stdin, and bash reads a non-seekable script as
+    it goes, so a child that reads stdin eats the part bash has not parsed yet.
+    `brew install` did exactly that: bash reached end-of-file right after the
+    dependency summary and the whole "Installing abs" step never ran. It looked
+    like a success, which is the worst kind of failure.
+
+    The cure is that the body lives in a function and the call is the last line,
+    so bash has read all of it before the first child starts. This brew drinks
+    stdin the way the real one did, so this test fails if that ever unwinds.
+    """
+    d = machine(tmp_path, osname="Darwin", have=("brew", "bun", "claude"))
+    (d / "brew").write_text(FAKE_BREW_THIRSTY)
+    (d / "brew").chmod(0o755)
+    prefix = d / "home" / ".local" / "bin"
+    r = subprocess.run(
+        ["bash", "-s", "--", "--yes"], input=INSTALL.read_text(),
+        capture_output=True, text=True, timeout=180,
+        env={"PATH": str(d), "HOME": str(d / "home"), "SHELL": "/bin/zsh",
+             "TERM": "dumb", "PREFIX": str(prefix),
+             "ABS_HOME": str(d / "home" / ".abs"),
+             "ABS_REPO": "file://" + str(REPO)})
+    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
+    assert "All dependencies present" in out, out
+    assert (prefix / "abs").is_file(), \
+        "the script was eaten before abs could be installed:\n" + out
+    assert "Ready" in out, "the run stopped early:\n" + out
+    # and no part of this file may ever be dumped into the operator's terminal
+    assert "bun_fresh=" not in out, \
+        "the rest of the script went to the terminal as output:\n" + out
+
+
+def test_the_voice_offer_names_ffmpeg_when_it_is_missing(tmp_path):
+    """`abs voice setup` refuses without ffmpeg and will not install a package
+    itself, while this offer defaults to yes — so on a brand-new Mac, pressing
+    RETURN at the last question was a guaranteed dead end. Name it in the offer,
+    and install it as part of the yes."""
+    d = machine(tmp_path, osname="Darwin", have=("brew", "bun", "claude", "jq", "tar"))
+    fake_py = d / "python3"
+    fake_py.write_text("#!/bin/sh\necho 3.12\nexit 0\n")
+    fake_py.chmod(0o755)
+    # the voice step is only offered once the v3 tree exists somewhere
+    (d / "home" / ".abs" / "src" / "absd").mkdir(parents=True)
+    r = subprocess.run(
+        ["bash"], input=INSTALL.read_text(), capture_output=True, text=True, timeout=180,
+        env={"PATH": str(d), "HOME": str(d / "home"), "SHELL": "/bin/zsh", "TERM": "dumb",
+             "PREFIX": str(d / "home" / ".local" / "bin"),
+             "ABS_HOME": str(d / "home" / ".abs"),
+             "ABS_REPO": "file://" + str(REPO)})
+    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
+    assert "Optional — voice" in out, "the voice step was never reached:\n" + out
+    voice = out.split("Optional — voice")[-1]
+    assert "ffmpeg" in voice, "the offer never mentions what it needs:\n" + voice
+    assert "brew install ffmpeg" in voice, \
+        "a Mac must be given the brew command, not somebody else's:\n" + voice
 
 def test_the_steps_are_numbered_without_gaps(tmp_path):
     """Half these sections are skipped on a machine that is already set up, and a
