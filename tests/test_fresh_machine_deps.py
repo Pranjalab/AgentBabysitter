@@ -371,6 +371,87 @@ def test_the_voice_offer_names_ffmpeg_when_it_is_missing(tmp_path):
     assert "brew install ffmpeg" in voice, \
         "a Mac must be given the brew command, not somebody else's:\n" + voice
 
+
+def _mac_with_brew_off_the_path(tmp_path):
+    """A Mac exactly as the operator's was: Homebrew installed and working, in a
+    prefix that is not on this shell's PATH because the shell has not logged in
+    since. python@3.13 lives in that prefix too, so it is invisible until
+    `brew shellenv` has been eval'd."""
+    d = machine(tmp_path, osname="Darwin", have=("jq", "bun", "claude"))
+    prefix = tmp_path / "opt-homebrew-bin"
+    prefix.mkdir(exist_ok=True)
+    (prefix / "brew").write_text(FAKE_BREW)
+    (prefix / "brew").chmod(0o755)
+    (prefix / "python3.13").write_text("#!/bin/sh\necho 3.13\nexit 0\n")
+    (prefix / "python3.13").chmod(0o755)
+    return d, prefix
+
+
+def test_a_mac_with_homebrew_off_the_path_is_not_told_it_has_none(tmp_path):
+    """Reported 21 Oct, the run after Homebrew and python@3.13 both installed
+    perfectly:
+
+        !  No package manager found on this machine, and abs needs: python3
+        ✗  Stopping — guessing a package manager would waste your time twice.
+
+    Both statements were false. Homebrew's installer only sets up PATH for the
+    next login shell, so in the tab that had just installed it /opt/homebrew/bin
+    was missing — and two separate things trusted PATH too early. The dependency
+    scan probed python before anything had looked in the prefix, so a working
+    3.13 read as missing; and PKG was decided by `command -v brew` alone, which
+    never looks in the prefix at all. Homebrew goes on PATH first now, before PKG
+    is decided and before a single dependency is probed."""
+    d, prefix = _mac_with_brew_off_the_path(tmp_path)
+    out = run(d, env={"ABS_BREW_PREFIXES": str(prefix / "brew")})
+    assert "No package manager found" not in out, \
+        "it has Homebrew, in the prefix Homebrew uses:\n" + out
+    assert "needs: python3" not in out, \
+        "python@3.13 is installed and was called missing:\n" + out
+    assert "Everything abs needs is already here" in out, \
+        "nothing was missing on this machine:\n" + out
+
+
+def test_a_mac_with_no_homebrew_anywhere_still_says_so(tmp_path):
+    """The control. If putting the prefix on PATH ever becomes a way of pretending
+    a package manager exists, this is the test that notices."""
+    d, _ = _mac_with_brew_off_the_path(tmp_path)
+    out = run(d, env={"ABS_BREW_PREFIXES": str(tmp_path / "nowhere" / "brew")})
+    assert "homebrew" in out, "a Mac with no brew must be offered it:\n" + out
+    assert "Homebrew/install" in out, out
+
+
+def test_bun_and_claude_in_their_own_prefixes_are_not_installed_twice(tmp_path):
+    """Both install into $HOME and edit your rc for the NEXT login, so in the tab
+    that just installed them they are invisible. Reported 21 Oct: a second run in
+    the same tab re-offered everything that had already succeeded. Probing where
+    they actually live is what makes a re-run cheap — the whole point of the
+    one-pass rewrite."""
+    d = machine(tmp_path, osname="Darwin", have=("brew", "jq"))
+    fake_py = d / "python3"
+    fake_py.write_text("#!/bin/sh\necho 3.12\nexit 0\n")
+    fake_py.chmod(0o755)
+    for sub, tool in (("home/.bun/bin", "bun"), ("home/.local/bin", "claude")):
+        where = d / sub
+        where.mkdir(parents=True, exist_ok=True)
+        (where / tool).write_text(STUB)
+        (where / tool).chmod(0o755)
+
+    out = run(d)
+    assert "Everything abs needs is already here" in out, \
+        "bun and claude are installed; neither was found:\n" + out
+    assert "bun.sh/install" not in out, "it offered to install Bun again:\n" + out
+    assert "claude.ai/install" not in out, \
+        "it offered to install Claude Code again:\n" + out
+
+    # ...and finding them there must NOT make the PATH advice think the operator's
+    # own shell can see ~/.local/bin, which is exactly what it cannot do.
+    zshrc = d / "home" / ".zshrc"
+    assert zshrc.exists(), "no profile was written:\n" + out
+    assert str(d / "home" / ".local" / "bin") in zshrc.read_text(), \
+        "the profile has no PATH line:\n" + zshrc.read_text()
+    assert "source ~/.zshrc" in out, \
+        "the Next list never says how to pick it up:\n" + out
+
 def test_the_steps_are_numbered_without_gaps(tmp_path):
     """Half these sections are skipped on a machine that is already set up, and a
     run that reads "1 · … 4 · … 6 · …" looks like something went wrong."""

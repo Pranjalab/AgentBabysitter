@@ -101,6 +101,26 @@ ABS can install properly with all the dependencies?"
   at the last question was a guaranteed dead end. The package manager is known by
   then, so the offer names it (`brew install ffmpeg`) and installing it is part of
   saying yes.
+- **Homebrew goes on PATH before anything is probed.** The run after Homebrew and
+  `python@3.13` both installed perfectly said `No package manager found on this
+  machine, and abs needs: python3`, and stopped. Both halves of that were false,
+  and both came from trusting PATH too early: Homebrew's installer only sets up
+  your PATH for the *next* login shell, so in the tab that had just installed it
+  `/opt/homebrew/bin` was missing. The dependency scan probed python before
+  anything had looked in the prefix, so a working 3.13 read as missing; and `PKG`
+  had been settled by `command -v brew` alone, which never looks in the prefix at
+  all. `brew shellenv` is now eval'd first, before the package manager is decided
+  and before a single dependency is probed. The prefix list is a variable purely
+  so this is testable off a Mac — two Mac-only bugs in a row were found by the
+  operator rather than by the suite, which is not a trade worth repeating.
+- **Bun and Claude Code are looked for where they install themselves.** Same
+  cause, two directories along: both land in `$HOME` and edit your rc for the
+  next login, so a second run in the same tab re-offered everything that had just
+  succeeded — the exact "redo it all again" this release was supposed to end.
+  `~/.bun/bin` and `~/.local/bin` are probed directly now. The PATH advice at the
+  end deliberately reads the PATH the *operator's* shell has, not the one this
+  script widened to do that probing, or finding a `claude` in `~/.local/bin`
+  would have silently suppressed the very line they need to be told.
 
 ### Changed
 

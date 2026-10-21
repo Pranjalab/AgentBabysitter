@@ -156,6 +156,13 @@ short_path() {
 
 have_tty() { { exec 3<>/dev/tty; } 2>/dev/null && { exec 3<&-; } 2>/dev/null; }
 
+# The PATH this shell really has, kept before anything below widens it. The
+# advice at the end of the run is about the shell the operator goes back to, not
+# about ours: if we add ~/.local/bin ourselves in order to FIND a claude that is
+# already installed, and then read that same PATH to decide whether `abs` is
+# reachable, the one line they need to be told never gets printed.
+ORIG_PATH="$PATH"
+
 # ---- this machine -----------------------------------------------------------
 
 case "$(uname -s 2>/dev/null)" in
@@ -164,12 +171,40 @@ case "$(uname -s 2>/dev/null)" in
   *)      OS="other" ;;
 esac
 
+# Homebrew lands in a different prefix on Apple Silicon and Intel, and its
+# installer only edits your shell rc for the *next* login — so a brew that is
+# installed and working is invisible to any shell that has not logged in since,
+# including the one that just installed it.
+#
+# Reported 21 Oct, one run after Homebrew and python@3.13 both installed
+# perfectly: "No package manager found on this machine, and abs needs: python3".
+# Both of those were lies, and both came from the same place. The scan probed
+# python before anything had put /opt/homebrew/bin on PATH, so a working
+# python3.13 read as missing; and PKG had been decided by `command -v brew`
+# alone, which never looks in the prefix. So this runs FIRST, before PKG is
+# decided and before a single dependency is probed.
+#
+# The prefixes are a variable only so this is testable on a machine that is not
+# a Mac — two Mac-only bugs in a row have been found by the operator rather than
+# by me, which is not a good trade.
+BREW_PREFIXES="${ABS_BREW_PREFIXES:-/opt/homebrew/bin/brew /usr/local/bin/brew}"
+brew_onpath() {
+  local b
+  command -v brew >/dev/null 2>&1 && return 0
+  for b in $BREW_PREFIXES; do
+    [ -x "$b" ] || continue
+    eval "$("$b" shellenv)" 2>/dev/null || true
+    command -v brew >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 # PKG is the package manager we will actually drive; empty means we have no way
 # to install system packages here and must say so rather than invent a command.
 PKG=""
 detect_pkg() {
   case "$OS" in
-    macos) command -v brew >/dev/null 2>&1 && PKG="brew" || PKG="" ;;
+    macos) if brew_onpath >/dev/null 2>&1; then PKG="brew"; else PKG=""; fi ;;
     linux)
       if   command -v apt-get >/dev/null 2>&1; then PKG="apt"
       elif command -v dnf     >/dev/null 2>&1; then PKG="dnf"
@@ -182,19 +217,16 @@ detect_pkg() {
 }
 detect_pkg
 
-# Homebrew lands in a different prefix on Apple Silicon and Intel, and its
-# installer only edits your shell rc for the *next* login — so a brew we just
-# installed is invisible to the brew install that follows unless we do this.
-brew_onpath() {
-  local b
-  command -v brew >/dev/null 2>&1 && return 0
-  for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
-    [ -x "$b" ] || continue
-    eval "$("$b" shellenv)" 2>/dev/null || true
-    command -v brew >/dev/null 2>&1 && return 0
-  done
-  return 1
-}
+# Homebrew's problem, two directories along. Bun installs into ~/.bun and Claude
+# Code into ~/.local/bin, and both edit your rc for the NEXT login — so in the
+# shell that just installed them they are invisible, and this script would
+# cheerfully download both again. Reported 21 Oct: a second run in the same tab
+# re-offered everything that had just succeeded. Probe where they actually live.
+for _d in "${BUN_INSTALL:-$HOME/.bun}/bin" "$HOME/.local/bin"; do
+  [ -d "$_d" ] || continue
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+done
+export PATH
 
 sudo_run() {
   if [ "$(id -u)" = "0" ]; then "$@"
@@ -594,37 +626,41 @@ ver="$(grep -m1 '^readonly ABS_VERSION=' "$src" 2>/dev/null | sed -E 's/.*"([^"]
 # machine that most needed the PATH line was the one guaranteed not to get it.
 path_rc=""
 path_note=0
-if ! command -v abs >/dev/null 2>&1; then
-  case ":$PATH:" in
-    *":$PREFIX:"*) ;;
-    *)
-      case "${SHELL:-}" in
-        */zsh)  path_rc="$HOME/.zshrc" ;;
-        */bash) path_rc="$HOME/.bashrc" ;;
-      esac
-      line="export PATH=\"$PREFIX:\$PATH\""
-      if [ -n "$path_rc" ]; then
-        if grep -qF "$PREFIX" "$path_rc" 2>/dev/null; then
-          ok "$(short_path "$PREFIX") is already in $(short_path "$path_rc")"
-        elif printf '\n# Agent Babysitter\n%s\n' "$line" >> "$path_rc" 2>/dev/null; then
-          ok "$(short_path "$PREFIX") added to $(short_path "$path_rc")"
-        else
-          warn "Could not write to $path_rc."
-          path_rc=""
-        fi
-        if [ -n "$path_rc" ]; then path_note=1; fi
-      fi
-      if [ -z "$path_rc" ]; then
-        case "${SHELL:-}" in
-          */fish) warn "$PREFIX is not on your PATH. Run: ${c_bold}fish_add_path $PREFIX${c_reset}" ;;
-          *)      warn "$PREFIX is not on your PATH. Add this to your shell's profile:"
-                  info "      $line" ;;
-        esac
-        path_note=2
-      fi
-      export PATH="$PREFIX:$PATH"
-      ;;
+# ORIG_PATH in both tests, deliberately: the question is whether `abs` will be
+# reachable in the shell they go back to, not in this one, which we widened
+# ourselves a few hundred lines up in order to find Bun and Claude Code.
+abs_reachable=0
+case ":$ORIG_PATH:" in *":$PREFIX:"*) abs_reachable=1 ;; esac
+if [ "$abs_reachable" = "0" ] \
+   && (PATH="$ORIG_PATH"; command -v abs >/dev/null 2>&1); then
+  abs_reachable=1
+fi
+if [ "$abs_reachable" = "0" ]; then
+  case "${SHELL:-}" in
+    */zsh)  path_rc="$HOME/.zshrc" ;;
+    */bash) path_rc="$HOME/.bashrc" ;;
   esac
+  line="export PATH=\"$PREFIX:\$PATH\""
+  if [ -n "$path_rc" ]; then
+    if grep -qF "$PREFIX" "$path_rc" 2>/dev/null; then
+      ok "$(short_path "$PREFIX") is already in $(short_path "$path_rc")"
+    elif printf '\n# Agent Babysitter\n%s\n' "$line" >> "$path_rc" 2>/dev/null; then
+      ok "$(short_path "$PREFIX") added to $(short_path "$path_rc")"
+    else
+      warn "Could not write to $path_rc."
+      path_rc=""
+    fi
+    if [ -n "$path_rc" ]; then path_note=1; fi
+  fi
+  if [ -z "$path_rc" ]; then
+    case "${SHELL:-}" in
+      */fish) warn "$PREFIX is not on your PATH. Run: ${c_bold}fish_add_path $PREFIX${c_reset}" ;;
+      *)      warn "$PREFIX is not on your PATH. Add this to your shell's profile:"
+              info "      $line" ;;
+    esac
+    path_note=2
+  fi
+  export PATH="$PREFIX:$PATH"
 fi
 
 # ---- the v3 source ----------------------------------------------------------
