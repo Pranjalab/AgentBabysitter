@@ -52,13 +52,53 @@ case "$1" in
   install)   shift
              for p in "$@"; do
                case "$p" in
-                 jq)      printf '#!/bin/sh\\ncase "$1" in --version) echo "jq-1.7.1" ;; esac\\nexit 0\\n' > "$d/jq"; chmod +x "$d/jq" ;;
-                 python3) printf '#!/bin/sh\\necho 3.12\\nexit 0\\n' > "$d/python3"; chmod +x "$d/python3" ;;
+                 jq)        printf '#!/bin/sh\\ncase "$1" in --version) echo "jq-1.7.1" ;; esac\\nexit 0\\n' > "$d/jq"; chmod +x "$d/jq" ;;
+                 python@*|python3)
+                            printf '#!/bin/sh\\necho 3.13\\nexit 0\\n' > "$d/python3"; chmod +x "$d/python3" ;;
                esac
              done
              exit 0 ;;
 esac
 exit 0
+"""
+
+# Stands in for Homebrew's own installer, reproducing the two ways it refuses.
+# NONINTERACTIVE makes the real one use `sudo -n` — sudo forbidden to prompt —
+# so on a Mac whose password is not cached it aborts with the exact line the
+# operator saw. Without it, it still needs a terminal to ask for RETURN.
+FAKE_BREW_INSTALLER = """#!/bin/bash
+if [ -n "${NONINTERACTIVE-}" ]; then
+  echo "==> Running in non-interactive mode because \\$NONINTERACTIVE is set."
+  echo "==> Checking for sudo access..."
+  echo "Insufficient permissions to install Homebrew to \\"/opt/homebrew\\"."
+  exit 1
+fi
+if [ ! -t 0 ]; then
+  echo "==> No terminal to ask for RETURN on."
+  exit 1
+fi
+echo "==> FAKE HOMEBREW: a terminal, and sudo free to prompt."
+cp "$FAKE_BREW_PATH" "$FAKE_BIN/brew"
+chmod +x "$FAKE_BIN/brew"
+exit 0
+"""
+
+# A curl that serves only that installer. Anything else is a miss, loudly.
+FAKE_CURL = """#!/bin/sh
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *)  url="$1"; shift ;;
+  esac
+done
+case "$url" in
+  *Homebrew/install*) cp "$FAKE_BREW_INSTALLER_PATH" "$out"; chmod +x "$out"; exit 0 ;;
+  *abs.sh)            cp "$FAKE_ABS_SH" "$out"; exit 0 ;;
+esac
+echo "fake curl asked for an unexpected url: $url" >&2
+exit 1
 """
 
 
@@ -129,7 +169,7 @@ def test_python_is_checked_before_install_not_after(tmp_path):
     out = run(machine(tmp_path, osname="Darwin", have=("brew",)))
     scan, _, plan = out.partition("What needs installing")
     assert re.search(r"^\s+\S\s+python\s", scan, re.M), "not in the scan:\n" + out
-    assert "brew install jq python3" in plan, "no command to run:\n" + out
+    assert "brew install jq python@3." in plan, "no command to run:\n" + out
     assert "3.11" in scan, "the version it needs is never stated:\n" + out
 
 
@@ -166,7 +206,7 @@ def test_yes_installs_the_missing_packages_and_verifies_them(tmp_path):
     d = machine(tmp_path, osname="Darwin", have=("brew", "bun", "claude"), brew=True)
     out = run(d, "--yes")
     assert "jq 1.7.1" in out, "the installed jq was never confirmed:\n" + out
-    assert "python 3.12" in out, "the installed python was never confirmed:\n" + out
+    assert "python 3.13" in out, "the installed python was never confirmed:\n" + out
     assert "All dependencies present" in out, out
     assert (d / "home" / ".local" / "bin" / "abs").exists(), "abs never got installed:\n" + out
 
@@ -179,6 +219,58 @@ def test_yes_does_not_also_say_yes_to_the_optional_extras(tmp_path):
     assert "Setting up voice" not in out and "voice setup" not in out.split("Optional")[0], out
     # the offer may be printed; what must not happen is it being taken
     assert "Downloading" not in out or "Kokoro" not in out, out
+
+
+def test_homebrew_is_given_the_terminal_so_sudo_can_ask(tmp_path):
+    """Reported 21 Oct from the first real Mac to run this:
+
+        ==> Checking for sudo access...
+        Insufficient permissions to install Homebrew to "/opt/homebrew".
+
+    The installer set NONINTERACTIVE, which makes Homebrew's own installer use
+    `sudo -n` — sudo that is forbidden to prompt. On a Mac whose password is not
+    already cached that aborts immediately, having never asked for it. We are
+    piped from curl so our stdin is the script, but the terminal is still on
+    /dev/tty; handing it over is what makes sudo work as it does everywhere else.
+
+    The stand-in installer here refuses exactly as the real one did, so this test
+    fails if the terminal is ever taken away again.
+    """
+    if not _which("script"):
+        pytest.skip("needs util-linux `script` to give the installer a real tty")
+    d = machine(tmp_path, osname="Darwin", have=("jq", "bun", "claude"))
+    (d / "brewtemplate").write_text(FAKE_BREW)
+    (d / "brewinstaller").write_text(FAKE_BREW_INSTALLER)
+    # `curl` in here is a symlink to the real one; writing would follow it
+    # straight to /usr/bin. Drop it first, then put ours in its place.
+    (d / "curl").unlink()
+    (d / "curl").write_text(FAKE_CURL)
+    (d / "curl").chmod(0o755)
+
+    env = {"PATH": str(d), "HOME": str(d / "home"), "SHELL": "/bin/zsh", "TERM": "dumb",
+           "PREFIX": str(d / "home" / ".local" / "bin"),
+           "ABS_HOME": str(d / "home" / ".abs"),
+           "FAKE_BIN": str(d), "FAKE_BREW_PATH": str(d / "brewtemplate"),
+           "FAKE_BREW_INSTALLER_PATH": str(d / "brewinstaller"),
+           "FAKE_ABS_SH": str(ABS_SH)}
+    envs = " ".join("%s=%s" % (k, v) for k, v in env.items())
+    # The installer must be PIPED, exactly as `curl … | bash` pipes it: its own
+    # stdin is then the script, not the terminal, and only /dev/tty is left. Run
+    # it with a tty on stdin instead and the bug cannot reproduce — the first
+    # version of this test made that mistake and passed against the broken code.
+    r = subprocess.run(
+        ["script", "-qec", "cat %s | env -i %s bash" % (INSTALL, envs), "/dev/null"],
+        input="y\n\n", capture_output=True, text=True, timeout=180)
+    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
+
+    assert "Insufficient permissions" not in out, \
+        "Homebrew was run without a terminal again — this is the reported bug:\n" + out
+    assert "FAKE HOMEBREW" in out, "the installer never reached Homebrew:\n" + out
+    assert "Homebrew 4.3.0" in out, "it did not confirm the brew it installed:\n" + out
+    # and the package it then asks brew for must be a formula, not an alias
+    assert "brew install python@3." in out, \
+        "a bare Mac must be offered the python formula, not the `python3` alias:\n" + out
+    assert (d / "home" / ".local" / "bin" / "abs").exists(), "abs never got installed:\n" + out
 
 
 def test_the_piped_form_installs_a_real_copy(tmp_path):

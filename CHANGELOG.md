@@ -55,6 +55,25 @@ ABS can install properly with all the dependencies?"
   dependencies you found without asking"; it must not also accept the voice setup,
   or an unattended install starts a multi-gigabyte model build nobody asked for.
 
+### Fixed after release, same day
+
+- **Homebrew is handed the terminal, not `NONINTERACTIVE`.** The first real Mac
+  to run this got `Insufficient permissions to install Homebrew to
+  "/opt/homebrew"` and stopped. `NONINTERACTIVE` makes Homebrew's own installer
+  use `sudo -n` — sudo that is forbidden to prompt — so on a Mac whose password
+  is not already cached it aborts without ever asking for it. We are piped from
+  curl, so our stdin is the script, but the terminal is still on `/dev/tty`;
+  handing that over makes sudo behave as it does everywhere else.
+- **The Python formula is named, not the alias.** A bare Mac was offered
+  `brew install python3`, which leans on an alias this script cannot verify
+  exists. It asks for `python@3.13` now.
+- **`PKG` is set before the package names are chosen.** A Mac about to get
+  Homebrew counts as having a package manager; it did not, which is how the
+  wrong package name was picked in the first place.
+- The regression test pipes the installer the way `curl` does. The first version
+  of it gave the installer a terminal on *stdin* and passed against the broken
+  code — a test that cannot fail is not a test.
+
 ### Changed
 
 - The installer reads as numbered steps — what the machine has, what needs

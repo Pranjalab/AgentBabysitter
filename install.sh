@@ -177,7 +177,13 @@ pkg_name() {
     python)
       case "$PKG" in
         pacman) printf 'python' ;;
-        *)      printf 'python3' ;;   # brew's `python3` is an alias for current
+        # Name the formula, not the alias. `brew install python3` relies on an
+        # alias whose existence is not something this script can check, and a
+        # wrong package name fails three steps into a run the operator has
+        # already said yes to. python@3.13 is a real formula and not keg-only,
+        # so it lands on PATH; the probe accepts any 3.11+ anyway.
+        brew)   printf 'python@3.13' ;;
+        *)      printf 'python3' ;;
       esac ;;
   esac
 }
@@ -293,6 +299,13 @@ fi
 # ---- the plan ---------------------------------------------------------------
 
 if [ -n "$need" ]; then
+  # A Mac that is about to get Homebrew HAS a package manager as far as
+  # everything below is concerned. This has to happen before pkg_name runs, or
+  # the package names are chosen for a platform with no manager at all — which
+  # is how a bare Mac ended up being offered `brew install python3` instead of
+  # the formula this script means.
+  [ "$need_brew" = "1" ] && PKG="brew"
+
   # Split into the ones a package manager owns and the ones that install
   # themselves into $HOME with no sudo.
   pkgs=""
@@ -324,7 +337,6 @@ if [ -n "$need" ]; then
   [ "$need_brew" = "1" ] && plan_line "Homebrew" \
     '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
   if [ -n "$pkgs" ]; then
-    if [ "$need_brew" = "1" ]; then PKG="brew"; fi   # the plan assumes step 1 worked
     # shellcheck disable=SC2086
     plan_line "$(echo $pkgs | sed 's/ / + /g')" "$(pkg_cmdline $pkgs)"
   fi
@@ -361,8 +373,8 @@ if [ -n "$need" ]; then
   info ""
 
   if [ "$need_brew" = "1" ]; then
-    info "    ${c_dim}Homebrew — the slow one. It asks for your password, and installs${c_reset}"
-    info "    ${c_dim}Apple's command line tools first if they are not there yet.${c_reset}"
+    info "    ${c_dim}Homebrew — the slow one. It will ask you to press RETURN and then for${c_reset}"
+    info "    ${c_dim}your password, and it installs Apple's command line tools if needed.${c_reset}"
     # To a file, not through $( ): a failed download makes the substitution empty,
     # `bash -c ""` then SUCCEEDS, and the next line blames PATH for a brew that was
     # never downloaded. Fetch it, check it is really a script, then run it.
@@ -371,9 +383,31 @@ if [ -n "$need" ]; then
       || { rm -f "$brew_sh"; die "Could not download Homebrew's installer. Get it from https://brew.sh"; }
     head -1 "$brew_sh" | grep -q '^#!' \
       || { rm -f "$brew_sh"; die "What came back from Homebrew is not a script — refusing to run it."; }
-    NONINTERACTIVE=1 /bin/bash "$brew_sh" >&2 \
-      || { rm -f "$brew_sh"; die "Homebrew's installer failed. Install it from https://brew.sh, then run this again."; }
+
+    # Hand it the terminal rather than setting NONINTERACTIVE.
+    #
+    # Reported 21 Oct, on the first real Mac to run this: NONINTERACTIVE makes
+    # Homebrew's installer use `sudo -n` — sudo that is forbidden to prompt — so
+    # on a Mac whose password is not already cached it aborts immediately with
+    # "Insufficient permissions to install Homebrew to /opt/homebrew", having
+    # never asked. We are piped from curl, so our own stdin is the script; the
+    # terminal is still there on /dev/tty. Given that, the installer is properly
+    # interactive and sudo asks for the password the way it does everywhere else.
+    brew_rc=0
+    if { exec 9<>/dev/tty; } 2>/dev/null; then
+      /bin/bash "$brew_sh" <&9 >&2 || brew_rc=$?
+      { exec 9<&-; } 2>/dev/null
+    else
+      rm -f "$brew_sh"
+      die "Homebrew needs a terminal to ask for your password on, and there is none here.
+  Install it yourself, then run this again:
+    /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+    fi
     rm -f "$brew_sh"
+    [ "$brew_rc" = "0" ] \
+      || die "Homebrew's installer did not finish (exit $brew_rc). If it asked for a key
+  and you pressed something other than RETURN, that is all this was — run the
+  installer again. Otherwise install Homebrew from https://brew.sh first."
     brew_onpath || die "Homebrew installed but brew is not on PATH. Open a new terminal and run this again."
     ok "Homebrew $(version_of brew)"
     PKG="brew"
