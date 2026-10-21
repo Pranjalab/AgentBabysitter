@@ -293,4 +293,8 @@ def test_the_installer_always_names_the_ref_it_installed():
     meant. What it can do is say which ref it used, every time, so the mistake is
     visible in one second instead of an hour."""
     text = open(os.path.join(REPO, "install.sh")).read()
-    assert '(from $ABS_REF)' in text, "the final line must name the ref"
+    # Either spelling. `${ABS_REF}` is the one to prefer — bash 3.2, which is what
+    # macOS ships, reads a multibyte character directly after an unbraced $var as
+    # part of the variable NAME, and that has broken a Mac install before.
+    import re as _re
+    assert _re.search(r"\(from \$\{?ABS_REF\}?\)", text), "the final line must name the ref"

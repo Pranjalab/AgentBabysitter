@@ -25,6 +25,76 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot see the host home or projects. Checked on 17 Aug on a throwaway box, with a
   control check on a normal sandbox returning creds-present so the test can fail.
 
+## [3.7.6] — 2026-10-21 — one pass, one question, everything installed
+
+Reported from a brand-new Mac: "Python was not installed and Claude Code was not
+installed so it needed to do all this. Can you think of a proper method so that
+ABS can install properly with all the dependencies?"
+
+### Fixed
+
+- **The installer no longer meets the gaps one at a time.** It offered Bun, then
+  offered Claude Code, then stopped dead at jq with `sudo apt install jq (or: brew
+  install jq)` — wrong twice on a fresh Mac, where there is no apt and no brew
+  either until you install it. Python 3.11+ was never checked at all, so it
+  surfaced later still, when `abs src install` wanted it for the daemon. Three
+  stops, three re-runs, and advice written for somebody else's operating system.
+
+  It is one pass now: look at the machine, print **everything** missing in a single
+  list with the command for *this* platform, ask **once**, install all of it, then
+  re-verify every dependency before saying it is done. On a Mac with no package
+  manager, Homebrew is step 1 — because `brew install jq` is not advice you can
+  follow, and naming it afterwards is the same dead end a sentence later.
+
+- **`abs` gave Mac users apt commands at runtime too.** `need_deps` and the
+  `abs src install` Python error both hardcoded `sudo apt install`. New `_pkg_hint`
+  names what actually installs a package here: brew, apt, dnf, pacman or apk — or
+  admits it does not know, rather than inventing a command.
+
+- **`--yes` no longer answers the optional offers.** It means "install the
+  dependencies you found without asking"; it must not also accept the voice setup,
+  or an unattended install starts a multi-gigabyte model build nobody asked for.
+
+### Changed
+
+- The installer reads as numbered steps — what the machine has, what needs
+  installing, installing, abs, the v3 source, the optional extras, ready — with the
+  numbers counted rather than written down, since most runs skip half of them.
+- The always-on daemon is now offered to a `curl | bash` install as well, not only
+  to a git checkout: `abs src install` has put the source in `~/.abs/src` by that
+  point, which is all the unit needs.
+- Voice is not offered again once it is built. Re-running the installer to pick up
+  a new version no longer re-asks questions you have already answered.
+- `install.sh --help`, `--yes` and `--no-deps` exist and are documented.
+- Uninstall instructions: `docs/UNINSTALL.md`.
+
+## [3.7.5] — 2026-10-01 — `abs exit` waits, and says only what is true
+
+Reported after an afternoon of running two bots: "the other Claude session had a
+shell and an agent running in the background. Because of this it was not closing
+properly and I was not able to get it back. I had to close everything forcefully."
+
+### Fixed
+
+- **`abs exit` no longer reports success for a session that is still running.** It
+  sent SIGTERM, printed a tick, and deleted `session.pid` — without once checking
+  whether the process had gone. Two things went wrong together, and the second is
+  what made it unrecoverable: it claimed to have worked, *and* threw away the pid,
+  so there was nothing left to run `abs exit` against a second time. Reclaiming the
+  bot or killing things by hand were the only routes left, which is what the
+  operator did. It now signals, waits up to 8s, and says what actually happened. A
+  session still running keeps its `session.pid` so the command can be run again.
+- **It names what is holding the session open.** A background agent or an open
+  shell keeps Claude Code waiting, and the whole process tree underneath the
+  session is now listed — pid, command, age — instead of leaving the operator to
+  guess at the reason.
+- **`abs exit --force`** escalates to SIGKILL on the process group, after the same
+  wait. Never automatic: a Claude Code session mid-task has work to lose, and
+  escalating on its behalf is not ABS's call. A test asserts plain `abs exit` never
+  kills anything.
+- A deliberate "still running" no longer prints `✗ Unexpected failure` underneath
+  itself — a bare `return 1` from a dispatched command trips the ERR trap.
+
 ## [3.7.4] — 2026-10-01 — two bots, said and seen the right way round
 
 Reported within the hour of 3.7.2 landing, about the message 3.7.2 itself added.

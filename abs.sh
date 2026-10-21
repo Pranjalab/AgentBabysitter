@@ -47,7 +47,7 @@ readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 # The single source of truth for the version. The repo-root VERSION file and
 # pyproject.toml mirror this; the daily update check compares it against the
 # VERSION file on main. Bump per SemVer: PATCH=fixes, MINOR=features, MAJOR=break.
-readonly ABS_VERSION="3.7.4"
+readonly ABS_VERSION="3.7.6"
 
 readonly PLUGIN_ID="telegram@claude-plugins-official"
 readonly PAIR_TIMEOUT=300
@@ -751,6 +751,26 @@ pick_profile() {
 
 # --- preflight ---------------------------------------------------------------
 
+# What installs a package on THIS machine. Reported 21 Oct from a new Mac: the
+# runtime check told the operator "sudo apt install jq", which is advice for a
+# different operating system — and "brew install jq" is no better on a Mac that
+# has no Homebrew yet. Name the right thing, including Homebrew when that is
+# genuinely the first step.
+_pkg_hint() {
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      if command -v brew >/dev/null 2>&1; then printf 'brew install %s' "$1"
+      else printf 'install Homebrew first (brew.sh), then: brew install %s' "$1"; fi ;;
+    Linux)
+      if   command -v apt    >/dev/null 2>&1; then printf 'sudo apt install %s' "$1"
+      elif command -v dnf    >/dev/null 2>&1; then printf 'sudo dnf install %s' "$1"
+      elif command -v pacman >/dev/null 2>&1; then printf 'sudo pacman -S %s' "$1"
+      elif command -v apk    >/dev/null 2>&1; then printf 'sudo apk add %s' "$1"
+      else printf 'install %s with your package manager' "$1"; fi ;;
+    *) printf 'install %s with your package manager' "$1" ;;
+  esac
+}
+
 need_deps() {
   local missing=()
   for c in claude curl jq bun; do
@@ -762,8 +782,8 @@ need_deps() {
       case "$m" in
         bun)    echo "  bun    → curl -fsSL https://bun.sh/install | bash   (the plugin's MCP server runs on Bun)" >&2 ;;
         claude) echo "  claude → https://claude.com/claude-code" >&2 ;;
-        jq)     echo "  jq     → sudo apt install jq" >&2 ;;
-        curl)   echo "  curl   → sudo apt install curl" >&2 ;;
+        jq)     echo "  jq     → $(_pkg_hint jq)" >&2 ;;
+        curl)   echo "  curl   → $(_pkg_hint curl)" >&2 ;;
       esac
     done
     exit 1
@@ -2159,20 +2179,94 @@ cmd_on() {
 
 # `abs exit` — end the running Claude Code session (the ABS EXIT kill-ladder rung).
 # cmd_run records the session's PID before it execs claude; we signal it here.
+# What is still running underneath a session that will not close — the thing the
+# operator needs to see, because it is the reason. One line per child, deepest
+# first, so a background agent or an open shell is named rather than guessed at.
+_session_children() {
+  local pid="$1" kids
+  kids="$(pgrep -P "$pid" 2>/dev/null || true)"
+  [ -n "$kids" ] || return 0
+  local k
+  for k in $kids; do
+    ps -o pid=,comm=,etime= -p "$k" 2>/dev/null | sed 's/^ *//' || true
+    _session_children "$k"
+  done
+}
+
+# End the session on this profile.
+#
+# Reported 1 Oct: "the other Claude session had a shell and an agent running in
+# the background … it was not closing properly and I was not able to get it back.
+# I had to close everything forcefully."
+#
+# The old version sent SIGTERM, printed a tick, and deleted session.pid — all
+# without once checking whether the process had actually gone. When something
+# underneath held the session open, the operator was told it had worked AND lost
+# the pid he would have needed to try again, which left reclaiming the bot or
+# killing things by hand as the only ways out. Both of those are what he did.
+#
+# So: signal, then WAIT, and only claim what is true. A session that is still
+# there keeps its session.pid, gets its children named, and is handed the two real
+# options. SIGKILL is never automatic — Claude Code mid-task has work to lose.
 cmd_exit() {
   require_setup
+  local force=0
+  case "${1:-}" in -f|--force) force=1 ;; esac
+
   local pid; pid="$(cat "$ABS_DIR/session.pid" 2>/dev/null)"
   case "$pid" in ''|*[!0-9]*) die "No running session recorded for '$PROFILE'." ;; esac
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null && ok "Session ($pid) signalled to exit — restart with 'abs' from the terminal." \
-      || die "Could not signal session $pid."
-    rm -f "$ABS_DIR/session.pid" 2>/dev/null || true
-    state_set 'del(.session_away)' 2>/dev/null || true
-  else
+
+  if poller_gone "$pid"; then
     rm -f "$ABS_DIR/session.pid" 2>/dev/null || true
     state_set 'del(.session_away)' 2>/dev/null || true
     die "No live session (PID $pid is gone)."
   fi
+
+  kill -TERM "$pid" 2>/dev/null || die "Could not signal session $pid."
+  info "${c_dim}Asked session $pid to exit…${c_reset}"
+
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    poller_gone "$pid" && {
+      rm -f "$ABS_DIR/session.pid" 2>/dev/null || true
+      state_set 'del(.session_away)' 2>/dev/null || true
+      ok "Session $pid has exited. The bot is free — restart with 'abs'."
+      return 0
+    }
+    sleep 0.5
+  done
+
+  if [ "$force" = 1 ]; then
+    warn "Still there after 8s — forcing it, as asked."
+    kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    for i in 1 2 3 4 5 6; do
+      poller_gone "$pid" && {
+        rm -f "$ABS_DIR/session.pid" 2>/dev/null || true
+        state_set 'del(.session_away)' 2>/dev/null || true
+        ok "Session $pid killed. The bot is free."
+        return 0
+      }
+      sleep 0.5
+    done
+    die "PID $pid survived SIGKILL. End it by hand:  kill -9 -$pid"
+  fi
+
+  # Still alive, and session.pid is deliberately LEFT in place so this can be run
+  # again — losing it was half of what made the reported case unrecoverable.
+  warn "Session $pid is still running after 8s."
+  local kids; kids="$(_session_children "$pid")"
+  if [ -n "$kids" ]; then
+    info "  Something underneath is holding it open:"
+    printf '%s\n' "$kids" | sed 's/^/      /' >&2
+    info "  ${c_dim}A background agent or an open shell will do this — Claude Code waits for it.${c_reset}"
+  fi
+  info ""
+  info "  Give it a moment and run this again, or:"
+  info "    ${c_bold}abs --profile $PROFILE exit --force${c_reset}   ${c_dim}end it and everything under it${c_reset}"
+  info "    ${c_bold}abs --reclaim --profile $PROFILE${c_reset}      ${c_dim}take the bot back, leave the session${c_reset}"
+  # exit, not return: a bare `return 1` from a dispatched command trips the ERR
+  # trap, printing "Unexpected failure" underneath a message that is doing its job.
+  exit 1
 }
 
 cmd_quiet() {
@@ -7149,7 +7243,11 @@ cmd_src() {
   local candidates
   candidates="$(_src_pythons)"
   [ -n "$candidates" ] || die "abs src install needs Python 3.11 or newer on PATH.
-  The daemon is asyncio and uses 3.11 syntax; an older one fails at import."
+  The daemon is asyncio and uses 3.11 syntax; an older one fails at import.
+  Get it with:  $(case "$(uname -s 2>/dev/null)" in
+      Darwin) _pkg_hint 'python@3.12' ;;
+      *)      _pkg_hint python3 ;;
+    esac)"
 
   info "${c_bold}Installing the v3 source${c_reset} — the daemon, sandboxes and the start menu."
   info "${c_dim}Target: $root${c_reset}"
@@ -7865,7 +7963,7 @@ ${c_bold}Agent Babysitter${c_reset} — remote control for Claude Code, over Tel
   ${c_bold}abs${c_reset} quiet on|off        Mute/unmute proactive reports (inbound keeps working)
   ${c_bold}abs${c_reset} off                 Hard off: drop ALL inbound + outbound Telegram
   ${c_bold}abs${c_reset} on                  Re-enable inbound Telegram
-  ${c_bold}abs${c_reset} exit                End the running session (restart with 'abs')
+  ${c_bold}abs${c_reset} exit                End the running session; --force if something under it holds on
 
   ${c_dim}From Telegram, send any of these as a whole message (hook-enforced):${c_reset}
   ${c_dim}  ABS MUTE / ABS UNMUTE · ABS OFF · ABS STOP · ABS EXIT · ABS BLOCK${c_reset}
@@ -8105,7 +8203,7 @@ main() {
     on)        cmd_on ;;
     update)    cmd_update || exit $? ;;
     doctor)    cmd_doctor ;;
-    exit)      cmd_exit ;;
+    exit)      shift; cmd_exit "$@" ;;
     reset)     cmd_reset ;;
     # Anything else is a flag for claude itself: `abs --model opus`
     -*)        cmd_run "$@" ;;

@@ -55,18 +55,27 @@ curl -fsSL https://agentbabysitter.com/install.sh | bash
 abs
 ```
 
-It asks nothing. An installer should install, not interview — so it puts `abs` on
-your PATH and then fetches the v3 source (the daemon, sandboxes, `ABS START` from
-the phone) into `~/.abs/src` and builds its venv there. No git, no clone, no
-question.
+It asks one question. It looks at the machine first, prints everything missing in
+a single list with the command for *your* platform — Homebrew, jq, Python, Bun,
+Claude Code — and installs all of it once you say yes. Nothing is run before you
+answer, and a machine that already has them is never asked at all.
 
-That step needs Python 3.11 or newer. Where there isn't one, the install still
-succeeds and you get the complete 2.x feature set — pairing, voice, reports, the
-kill ladder — with a line telling you what is missing. Add it later with:
+Then it puts `abs` on your PATH and fetches the v3 source (the daemon, sandboxes,
+`ABS START` from the phone) into `~/.abs/src`, builds its venv, and offers the
+always-on daemon and voice. No git, no clone.
 
 ```sh
-abs src install     # and `abs src status` to see where it is
+curl -fsSL https://agentbabysitter.com/install.sh | bash -s -- --yes   # don't ask
+curl -fsSL https://agentbabysitter.com/install.sh | bash -s -- --no-deps   # just tell me
 ```
+
+The v3 layer needs Python 3.11 or newer. Where there still isn't one, the install
+succeeds anyway and you get the complete 2.x feature set — pairing, voice,
+reports, the kill ladder — with a line saying what is missing. Add it later with
+`abs src install`, and `abs src status` to see where it got to.
+
+Uninstalling is [three commands](docs/UNINSTALL.md), all of them in your home
+directory.
 
 Piping to `bash` is your call to make — [read it first](https://agentbabysitter.com/install.sh)
 if you'd rather. Or clone it yourself and run the same script:
@@ -94,8 +103,10 @@ install.
 After setup it's just `abs`, from whatever project you're in. Setup is once per
 bot, not once per project.
 
-> **Prerequisites:** `claude`, `bun`, `jq`, `curl`. The installer checks for them
-> and tells you what's missing rather than installing anything behind your back.
+> **Prerequisites:** `claude`, `bun`, `jq`, `curl`, and Python 3.11+ for the v3
+> layer. The installer finds all of them in one pass, shows you the exact commands
+> it would run, and installs them only after you agree — on a Mac with no package
+> manager, that list starts with Homebrew.
 
 ## 🧩 Features
 

@@ -1,0 +1,291 @@
+"""Installing on a machine that has nothing yet.
+
+Reported 21 Oct, from a new Mac:
+
+    I am installing the ABS on my new Mac and Python was not installed and
+    Claude Code was not installed so it needed to do all this. Can you think of
+    a proper method so that ABS can install properly with all the dependencies?
+
+The installer met those one at a time: offer Bun, offer Claude Code, then stop
+dead at jq with "sudo apt install jq (or: brew install jq)". On a fresh Mac that
+is wrong twice — apt does not exist, and neither does brew until you install it.
+Python was never checked at all, so it surfaced later still, when `abs src
+install` wanted 3.11+ for the daemon. Three stops, three re-runs, and advice
+written for somebody else's operating system.
+
+It is one pass now: look at the machine, print everything missing in a single
+list with the command for THIS platform, ask once, install all of it, re-verify.
+
+These tests stand the installer on platforms this machine is not, with a fake
+`uname` and a PATH holding only the basics. Two of them go further and let it
+actually install, against a `brew` that produces what it claims to.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+INSTALL = REPO / "install.sh"
+ABS_SH = REPO / "abs.sh"
+
+# The basics the installer needs before it can get as far as the scan.
+TOOLS = ["bash", "sh", "cat", "sed", "grep", "awk", "mktemp", "mv", "cp", "chmod",
+         "ln", "tr", "head", "tail", "cut", "curl", "rm", "dirname", "basename",
+         "id", "install", "readlink", "expr", "mkdir", "ls", "env"]
+
+UNAME = '#!/bin/sh\ncase "$1" in -s) echo %s ;; -m) echo %s ;; *) echo %s ;; esac\n'
+STUB = '#!/bin/sh\ncase "$1" in *version*) echo "9.9.9" ;; esac\nexit 0\n'
+
+# A brew that writes the binaries a real one would, so the install path can run
+# to the end without a package manager or the network.
+FAKE_BREW = """#!/bin/sh
+d="$(dirname "$0")"
+case "$1" in
+  --version) echo "Homebrew 4.3.0"; exit 0 ;;
+  shellenv)  echo "export PATH=\\"$d:\\$PATH\\""; exit 0 ;;
+  install)   shift
+             for p in "$@"; do
+               case "$p" in
+                 jq)      printf '#!/bin/sh\\ncase "$1" in --version) echo "jq-1.7.1" ;; esac\\nexit 0\\n' > "$d/jq"; chmod +x "$d/jq" ;;
+                 python3) printf '#!/bin/sh\\necho 3.12\\nexit 0\\n' > "$d/python3"; chmod +x "$d/python3" ;;
+               esac
+             done
+             exit 0 ;;
+esac
+exit 0
+"""
+
+
+def machine(tmp_path, *, osname: str, arch: str = "arm64", have=(), brew=False) -> Path:
+    """A PATH with only the basics, a fake `uname`, and whatever `have` says is
+    already installed. `brew` swaps in the one that really installs things."""
+    d = tmp_path / ("bin-" + osname + "-" + "-".join(have or ("none",)) + ("-fb" if brew else ""))
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "uname").write_text(UNAME % (osname, arch, osname))
+    (d / "uname").chmod(0o755)
+    for t in TOOLS:
+        src = _which(t)
+        if src and not (d / t).exists():
+            (d / t).symlink_to(src)
+    for t in have:
+        p = d / t
+        p.write_text(FAKE_BREW if (brew and t == "brew") else STUB)
+        p.chmod(0o755)
+    (d / "home").mkdir(exist_ok=True)
+    return d
+
+
+def _which(t):
+    for root in ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin"):
+        c = Path(root) / t
+        if c.exists():
+            return str(c)
+    return None
+
+
+def run(d: Path, *args, env=None) -> str:
+    """Run the installer against that machine. No tty, so the consent prompt
+    cannot be answered — which is itself one of the paths worth testing."""
+    e = {"PATH": str(d), "HOME": str(d / "home"), "SHELL": "/bin/zsh", "TERM": "dumb",
+         "PREFIX": str(d / "home" / ".local" / "bin"), "ABS_HOME": str(d / "home" / ".abs")}
+    e.update(env or {})
+    r = subprocess.run(["bash", str(INSTALL), *args], capture_output=True, text=True,
+                       timeout=120, env=e)
+    return re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
+
+
+# ---- the reported machine -------------------------------------------------------------
+
+
+def test_everything_missing_is_reported_in_one_pass(tmp_path):
+    """One stop, not three. This is the whole point of the change."""
+    out = run(machine(tmp_path, osname="Darwin"))
+    scan = out.split("What needs installing")[0]
+    for dep in ("jq", "python", "bun", "claude"):
+        assert dep in scan, f"{dep} missing from the scan:\n{out}"
+    # and it must not have begun installing anything before saying all of it
+    assert out.count("What needs installing") == 1, out
+    assert "Installing\n" not in out, "it started installing without consent:\n" + out
+
+
+def test_a_bare_mac_is_told_about_homebrew_first(tmp_path):
+    """`brew install jq` is not advice you can follow on a Mac with no brew."""
+    out = run(machine(tmp_path, osname="Darwin"))
+    assert "Homebrew" in out, out
+    assert "brew.sh" in out or "Homebrew/install" in out, out
+    assert out.index("Homebrew") < out.index("brew install jq"), out
+
+
+def test_python_is_checked_before_install_not_after(tmp_path):
+    """It used to surface only at `abs src install`, long after this script had
+    finished and said it was done. Now it is in the scan AND in the plan, with a
+    command — on a Mac, the brew one."""
+    out = run(machine(tmp_path, osname="Darwin", have=("brew",)))
+    scan, _, plan = out.partition("What needs installing")
+    assert re.search(r"^\s+\S\s+python\s", scan, re.M), "not in the scan:\n" + out
+    assert "brew install jq python3" in plan, "no command to run:\n" + out
+    assert "3.11" in scan, "the version it needs is never stated:\n" + out
+
+
+def test_a_mac_that_has_brew_is_not_told_to_install_it(tmp_path):
+    out = run(machine(tmp_path, osname="Darwin", have=("brew",)))
+    assert "brew install jq" in out, out
+    assert "macOS has no package manager" not in out, out
+
+
+def test_nothing_is_installed_before_the_plan_is_shown(tmp_path):
+    out = run(machine(tmp_path, osname="Darwin", have=("brew",)))
+    assert "Nothing below is run until you say so" in out, out
+
+
+def test_no_tty_and_no_yes_installs_nothing(tmp_path):
+    """Piped to bash in CI there is nobody to consent, and a surprise install is
+    the one thing a script fetched over the network must not do."""
+    out = run(machine(tmp_path, osname="Darwin", have=("brew",)))
+    assert "Stopping rather than installing software you did not agree to" in out, out
+    assert "fake brew installing" not in out
+
+
+def test_no_deps_reports_and_stops(tmp_path):
+    out = run(machine(tmp_path, osname="Darwin", have=("brew",)), "--no-deps")
+    assert "brew install jq" in out, out
+    assert "nothing installed" in out.lower(), out
+
+
+# ---- and then it actually installs ----------------------------------------------------
+
+
+def test_yes_installs_the_missing_packages_and_verifies_them(tmp_path):
+    """The branch the dry runs never reach: consent, install, re-probe."""
+    d = machine(tmp_path, osname="Darwin", have=("brew", "bun", "claude"), brew=True)
+    out = run(d, "--yes")
+    assert "jq 1.7.1" in out, "the installed jq was never confirmed:\n" + out
+    assert "python 3.12" in out, "the installed python was never confirmed:\n" + out
+    assert "All dependencies present" in out, out
+    assert (d / "home" / ".local" / "bin" / "abs").exists(), "abs never got installed:\n" + out
+
+
+def test_yes_does_not_also_say_yes_to_the_optional_extras(tmp_path):
+    """`--yes` means "install the dependencies you found". If it also answered the
+    voice offer, an unattended install would start a multi-gigabyte model build."""
+    d = machine(tmp_path, osname="Darwin", have=("brew", "bun", "claude"), brew=True)
+    out = run(d, "--yes")
+    assert "Setting up voice" not in out and "voice setup" not in out.split("Optional")[0], out
+    # the offer may be printed; what must not happen is it being taken
+    assert "Downloading" not in out or "Kokoro" not in out, out
+
+
+def test_the_piped_form_installs_a_real_copy(tmp_path):
+    """`curl … | bash` is the install everyone actually uses, and it is the one
+    where BASH_SOURCE is an empty array — which under `set -u` once collapsed to
+    `cd ""`, leaving the installer in the CALLER's directory where a stray abs.sh
+    would be picked up instead of the real one. ABS_REPO over file:// keeps the
+    network out of it."""
+    d = machine(tmp_path, osname="Darwin", have=("brew", "bun", "claude", "jq", "tar"))
+    (d / "python3").write_text("#!/bin/sh\necho 3.12\nexit 0\n")
+    (d / "python3").chmod(0o755)
+    (d / "jq").write_text('#!/bin/sh\ncase "$1" in --version) echo "1.7.1" ;; esac\nexit 0\n')
+    (d / "jq").chmod(0o755)
+    prefix = d / "home" / ".local" / "bin"
+    r = subprocess.run(["bash"], input=INSTALL.read_text(), capture_output=True, text=True,
+                       timeout=180,
+                       env={"PATH": str(d), "HOME": str(d / "home"), "SHELL": "/bin/zsh",
+                            "TERM": "dumb", "PREFIX": str(prefix),
+                            "ABS_HOME": str(d / "home" / ".abs"),
+                            "ABS_REPO": "file://" + str(REPO)})
+    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
+    abs_cmd = prefix / "abs"
+    assert abs_cmd.is_file() and not abs_cmd.is_symlink(), \
+        "the piped install must leave a real copy, not a link:\n" + out
+    assert "readonly ABS_VERSION=" in abs_cmd.read_text(), "that is not abs.sh:\n" + out
+    assert subprocess.run(["bash", "-n", str(abs_cmd)]).returncode == 0, "it does not parse"
+    # and the v3 source failing over a fake python must not take the install down
+    assert "Ready" in out, out
+    assert "brew install python@3.12" in out, \
+        "the runtime hint gave a Mac the wrong platform's command:\n" + out
+
+
+def test_the_steps_are_numbered_without_gaps(tmp_path):
+    """Half these sections are skipped on a machine that is already set up, and a
+    run that reads "1 · … 4 · … 6 · …" looks like something went wrong."""
+    d = machine(tmp_path, osname="Darwin", have=("brew", "bun", "claude"), brew=True)
+    nums = [int(m) for m in re.findall(r"^  (\d+) · ", run(d, "--yes"), re.M)]
+    assert nums, "no steps printed at all"
+    assert nums == list(range(1, len(nums) + 1)), f"gaps in the step numbers: {nums}"
+
+
+# ---- the platforms it is not -----------------------------------------------------------
+
+
+def test_a_linux_box_is_not_told_to_use_brew(tmp_path):
+    out = run(machine(tmp_path, osname="Linux", arch="x86_64", have=("apt-get",)))
+    assert "brew" not in out.lower(), "wrong operating system's advice:\n" + out
+    assert "apt-get install -y jq" in out, out
+
+
+def test_an_unknown_platform_admits_it_rather_than_guessing(tmp_path):
+    out = run(machine(tmp_path, osname="FreeBSD"))
+    assert "No package manager found" in out, out
+    for wrong in ("sudo apt", "brew install"):
+        assert wrong not in out, f"invented {wrong!r} for an unknown platform:\n{out}"
+
+
+@pytest.mark.parametrize("mgr,expect", [
+    ("apt-get", "sudo apt-get install -y jq"),
+    ("dnf",     "sudo dnf install -y jq"),
+    ("pacman",  "sudo pacman -S --needed --noconfirm jq"),
+    ("apk",     "sudo apk add jq"),
+    ("zypper",  "sudo zypper install -y jq"),
+])
+def test_each_linux_package_manager_gets_its_own_command(tmp_path, mgr, expect):
+    out = run(machine(tmp_path, osname="Linux", arch="x86_64", have=(mgr,)))
+    assert expect in out, f"{mgr} → \n{out}"
+
+
+# ---- and the same at runtime -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("osname,have,expect,forbid", [
+    ("Darwin", (),          "Homebrew",            "sudo apt"),
+    ("Darwin", ("brew",),   "brew install jq",     "sudo apt"),
+    ("Linux",  ("apt",),    "sudo apt install jq", "brew"),
+    ("Linux",  ("dnf",),    "sudo dnf install jq", "apt"),
+    ("Linux",  ("pacman",), "sudo pacman -S jq",   "apt"),
+])
+def test_pkg_hint_names_the_right_command(tmp_path, osname, have, expect, forbid):
+    """`abs` told a Mac user `sudo apt install jq` at runtime, too."""
+    fn = re.search(r"^_pkg_hint\(\) \{.*?^\}", ABS_SH.read_text(), re.S | re.M)
+    assert fn, "_pkg_hint moved"
+    script = tmp_path / ("hint-%s-%s.sh" % (osname, "-".join(have or ("none",))))
+    script.write_text(fn.group(0) + "\n_pkg_hint jq\n")
+    d = machine(tmp_path, osname=osname, have=have)
+    out = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                         env={"PATH": str(d)}).stdout
+    assert expect in out, f"{osname} {have} → {out!r}"
+    assert forbid not in out, f"{osname} {have} → {out!r}"
+
+
+def test_the_installer_no_longer_hardcodes_apt_for_jq():
+    """The exact string from the report."""
+    assert 'jq → ${c_bold}sudo apt install jq' not in INSTALL.read_text()
+
+
+def test_it_parses_on_the_bash_macos_actually_ships():
+    """bash 3.2. A multibyte character directly after an unbraced $var is read as
+    part of the variable NAME there, which has broken a Mac install before."""
+    r = subprocess.run(["bash", "-n", str(INSTALL)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    if not _which("docker"):
+        pytest.skip("no docker to check bash 3.2 with")
+    r = subprocess.run(["docker", "run", "--rm", "-v", f"{REPO}:/w:ro",
+                        "bash:3.2", "bash", "-n", "/w/install.sh"],
+                       capture_output=True, text=True, timeout=120)
+    if "Unable to find image" in r.stderr or r.returncode == 125:
+        pytest.skip("bash:3.2 image not available")
+    assert r.returncode == 0, r.stdout + r.stderr
